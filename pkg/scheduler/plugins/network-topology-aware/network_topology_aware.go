@@ -45,18 +45,18 @@ const (
 	HyperNodeBinPackResources = "hypernode.binpack.resources"
 	// HyperNodeBinPackResourcesPrefix is the key prefix for additional resource key name
 	HyperNodeBinPackResourcesPrefix = HyperNodeBinPackResources + "."
+	// HyperNodeBinPackNormalPodEnable is the key for whether to enable hypernode-level binpacking for pods without network topology
+	HyperNodeBinPackNormalPodEnable = "hypernode.binpack.normal-pod.enable"
+	// HyperNodeBinPackNormalPodFading is the key for tier weight fading parameter for pods without network topology
+	HyperNodeBinPackNormalPodFading = "hypernode.binpack.normal-pod.fading"
 )
 
 type networkTopologyAwarePlugin struct {
 	// Arguments given for the plugin
 	pluginArguments framework.Arguments
 	weight          *priorityWeight
+	*normalPodConfig
 	*hyperNodesTier
-}
-
-type hyperNodesTier struct {
-	maxTier int
-	minTier int
 }
 
 type priorityWeight struct {
@@ -64,6 +64,16 @@ type priorityWeight struct {
 	HyperNodeBinPackingCPU       int
 	HyperNodeBinPackingMemory    int
 	HyperNodeBinPackingResources map[v1.ResourceName]int
+}
+
+type normalPodConfig struct {
+	HyperNodeBinPackingEnable bool
+	HyperNodeBinPackingFading float64
+}
+
+type hyperNodesTier struct {
+	maxTier int
+	minTier int
 }
 
 func (h *hyperNodesTier) init(hyperNodesSetByTier []int) {
@@ -74,33 +84,39 @@ func (h *hyperNodesTier) init(hyperNodesSetByTier []int) {
 	h.maxTier = hyperNodesSetByTier[len(hyperNodesSetByTier)-1]
 }
 
+/*
+   The arguments of the networktopologyaware plugin can refer to the following configuration:
+   tiers:
+   - plugins:
+     - name: network-topology-aware
+       arguments:
+         weight: 10
+         hypernode.binpack.cpu: 5
+         hypernode.binpack.memory: 1
+         hypernode.binpack.resources: nvidia.com/gpu, example.com/foo
+         hypernode.binpack.resources.nvidia.com/gpu: 2
+         hypernode.binpack.resources.example.com/foo: 3
+         hypernode.binpack.normal-pod.enable: true
+         hypernode.binpack.normal-pod.fading: 0.8
+*/
+
 // New function returns prioritizePlugin object
 func New(arguments framework.Arguments) framework.Plugin {
-	return &networkTopologyAwarePlugin{
+	plugin := networkTopologyAwarePlugin{
 		pluginArguments: arguments,
+		weight:          getPriorityWeight(arguments),
+		normalPodConfig: getNormalPodConfig(arguments),
 		hyperNodesTier:  &hyperNodesTier{},
-		weight:          calculateWeight(arguments),
 	}
+	klog.V(5).InfoS("successful to build plugin", "name", PluginName, "arguments", plugin.String())
+	return &plugin
 }
 
 func (nta *networkTopologyAwarePlugin) Name() string {
 	return PluginName
 }
 
-func calculateWeight(args framework.Arguments) *priorityWeight {
-	/*
-	   The arguments of the networktopologyaware plugin can refer to the following configuration:
-	   tiers:
-	   - plugins:
-	     - name: network-topology-aware
-	       arguments:
-	         weight: 10
-	         hypernode.binpack.cpu: 5
-	         hypernode.binpack.memory: 1
-	         hypernode.binpack.resources: nvidia.com/gpu, example.com/foo
-	         hypernode.binpack.resources.nvidia.com/gpu: 2
-	         hypernode.binpack.resources.example.com/foo: 3
-	*/
+func getPriorityWeight(args framework.Arguments) *priorityWeight {
 	// Values are initialized to 1.
 	weight := priorityWeight{
 		GlobalWeight:                 1,
@@ -144,10 +160,21 @@ func calculateWeight(args framework.Arguments) *priorityWeight {
 		weight.HyperNodeBinPackingResources[v1.ResourceName(resource)] = resourceWeight
 	}
 
-	weight.HyperNodeBinPackingResources[v1.ResourceCPU] = weight.HyperNodeBinPackingCPU
-	weight.HyperNodeBinPackingResources[v1.ResourceMemory] = weight.HyperNodeBinPackingMemory
-
 	return &weight
+}
+
+func getNormalPodConfig(args framework.Arguments) *normalPodConfig {
+	// default values are true and 0.8
+	config := normalPodConfig{
+		HyperNodeBinPackingEnable: true,
+		HyperNodeBinPackingFading: 0.8,
+	}
+	args.GetBool(&config.HyperNodeBinPackingEnable, HyperNodeBinPackNormalPodEnable)
+	args.GetFloat64(&config.HyperNodeBinPackingFading, HyperNodeBinPackNormalPodFading)
+	if config.HyperNodeBinPackingFading < 0 {
+		config.HyperNodeBinPackingFading = 0.8
+	}
+	return &config
 }
 
 func (w *priorityWeight) getBinPackWeight(name v1.ResourceName) (int, bool) {
@@ -162,27 +189,30 @@ func (w *priorityWeight) getBinPackWeight(name v1.ResourceName) (int, bool) {
 	}
 }
 
-func (w *priorityWeight) String() string {
-	length := 3
-	if extendLength := len(w.HyperNodeBinPackingResources); extendLength == 0 {
+func (n *networkTopologyAwarePlugin) String() string {
+	length := 5
+	if extendLength := len(n.weight.HyperNodeBinPackingResources); extendLength == 0 {
 		length++
 	} else {
 		length += extendLength
 	}
 	msg := make([]string, 0, length)
 	msg = append(msg,
-		fmt.Sprintf("%s[%d]", NetworkTopologyWeight, w.GlobalWeight),
-		fmt.Sprintf("%s[%d]", HyperNodeBinPackCPU, w.HyperNodeBinPackingCPU),
-		fmt.Sprintf("%s[%d]", HyperNodeBinPackMemory, w.HyperNodeBinPackingMemory),
+		fmt.Sprintf("%s[%d]", NetworkTopologyWeight, n.weight.GlobalWeight),
+		fmt.Sprintf("%s[%d]", HyperNodeBinPackCPU, n.weight.HyperNodeBinPackingCPU),
+		fmt.Sprintf("%s[%d]", HyperNodeBinPackMemory, n.weight.HyperNodeBinPackingMemory),
 	)
 
-	if len(w.HyperNodeBinPackingResources) == 0 {
-		msg = append(msg, "no extend resources.")
+	if len(n.weight.HyperNodeBinPackingResources) == 0 {
+		msg = append(msg, "no extend resources")
 	} else {
-		for name, weight := range w.HyperNodeBinPackingResources {
+		for name, weight := range n.weight.HyperNodeBinPackingResources {
 			msg = append(msg, fmt.Sprintf("%s[%d]", name, weight))
 		}
 	}
+	msg = append(msg, fmt.Sprintf("%s[%t]", HyperNodeBinPackNormalPodEnable, n.normalPodConfig.HyperNodeBinPackingEnable),
+		fmt.Sprintf("%s[%f]", HyperNodeBinPackNormalPodFading, n.normalPodConfig.HyperNodeBinPackingFading))
+
 	return strings.Join(msg, ", ")
 }
 
