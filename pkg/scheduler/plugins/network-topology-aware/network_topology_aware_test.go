@@ -72,7 +72,7 @@ func TestArguments(t *testing.T) {
 	if !ok {
 		t.Fatalf("plugin should be %T, but not %T", networkTopologyAware, plugin)
 	}
-	actual := calculateWeight(networkTopologyAware.pluginArguments)
+	actual := getPriorityWeight(networkTopologyAware.pluginArguments)
 	assert.Equal(t, expected, actual)
 }
 
