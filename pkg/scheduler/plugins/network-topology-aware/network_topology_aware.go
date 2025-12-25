@@ -35,7 +35,7 @@ import (
 const (
 	// PluginName indicates name of volcano scheduler plugin.
 	PluginName            = "network-topology-aware"
-	BaseScore             = 100.0
+	FullScore             = 1.0
 	ZeroScore             = 0.0
 	NetworkTopologyWeight = "weight"
 	// HyperNodeBinPackCPU is the key for weight of cpu
@@ -280,11 +280,11 @@ func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, 
 		candidateHyperNodes := scoreToHyperNodes[maxScore]
 		for _, hyperNode := range candidateHyperNodes {
 			taskNumScore := nta.scoreWithTaskNum(hyperNode, subJob.Tasks, ssn.RealNodesList)
-			taskNumScore *= float64(nta.weight.GlobalWeight)
 			hyperNodeScores[hyperNode] += taskNumScore
 		}
 	}
 
+	hyperNodeScores = nta.normalizeFinalScore(hyperNodeScores)
 	klog.V(4).Infof("networkTopologyAware hyperNode score is: %v", hyperNodeScores)
 	return hyperNodeScores, nil
 }
@@ -304,6 +304,7 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 	hyperNodeBinPackingScores := make(map[string]float64)
 	for hyperNode, nodes := range hyperNodes {
 		totalScore := 0.0
+		totalWeight := 0
 		resourceNum := 0
 		overused := false
 
@@ -311,7 +312,7 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 			allocatable := 0.0
 			used := 0.0
 
-			resourceWeight, ok := nta.weight.getBinPackWeight(resourceName)
+			weight, ok := nta.weight.getBinPackWeight(resourceName)
 			if !ok {
 				continue
 			}
@@ -328,11 +329,12 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 				break
 			}
 
-			score := (used + request) * float64(resourceWeight) / allocatable
+			score := (used + request) / allocatable
 			klog.V(5).InfoS("hyperNode binpacking score calculation", "subJob", subJob.UID, "hyperNode", hyperNode,
 				"resource", resourceName, "allocatable", allocatable, "used", used, "request", request)
 
-			totalScore += score
+			totalScore += float64(weight) * score
+			totalWeight += weight
 			resourceNum++
 		}
 
@@ -341,10 +343,9 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 			continue
 		}
 
-		if resourceNum > 0 {
-			totalScore /= float64(resourceNum)
+		if resourceNum > 0 && totalWeight > 0 {
+			totalScore /= float64(resourceNum * totalWeight)
 		}
-		totalScore *= float64(k8sFramework.MaxNodeScore * int64(nta.weight.GlobalWeight))
 		hyperNodeBinPackingScores[hyperNode] = totalScore
 	}
 
@@ -352,12 +353,23 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 }
 
 func (nta *networkTopologyAwarePlugin) batchNodeOrderFn(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
+	nodeScores := make(map[string]float64)
+	var err error
+
 	job := ssn.Jobs[task.Job]
 	subJob := job.SubJobs[job.TaskToSubJob[task.UID]]
 	if subJob.WithNetworkTopology() {
-		return nta.batchNodeOrderFnForNetworkAwareTasks(ssn, task, nodes)
+		nodeScores, err = nta.batchNodeOrderFnForNetworkAwareTasks(ssn, task, nodes)
+	} else {
+		nodeScores, err = nta.batchNodeOrderFnForNormalTasks(ssn, task, nodes)
 	}
-	return nta.batchNodeOrderFnForNormalTasks(ssn, task, nodes)
+
+	if err != nil {
+		return nil, err
+	}
+	nodeScores = nta.normalizeFinalScore(nodeScores)
+	klog.V(4).Infof("networkTopologyAware node score is: %v", nodeScores)
+	return nodeScores, nil
 }
 
 func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalTasks(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
@@ -373,7 +385,7 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalTasks(ssn *frame
 		for tier := nta.hyperNodesTier.minTier; tier <= nta.hyperNodesTier.maxTier; tier++ {
 			// note: math.Pow(0, 0) = 1
 			tierWeight := math.Pow(nta.HyperNodeBinPackingFading, float64(tier-1))
-			tierScore := 1.0
+			tierScore := FullScore
 			for hyperNode := range ssn.HyperNodesSetByTier[tier] {
 				if ssn.RealNodesSet[hyperNode].Has(node.Name) {
 					tierScore = nta.getTaskHyperNodeBinPackingScore(ssn, task, hyperNode)
@@ -388,7 +400,6 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalTasks(ssn *frame
 		}
 	}
 
-	klog.V(4).Infof("plugin is: %s, node score is: %v", PluginName, nodeScores)
 	return nodeScores, nil
 }
 
@@ -432,7 +443,7 @@ func (nta *networkTopologyAwarePlugin) getTaskHyperNodeBinPackingScore(ssn *fram
 		totalWeight += weight
 		resourceNum++
 	}
-	if resourceNum > 0 {
+	if resourceNum > 0 && totalWeight > 0 {
 		totalScore /= float64(resourceNum * totalWeight)
 	}
 
@@ -454,7 +465,6 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNetworkAwareTasks(ssn 
 	for _, node := range nodes {
 		hyperNode := util.FindHyperNodeForNode(node.Name, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
 		score := nta.networkTopologyAwareScore(hyperNode, allocatedHyperNode, ssn.HyperNodes)
-		score *= float64(nta.weight.GlobalWeight)
 		nodeScores[node.Name] = score
 		if score >= maxScore {
 			maxScore = score
@@ -467,12 +477,10 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNetworkAwareTasks(ssn 
 		for _, node := range candidateNodes {
 			hyperNode := util.FindHyperNodeForNode(node, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
 			taskNumScore := nta.scoreWithTaskNum(hyperNode, subJob.Tasks, ssn.RealNodesList)
-			taskNumScore *= float64(nta.weight.GlobalWeight)
 			nodeScores[node] += taskNumScore
 		}
 	}
 
-	klog.V(4).Infof("networkTopologyAware node score is: %v", nodeScores)
 	return nodeScores, nil
 }
 
@@ -588,7 +596,7 @@ func (nta *networkTopologyAwarePlugin) networkTopologyAwareScore(hyperNodeName, 
 		return ZeroScore
 	}
 	if hyperNodeName == jobAllocatedHyperNode {
-		return BaseScore
+		return FullScore
 	}
 	LCAHyperNode := hyperNodeMap.GetLCAHyperNode(hyperNodeName, jobAllocatedHyperNode)
 	hyperNodeInfo, ok := hyperNodeMap[LCAHyperNode]
@@ -596,7 +604,7 @@ func (nta *networkTopologyAwarePlugin) networkTopologyAwareScore(hyperNodeName, 
 		return ZeroScore
 	}
 	// Calculate score: (maxTier - LCAhyperNode.tier)/(maxTier - minTier)
-	hyperNodeTierScore := BaseScore * nta.scoreHyperNodeWithTier(hyperNodeInfo.Tier())
+	hyperNodeTierScore := nta.scoreHyperNodeWithTier(hyperNodeInfo.Tier())
 	return hyperNodeTierScore
 }
 
@@ -607,7 +615,7 @@ func (nta *networkTopologyAwarePlugin) scoreWithTaskNum(hyperNodeName string, ta
 	taskNumScore := ZeroScore
 	if len(tasks) > 0 {
 		// Calculate score: taskNum/allTaskNum
-		taskNumScore = BaseScore * scoreHyperNodeWithTaskNum(taskNum, len(tasks))
+		taskNumScore = scoreHyperNodeWithTaskNum(taskNum, len(tasks))
 	}
 	return taskNumScore
 }
@@ -626,4 +634,20 @@ func scoreHyperNodeWithTaskNum(taskNum int, allTaskNum int) float64 {
 		return ZeroScore
 	}
 	return float64(taskNum) / float64(allTaskNum)
+}
+
+func (nta *networkTopologyAwarePlugin) normalizeFinalScore(scores map[string]float64) map[string]float64 {
+	normalizedScores := make(map[string]float64)
+	maxScore := 0.0
+	for _, score := range scores {
+		if score > maxScore {
+			maxScore = score
+		}
+	}
+	if maxScore > 0 {
+		for name, score := range scores {
+			normalizedScores[name] = float64(k8sFramework.MaxNodeScore) * float64(nta.weight.GlobalWeight) * score / maxScore
+		}
+	}
+	return normalizedScores
 }
