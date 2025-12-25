@@ -46,18 +46,20 @@ const (
 	HyperNodeBinPackResources = "hypernode.binpack.resources"
 	// HyperNodeBinPackResourcesPrefix is the key prefix for additional resource key name
 	HyperNodeBinPackResourcesPrefix = HyperNodeBinPackResources + "."
-	// HyperNodeBinPackNormalTaskEnable is the key for whether to enable hypernode-level binpacking for tasks without network topology
-	HyperNodeBinPackNormalTaskEnable = "hypernode.binpack.normal-task.enable"
-	// HyperNodeBinPackNormalTaskFading is the key for tier weight fading parameter for tasks without network topology
-	HyperNodeBinPackNormalTaskFading = "hypernode.binpack.normal-task.fading"
+	// HyperNodeBinPackNormalPodEnable is the key for whether to enable hypernode-level binpacking for pods without network topology
+	HyperNodeBinPackNormalPodEnable = "hypernode.binpack.normal-pod.enable"
+	// HyperNodeBinPackNormalTaskFading is the key for tier weight fading parameter for pods without network topology
+	HyperNodeBinPackNormalPodFading = "hypernode.binpack.normal-pod.fading"
 )
 
 type networkTopologyAwarePlugin struct {
 	// Arguments given for the plugin
 	pluginArguments framework.Arguments
 	weight          *priorityWeight
-	*normalTaskConfig
+	*normalPodConfig
 	*hyperNodesTier
+	// hyperNodeResourceCache stores the resource status of hypernodes to avoid repeated calculation
+	hyperNodeResourceCache map[string]map[v1.ResourceName]*resourceStatus // hypernode name -> resource name -> resource status
 }
 
 type priorityWeight struct {
@@ -67,7 +69,7 @@ type priorityWeight struct {
 	HyperNodeBinPackingResources map[v1.ResourceName]int
 }
 
-type normalTaskConfig struct {
+type normalPodConfig struct {
 	HyperNodeBinPackingEnable bool
 	HyperNodeBinPackingFading float64
 }
@@ -75,6 +77,11 @@ type normalTaskConfig struct {
 type hyperNodesTier struct {
 	maxTier int
 	minTier int
+}
+
+type resourceStatus struct {
+	allocatable float64
+	used        float64
 }
 
 func (h *hyperNodesTier) init(hyperNodesSetByTier []int) {
@@ -97,17 +104,18 @@ func (h *hyperNodesTier) init(hyperNodesSetByTier []int) {
          hypernode.binpack.resources: nvidia.com/gpu, example.com/foo
          hypernode.binpack.resources.nvidia.com/gpu: 2
          hypernode.binpack.resources.example.com/foo: 3
-         hypernode.binpack.normal-task.enable: true
-         hypernode.binpack.normal-task.fading: 0.8
+         hypernode.binpack.normal-pod.enable: true
+         hypernode.binpack.normal-pod.fading: 0.8
 */
 
 // New function returns prioritizePlugin object
 func New(arguments framework.Arguments) framework.Plugin {
 	plugin := networkTopologyAwarePlugin{
-		pluginArguments:  arguments,
-		weight:           getPriorityWeight(arguments),
-		normalTaskConfig: getNormalTaskConfig(arguments),
-		hyperNodesTier:   &hyperNodesTier{},
+		pluginArguments:        arguments,
+		weight:                 getPriorityWeight(arguments),
+		normalPodConfig:        getNormalTaskConfig(arguments),
+		hyperNodesTier:         &hyperNodesTier{},
+		hyperNodeResourceCache: make(map[string]map[v1.ResourceName]*resourceStatus),
 	}
 	klog.V(5).InfoS("successfully built plugin", "name", PluginName, "arguments", plugin.String())
 	return &plugin
@@ -164,15 +172,15 @@ func getPriorityWeight(args framework.Arguments) *priorityWeight {
 	return &weight
 }
 
-func getNormalTaskConfig(args framework.Arguments) *normalTaskConfig {
+func getNormalTaskConfig(args framework.Arguments) *normalPodConfig {
 	// default values are respectively true and 0.8
-	config := normalTaskConfig{
+	config := normalPodConfig{
 		HyperNodeBinPackingEnable: true,
 		HyperNodeBinPackingFading: 0.8,
 	}
-	args.GetBool(&config.HyperNodeBinPackingEnable, HyperNodeBinPackNormalTaskEnable)
-	args.GetFloat64(&config.HyperNodeBinPackingFading, HyperNodeBinPackNormalTaskFading)
-	// config.HyperNodeBinPackingFading = 0 implies that only the hypernodes of tier 1 affect the task binpacking scores
+	args.GetBool(&config.HyperNodeBinPackingEnable, HyperNodeBinPackNormalPodEnable)
+	args.GetFloat64(&config.HyperNodeBinPackingFading, HyperNodeBinPackNormalPodFading)
+	// config.HyperNodeBinPackingFading = 0 implies that only the hypernodes of tier 1 affect the pod binpacking scores
 	if config.HyperNodeBinPackingFading < 0 {
 		config.HyperNodeBinPackingFading = 0.8
 	}
@@ -212,8 +220,8 @@ func (n *networkTopologyAwarePlugin) String() string {
 			msg = append(msg, fmt.Sprintf("%s[%d]", name, weight))
 		}
 	}
-	msg = append(msg, fmt.Sprintf("%s[%t]", HyperNodeBinPackNormalTaskEnable, n.normalTaskConfig.HyperNodeBinPackingEnable),
-		fmt.Sprintf("%s[%f]", HyperNodeBinPackNormalTaskFading, n.normalTaskConfig.HyperNodeBinPackingFading))
+	msg = append(msg, fmt.Sprintf("%s[%t]", HyperNodeBinPackNormalPodEnable, n.normalPodConfig.HyperNodeBinPackingEnable),
+		fmt.Sprintf("%s[%f]", HyperNodeBinPackNormalPodFading, n.normalPodConfig.HyperNodeBinPackingFading))
 
 	return strings.Join(msg, ", ")
 }
@@ -261,10 +269,43 @@ func (nta *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 		}
 		return [][]*api.HyperNodeInfo{{hyperNode}}
 	})
+
+	ssn.AddEventHandler(&framework.EventHandler{
+		AllocateFunc: func(event *framework.Event) {
+			task := event.Task
+			node := task.NodeName
+			for hyperNode := range ssn.HyperNodes {
+				if ssn.RealNodesSet[hyperNode].Has(node) {
+					if _, foundHyperNode := nta.hyperNodeResourceCache[hyperNode]; foundHyperNode {
+						for _, resource := range task.Resreq.ResourceNames() {
+							if _, foundResource := nta.hyperNodeResourceCache[hyperNode][resource]; foundResource {
+								nta.hyperNodeResourceCache[hyperNode][resource].used += task.Resreq.Get(resource)
+							}
+						}
+					}
+				}
+			}
+		},
+		DeallocateFunc: func(event *framework.Event) {
+			task := event.Task
+			node := task.NodeName
+			for hyperNode := range ssn.HyperNodes {
+				if ssn.RealNodesSet[hyperNode].Has(node) {
+					if _, foundHyperNode := nta.hyperNodeResourceCache[hyperNode]; foundHyperNode {
+						for _, resource := range task.Resreq.ResourceNames() {
+							if _, foundResource := nta.hyperNodeResourceCache[hyperNode][resource]; foundResource {
+								nta.hyperNodeResourceCache[hyperNode][resource].used -= task.Resreq.Get(resource)
+							}
+						}
+					}
+				}
+			}
+		},
+	})
 }
 
 func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {
-	hyperNodeScores := nta.getSubJobHyperNodeBinPackingScore(subJob, hyperNodes)
+	hyperNodeScores := nta.getSubJobHyperNodeBinPackingScore(ssn, subJob, hyperNodes)
 
 	scoreToHyperNodes := map[float64][]string{}
 	var maxScore float64 = -1
@@ -289,7 +330,7 @@ func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, 
 	return hyperNodeScores, nil
 }
 
-func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) map[string]float64 {
+func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(ssn *framework.Session, subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) map[string]float64 {
 	tasksRequest := make(map[v1.ResourceName]float64)
 	// currently, the subJob can only be fully scheduled (minAvailable == taskNum)
 	for _, task := range subJob.Tasks {
@@ -302,25 +343,21 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 	}
 
 	hyperNodeBinPackingScores := make(map[string]float64)
-	for hyperNode, nodes := range hyperNodes {
+	for hyperNode, _ := range hyperNodes {
 		totalScore := 0.0
 		totalWeight := 0
 		resourceNum := 0
 		overused := false
 
 		for resourceName, request := range tasksRequest {
-			allocatable := 0.0
-			used := 0.0
-
 			weight, ok := nta.weight.getBinPackWeight(resourceName)
 			if !ok {
 				continue
 			}
+			nta.calculateHyperNodeResourceStatus(ssn, hyperNode, resourceName)
 
-			for _, node := range nodes {
-				allocatable += node.Allocatable.Get(resourceName)
-				used += node.Used.Get(resourceName)
-			}
+			allocatable := nta.hyperNodeResourceCache[hyperNode][resourceName].allocatable
+			used := nta.hyperNodeResourceCache[hyperNode][resourceName].used
 
 			if used+request > allocatable {
 				klog.V(4).InfoS("cannot binpack the hyperNode", "subJob", subJob.UID, "hyperNode", hyperNode,
@@ -359,9 +396,9 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFn(ssn *framework.Session, 
 	job := ssn.Jobs[task.Job]
 	subJob := job.SubJobs[job.TaskToSubJob[task.UID]]
 	if subJob.WithNetworkTopology() {
-		nodeScores, err = nta.batchNodeOrderFnForNetworkAwareTasks(ssn, task, nodes)
+		nodeScores, err = nta.batchNodeOrderFnForNetworkAwarePods(ssn, task, nodes)
 	} else {
-		nodeScores, err = nta.batchNodeOrderFnForNormalTasks(ssn, task, nodes)
+		nodeScores, err = nta.batchNodeOrderFnForNormalPods(ssn, task, nodes)
 	}
 
 	if err != nil {
@@ -372,85 +409,99 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFn(ssn *framework.Session, 
 	return nodeScores, nil
 }
 
-func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalTasks(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
+func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalPods(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
 	nodeScores := make(map[string]float64)
 
-	if !nta.normalTaskConfig.HyperNodeBinPackingEnable {
+	if !nta.normalPodConfig.HyperNodeBinPackingEnable {
+		return nodeScores, nil
+	}
+
+	totalTierWeight := 0.0
+	tierWeights := make(map[int]float64)
+	for tier := nta.hyperNodesTier.minTier; tier <= nta.hyperNodesTier.maxTier; tier++ {
+		// note: math.Pow(0, 0) = 1
+		tierWeight := math.Pow(nta.HyperNodeBinPackingFading, float64(tier-1))
+		totalTierWeight += tierWeight
+		tierWeights[tier] = tierWeight
+	}
+	if totalTierWeight <= 0 {
 		return nodeScores, nil
 	}
 
 	for _, node := range nodes {
-		totalWeight := 0.0
 		totalScore := 0.0
 		for tier := nta.hyperNodesTier.minTier; tier <= nta.hyperNodesTier.maxTier; tier++ {
 			// note: math.Pow(0, 0) = 1
-			tierWeight := math.Pow(nta.HyperNodeBinPackingFading, float64(tier-1))
 			tierScore := FullScore
-			for hyperNode := range ssn.HyperNodesSetByTier[tier] {
-				if ssn.RealNodesSet[hyperNode].Has(node.Name) {
-					tierScore = nta.getTaskHyperNodeBinPackingScore(ssn, task, hyperNode)
+			for hyperNodeName := range ssn.HyperNodesSetByTier[tier] {
+				if ssn.RealNodesSet[hyperNodeName].Has(node.Name) {
+					tierScore = nta.getPodHyperNodeBinPackingScore(ssn, task, hyperNodeName)
 					break
 				}
 			}
-			totalWeight += tierWeight
-			totalScore += tierWeight * tierScore
+			totalScore += tierWeights[tier] * tierScore
 		}
-		if totalWeight > 0 {
-			nodeScores[node.Name] = totalScore / totalWeight
-		}
+		nodeScores[node.Name] = totalScore / totalTierWeight
 	}
-
 	return nodeScores, nil
 }
 
-func (nta *networkTopologyAwarePlugin) getTaskHyperNodeBinPackingScore(ssn *framework.Session, task *api.TaskInfo, hyperNode string) float64 {
-	resourceRequests := make(map[v1.ResourceName]float64)
-	for _, resourceName := range task.Resreq.ResourceNames() {
-		if _, ok := nta.weight.getBinPackWeight(resourceName); !ok {
-			continue
-		}
-		resourceRequests[resourceName] = task.Resreq.Get(resourceName)
-	}
-
+func (nta *networkTopologyAwarePlugin) getPodHyperNodeBinPackingScore(ssn *framework.Session, task *api.TaskInfo, hyperNodeName string) float64 {
 	totalScore := 0.0
 	totalWeight := 0
 	resourceNum := 0
-	for resourceName, request := range resourceRequests {
-		allocatable := 0.0
-		used := 0.0
 
-		weight, ok := nta.weight.getBinPackWeight(resourceName)
-		if !ok {
+	for _, resourceName := range task.Resreq.ResourceNames() {
+		weight, found := nta.weight.getBinPackWeight(resourceName)
+		if !found {
 			continue
 		}
+		request := task.Resreq.Get(resourceName)
 
-		for node := range ssn.RealNodesSet[hyperNode] {
-			allocatable += ssn.Nodes[node].Allocatable.Get(resourceName)
-			used += ssn.Nodes[node].Used.Get(resourceName)
-		}
+		nta.calculateHyperNodeResourceStatus(ssn, hyperNodeName, resourceName)
+		allocatable := nta.hyperNodeResourceCache[hyperNodeName][resourceName].allocatable
+		used := nta.hyperNodeResourceCache[hyperNodeName][resourceName].used
 
 		if used+request > allocatable {
-			klog.V(4).InfoS("cannot binpack the hyperNode", "task", task.UID, "hyperNode", hyperNode,
+			klog.V(4).InfoS("cannot binpack the hyperNode", "task", task.UID, "hyperNode", hyperNodeName,
 				"resource", resourceName, "allocatable", allocatable, "used", used, "request", request)
 			return ZeroScore
 		}
 
 		score := (used + request) / allocatable
-		klog.V(5).InfoS("hyperNode binpacking score calculation", "task", task.UID, "hyperNode", hyperNode,
+		klog.V(5).InfoS("hyperNode binpacking score calculation", "task", task.UID, "hyperNode", hyperNodeName,
 			"resource", resourceName, "allocatable", allocatable, "used", used, "request", request)
 
 		totalScore += float64(weight) * score
 		totalWeight += weight
 		resourceNum++
 	}
+
 	if resourceNum > 0 && totalWeight > 0 {
 		totalScore /= float64(resourceNum * totalWeight)
 	}
-
 	return totalScore
 }
 
-func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNetworkAwareTasks(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
+func (nta *networkTopologyAwarePlugin) calculateHyperNodeResourceStatus(ssn *framework.Session, hyperNodeName string, resourceName v1.ResourceName) {
+	if _, foundHyperNode := nta.hyperNodeResourceCache[hyperNodeName]; !foundHyperNode {
+		nta.hyperNodeResourceCache[hyperNodeName] = make(map[v1.ResourceName]*resourceStatus)
+	}
+	if _, foundResource := nta.hyperNodeResourceCache[hyperNodeName][resourceName]; !foundResource {
+		allocatable := 0.0
+		used := 0.0
+		for nodeName := range ssn.RealNodesSet[hyperNodeName] {
+			allocatable += ssn.Nodes[nodeName].Allocatable.Get(resourceName)
+			used += ssn.Nodes[nodeName].Allocatable.Get(resourceName)
+		}
+		nta.hyperNodeResourceCache[hyperNodeName][resourceName] = &resourceStatus{
+			allocatable: allocatable,
+			used:        used,
+		}
+	}
+}
+
+func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNetworkAwarePods(ssn *framework.Session, task *api.TaskInfo, nodes []*api.NodeInfo) (map[string]float64, error) {
 	nodeScores := make(map[string]float64)
 	job := ssn.Jobs[task.Job]
 	subJob := job.SubJobs[job.TaskToSubJob[task.UID]]
