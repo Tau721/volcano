@@ -21,7 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	v1 "k8s.io/api/core/v1"
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedulingv1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
@@ -37,43 +37,111 @@ const (
 	eps = 1e-1
 )
 
-func TestArguments(t *testing.T) {
-	framework.RegisterPluginBuilder(PluginName, New)
-	defer framework.CleanupPluginBuilders()
-
-	arguments := framework.Arguments{
-		"weight":                                      2,
-		"hypernode.binpack.cpu":                       3,
-		"hypernode.binpack.memory":                    4,
-		"hypernode.binpack.resources":                 "nvidia.com/gpu, example.com/foo",
-		"hypernode.binpack.resources.nvidia.com/gpu":  5,
-		"hypernode.binpack.resources.example.com/foo": 6,
-	}
-
-	expected := &priorityWeight{
-		GlobalWeight:              2,
-		HyperNodeBinPackingCPU:    3,
-		HyperNodeBinPackingMemory: 4,
-		HyperNodeBinPackingResources: map[v1.ResourceName]int{
-			v1.ResourceCPU:    3,
-			v1.ResourceMemory: 4,
-			"nvidia.com/gpu":  5,
-			"example.com/foo": 6,
+func TestNew(t *testing.T) {
+	tests := []struct {
+		name           string
+		arguments      framework.Arguments
+		expectedPlugin *networkTopologyAwarePlugin
+	}{
+		{
+			name:      "build plugin with no arguments",
+			arguments: framework.Arguments{},
+			expectedPlugin: &networkTopologyAwarePlugin{
+				weight: &priorityWeight{
+					GlobalWeight:                 1,
+					HyperNodeBinPackingCPU:       1,
+					HyperNodeBinPackingMemory:    1,
+					HyperNodeBinPackingResources: map[corev1.ResourceName]int{},
+				},
+				normalPodConfig: &normalPodConfig{
+					hyperNodeBinPackingEnable: true,
+					hyperNodeBinPackingFading: 0.8,
+				},
+				hyperNodesTier:         &hyperNodesTier{},
+				hyperNodeResourceCache: make(map[string]map[corev1.ResourceName]*resourceStatus),
+			},
+		},
+		{
+			name: "build plugin with customized valid arguments",
+			arguments: framework.Arguments{
+				"weight":                                        2,
+				"hypernode.binpack.cpu":                         3,
+				"hypernode.binpack.memory":                      4,
+				"hypernode.binpack.resources":                   "nvidia.com/gpu, example.com/foo",
+				"hypernode.binpack.resources.nvidia.com/gpuxxx": 5,
+				"hypernode.binpack.resources.example.com/foo":   6,
+				"hypernode.binpack.normal-pod.enable":           false,
+				"hypernode.binpack.normal-pod.fading":           0,
+			},
+			expectedPlugin: &networkTopologyAwarePlugin{
+				weight: &priorityWeight{
+					GlobalWeight:              2,
+					HyperNodeBinPackingCPU:    3,
+					HyperNodeBinPackingMemory: 4,
+					HyperNodeBinPackingResources: map[corev1.ResourceName]int{
+						"nvidia.com/gpu":  1,
+						"example.com/foo": 6,
+					},
+				},
+				normalPodConfig: &normalPodConfig{
+					hyperNodeBinPackingEnable: false,
+					hyperNodeBinPackingFading: 0,
+				},
+				hyperNodesTier:         &hyperNodesTier{},
+				hyperNodeResourceCache: make(map[string]map[corev1.ResourceName]*resourceStatus),
+			},
+		}, {
+			name: "build plugin with customized invalid arguments",
+			arguments: framework.Arguments{
+				"weight":                                      -1,
+				"hypernode.binpack.cpu":                       -1,
+				"hypernode.binpack.memory":                    -1,
+				"hypernode.binpack.resources":                 "nvidia.com/gpuxxx, example.com/foo",
+				"hypernode.binpack.resources.nvidia.com/gpu":  -1,
+				"hypernode.binpack.resources.example.com/foo": -1,
+				"hypernode.binpack.normal-pod.enable":         "a",
+				"hypernode.binpack.normal-pod.fading":         -1,
+			},
+			expectedPlugin: &networkTopologyAwarePlugin{
+				weight: &priorityWeight{
+					GlobalWeight:              1,
+					HyperNodeBinPackingCPU:    1,
+					HyperNodeBinPackingMemory: 1,
+					HyperNodeBinPackingResources: map[corev1.ResourceName]int{
+						"nvidia.com/gpuxxx": 1,
+						"example.com/foo":   1,
+					},
+				},
+				normalPodConfig: &normalPodConfig{
+					hyperNodeBinPackingEnable: true,
+					hyperNodeBinPackingFading: 0.8,
+				},
+				hyperNodesTier:         &hyperNodesTier{},
+				hyperNodeResourceCache: make(map[string]map[corev1.ResourceName]*resourceStatus),
+			},
 		},
 	}
 
-	builder, ok := framework.GetPluginBuilder(PluginName)
-	if !ok {
-		t.Fatalf("should have plugin named %s", PluginName)
-	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			framework.RegisterPluginBuilder(PluginName, New)
+			defer framework.CleanupPluginBuilders()
+			builder, ok := framework.GetPluginBuilder(PluginName)
+			if !ok {
+				t.Fatalf("should have plugin named %s", PluginName)
+			}
 
-	plugin := builder(arguments)
-	networkTopologyAware, ok := plugin.(*networkTopologyAwarePlugin)
-	if !ok {
-		t.Fatalf("plugin should be %T, but not %T", networkTopologyAware, plugin)
+			plugin := builder(test.arguments)
+			ntap, ok := plugin.(*networkTopologyAwarePlugin)
+			if !ok {
+				t.Fatalf("plugin should be %T, but not %T", ntap, plugin)
+			}
+			assert.Equal(t, test.expectedPlugin.weight, ntap.weight, "the weight should be initialized properly")
+			assert.Equal(t, test.expectedPlugin.normalPodConfig, ntap.normalPodConfig, "the normalPodConfig should be initialized properly")
+			assert.Equal(t, test.expectedPlugin.hyperNodesTier, ntap.hyperNodesTier, "the hyperNodesTier should be initialized properly")
+			assert.Equal(t, test.expectedPlugin.hyperNodeResourceCache, ntap.hyperNodeResourceCache, "the hyperNodeResourceCache should be initialized properly")
+		})
 	}
-	actual := getPriorityWeight(networkTopologyAware.pluginArguments)
-	assert.Equal(t, expected, actual)
 }
 
 func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
@@ -91,10 +159,10 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p4", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p4", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -234,12 +302,12 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -371,12 +439,12 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -516,11 +584,11 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s1-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s1-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s1-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s1-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s2-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -599,11 +667,11 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s1-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s1-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s1-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s1-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s2-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -669,12 +737,12 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -814,13 +882,13 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 3, nil, schedulingv1.PodGroupInqueue, "hard", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "s4-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p4", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "s4-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p4", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1012,10 +1080,10 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p4", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p4", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1155,12 +1223,12 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1292,12 +1360,12 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1437,11 +1505,11 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s1-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s1-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s1-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s1-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s2-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1520,11 +1588,11 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s1-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s1-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s1-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s1-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s2-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1590,12 +1658,12 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s3", "q1", 1, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1735,13 +1803,13 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				PodGroups: []*schedulingv1.PodGroup{
 					util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "s1", "q1", 3, nil, schedulingv1.PodGroupInqueue, "soft", 0),
 				},
-				Pods: []*v1.Pod{
-					util.BuildPod("c1", "p1", "s3-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
-					util.BuildPod("c1", "p2", "s3-n2", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p3", "s4-n1", v1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
-					util.BuildPod("c1", "p4", "", v1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+				Pods: []*corev1.Pod{
+					util.BuildPod("c1", "p1", "s3-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}, nil),
+					util.BuildPod("c1", "p2", "s3-n2", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p3", "s4-n1", corev1.PodRunning, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
+					util.BuildPod("c1", "p4", "", corev1.PodPending, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}, nil),
 				},
-				Nodes: []*v1.Node{
+				Nodes: []*corev1.Node{
 					util.BuildNode("s3-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s3-n2", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
 					util.BuildNode("s4-n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
@@ -1928,7 +1996,7 @@ func parseTask(jobInfoMap map[api.JobID]*api.JobInfo) *api.TaskInfo {
 	}
 	jobAllocatedHyperNode := job.PodGroup.GetAnnotations()[api.JobAllocatedHyperNode]
 	for _, task := range job.Tasks {
-		if task.Pod.Status.Phase == v1.PodPending {
+		if task.Pod.Status.Phase == corev1.PodPending {
 			task.JobAllocatedHyperNode = jobAllocatedHyperNode
 			return task
 		}
