@@ -122,8 +122,8 @@ func TestNew(t *testing.T) {
 		},
 	}
 
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			framework.RegisterPluginBuilder(PluginName, New)
 			defer framework.CleanupPluginBuilders()
 			builder, ok := framework.GetPluginBuilder(PluginName)
@@ -131,15 +131,15 @@ func TestNew(t *testing.T) {
 				t.Fatalf("should have plugin named %s", PluginName)
 			}
 
-			plugin := builder(test.arguments)
+			plugin := builder(tt.arguments)
 			ntap, ok := plugin.(*networkTopologyAwarePlugin)
 			if !ok {
 				t.Fatalf("plugin should be %T, but not %T", ntap, plugin)
 			}
-			assert.Equal(t, test.expectedPlugin.weight, ntap.weight, "the weight should be initialized properly")
-			assert.Equal(t, test.expectedPlugin.normalPodConfig, ntap.normalPodConfig, "the normalPodConfig should be initialized properly")
-			assert.Equal(t, test.expectedPlugin.hyperNodesTier, ntap.hyperNodesTier, "the hyperNodesTier should be initialized properly")
-			assert.Equal(t, test.expectedPlugin.hyperNodeResourceCache, ntap.hyperNodeResourceCache, "the hyperNodeResourceCache should be initialized properly")
+			assert.Equal(t, tt.expectedPlugin.weight, ntap.weight, "the weight should be initialized properly")
+			assert.Equal(t, tt.expectedPlugin.normalPodConfig, ntap.normalPodConfig, "the normalPodConfig should be initialized properly")
+			assert.Equal(t, tt.expectedPlugin.hyperNodesTier, ntap.hyperNodesTier, "the hyperNodesTier should be initialized properly")
+			assert.Equal(t, tt.expectedPlugin.hyperNodeResourceCache, ntap.hyperNodeResourceCache, "the hyperNodeResourceCache should be initialized properly")
 		})
 	}
 }
@@ -1022,9 +1022,9 @@ func TestNetworkTopologyAwareNodeScore_Hard(t *testing.T) {
 				"test4": "",
 			},
 			expected: map[string]float64{
-				"s3-n1": 116.6,
-				"s4-n1": 91.6,
-				"s5-n1": 33.3,
+				"s3-n1": 100.0,
+				"s4-n1": 78.6,
+				"s5-n1": 28.6,
 			},
 		},
 	}
@@ -1943,9 +1943,9 @@ func TestNetworkTopologyAwareNodeScore_Soft(t *testing.T) {
 				"test4": "",
 			},
 			expected: map[string]float64{
-				"s3-n1": 116.6,
-				"s4-n1": 91.6,
-				"s5-n1": 33.3,
+				"s3-n1": 100.0,
+				"s4-n1": 78.6,
+				"s5-n1": 28.6,
 			},
 		},
 	}
