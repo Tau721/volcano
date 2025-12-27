@@ -349,7 +349,6 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(ssn *fr
 	for hyperNode, _ := range hyperNodes {
 		totalScore := 0.0
 		totalWeight := 0
-		resourceNum := 0
 		overused := false
 
 		for resourceName, request := range tasksRequest {
@@ -373,13 +372,12 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(ssn *fr
 
 			totalScore += float64(weight) * score
 			totalWeight += weight
-			resourceNum++
 		}
 
-		if overused || resourceNum <= 0 || totalWeight <= 0 {
+		if overused || totalWeight <= 0 {
 			hyperNodeBinPackingScores[hyperNode] = ZeroScore
 		} else {
-			hyperNodeBinPackingScores[hyperNode] = totalScore / float64(resourceNum*totalWeight)
+			hyperNodeBinPackingScores[hyperNode] = totalScore / float64(totalWeight)
 		}
 	}
 	return hyperNodeBinPackingScores
@@ -444,7 +442,6 @@ func (nta *networkTopologyAwarePlugin) batchNodeOrderFnForNormalPods(ssn *framew
 func (nta *networkTopologyAwarePlugin) getPodHyperNodeBinPackingScore(ssn *framework.Session, task *api.TaskInfo, hyperNode string) float64 {
 	totalScore := 0.0
 	totalWeight := 0
-	resourceNum := 0
 
 	for _, resource := range task.Resreq.ResourceNames() {
 		weight, found := nta.weight.getBinPackWeight(resource)
@@ -469,11 +466,10 @@ func (nta *networkTopologyAwarePlugin) getPodHyperNodeBinPackingScore(ssn *frame
 
 		totalScore += float64(weight) * score
 		totalWeight += weight
-		resourceNum++
 	}
 
-	if resourceNum > 0 && totalWeight > 0 {
-		return totalScore / float64(resourceNum*totalWeight)
+	if totalWeight > 0 {
+		return totalScore / float64(totalWeight)
 	}
 	return ZeroScore
 }
