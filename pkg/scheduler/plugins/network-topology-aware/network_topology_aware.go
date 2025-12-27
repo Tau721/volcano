@@ -681,16 +681,8 @@ func scoreHyperNodeWithTaskNum(taskNum int, allTaskNum int) float64 {
 
 func (nta *networkTopologyAwarePlugin) normalizeFinalScore(scores map[string]float64) map[string]float64 {
 	normalizedScores := make(map[string]float64)
-	maxScore := 0.0
-	for _, score := range scores {
-		if score > maxScore {
-			maxScore = score
-		}
-	}
-	if maxScore > 0 {
-		for name, score := range scores {
-			normalizedScores[name] = float64(k8sFramework.MaxNodeScore) * float64(nta.weight.GlobalWeight) * score / maxScore
-		}
+	for name, score := range scores {
+		normalizedScores[name] = float64(k8sFramework.MaxNodeScore) * float64(nta.weight.GlobalWeight) * score
 	}
 	return normalizedScores
 }
