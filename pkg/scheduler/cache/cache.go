@@ -489,7 +489,7 @@ func newDefaultAndRootQueue(vcClient vcclient.Interface, defaultQueue string) {
 				klog.V(2).Infof("Queue %s already exists, skip creating.", name)
 				return nil
 			}
-			klog.V(2).Infof("Failed to create queue %s: %v, will retry", name, err)
+			klog.Errorf("Failed to create queue %s: %v, will retry", name, err)
 			return err
 		})
 	}
