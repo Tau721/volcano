@@ -244,6 +244,7 @@ func openSession(cache cache.Cache) *Session {
 	ssn.HyperNodesReadyToSchedule = snapshot.HyperNodesReadyToSchedule
 	ssn.addClusterTopHyperNode(ssn.NodeList)
 	ssn.parseHyperNodesTiers()
+	ssn.adjustNetworkTopologySpec()
 
 	if ssn.HyperNodesReadyToSchedule {
 		// hyperNodes in ssn has ClusterTopHyperNode
@@ -998,4 +999,105 @@ func (ssn *Session) String() string {
 
 func (ssn *Session) IsJobTerminated(jobId api.JobID) bool {
 	return ssn.cache.IsJobTerminated(jobId)
+}
+
+// adjustNetworkTopologySpec translates highestTierName in scheduler-internal network topology copies into highestTierAllowed,
+// and converts soft topology mode to hard mode with ClusterTopHyperNode tier as maxTier.
+// As a result, once adjustNetworkTopologySpec is invoked, it is no need to consider highestTierName or soft mode anymore.
+func (ssn *Session) adjustNetworkTopologySpec() {
+	klog.V(3).Infof("Start adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
+	defer klog.V(3).Infof("Finish adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
+
+	for _, job := range ssn.Jobs {
+		if !job.ContainsNetworkTopology() {
+			continue
+		}
+
+		translated, err := translateHighestTierNameToAllowed(job.NetworkTopology, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.Warningf("Failed to translate highestTierName for job %s/%s: %v, skip translation", job.Namespace, job.Name, err)
+		} else if translated {
+			klog.V(4).Infof("Translated highestTierName for job %s/%s, new highestTierAllowed is %d",
+				job.Namespace, job.Name, *job.NetworkTopology.HighestTierAllowed)
+		}
+
+		// NetworkTopology of SubJob is derived from the original job or SubGroupPolicy NetworkTopology,
+		// and will be used by plugins like network-topology-aware.
+		for _, subJob := range job.SubJobs {
+			translated, err = translateHighestTierNameToAllowed(subJob.NetworkTopology, ssn.HyperNodeTierNameMap)
+			if err != nil {
+				klog.Warningf("Failed to translate highestTierName for subJob %s of job %s/%s: %v, skip translation",
+					subJob.UID, job.Namespace, job.Name, err)
+			} else if translated {
+				klog.V(4).Infof("Translated highestTierName for subJob %s of job %s/%s, new highestTierAllowed is %d",
+					subJob.UID, job.Namespace, job.Name, *subJob.NetworkTopology.HighestTierAllowed)
+			}
+		}
+	}
+
+	// Convert soft topology to hard topology with ClusterTopHyperNode tier as maxTier,
+	// so that soft-mode jobs reuse the hard-mode scheduling path without any HyperNode filtering.
+	clusterTopHyperNode, exists := ssn.HyperNodes[ClusterTopHyperNode]
+	if !exists {
+		return
+	}
+	maxTier := clusterTopHyperNode.Tier()
+	for _, job := range ssn.Jobs {
+		if !job.ContainsNetworkTopology() {
+			continue
+		}
+		convertSoftToHardTopology(job, maxTier)
+	}
+}
+
+// convertSoftToHardTopology converts all soft network topology constraints in the job to hard mode.
+// Conversion strategy:
+//   - Job-level soft: converted with maxTier (ClusterTopHyperNode tier), achieving no HyperNode
+//     filtering (full soft affinity across the cluster).
+//   - SubJob-level soft: converted with the effective job-level tier (subJobMaxTier).
+//     If the job has a hard tier limit (either user-specified or from the job-level conversion above),
+//     subgroup soft affinity is bounded by that limit. This properly handles the mixed-mode scenario
+//     where job is hard but subgroup is soft: the subgroup prefers lower tiers but never exceeds
+//     the job's hard tier constraint.
+func convertSoftToHardTopology(job *api.JobInfo, maxTier int) {
+	if job.PodGroup == nil {
+		return
+	}
+
+	// Convert job-level soft topology to hard mode with maxTier.
+	if job.NetworkTopology != nil &&
+		job.NetworkTopology.Mode == scheduling.SoftNetworkTopologyMode {
+		klog.V(3).InfoS("Converting job-level soft topology to hard mode",
+			"job", job.UID, "maxTier", maxTier)
+		job.NetworkTopology.Mode = scheduling.HardNetworkTopologyMode
+		job.NetworkTopology.HighestTierAllowed = &maxTier
+		job.NetworkTopology.HighestTierName = ""
+	}
+
+	// Determine the effective maxTier for SubJob conversion.
+	// If the job has an effective tier limit (from hard mode or job-level soft→hard conversion above),
+	// subgroup soft affinity must be bounded by it. Otherwise, fall back to the cluster-wide maxTier.
+	subJobMaxTier := maxTier
+	if job.NetworkTopology != nil &&
+		job.NetworkTopology.HighestTierAllowed != nil {
+		subJobMaxTier = *job.NetworkTopology.HighestTierAllowed
+	}
+
+	// Convert SubJob-level topology (SubJobInfo has its own deep-copied networkTopology).
+	for _, subJob := range job.SubJobs {
+		subJob.ConvertToHardTopology(subJobMaxTier)
+	}
+}
+
+func translateHighestTierNameToAllowed(spec *scheduling.NetworkTopologySpec, nameMap api.HyperNodeTierNameMap) (bool, error) {
+	if spec != nil && spec.HighestTierAllowed == nil && spec.HighestTierName != "" {
+		if tier, ok := nameMap[spec.HighestTierName]; ok {
+			spec.HighestTierAllowed = &tier
+			spec.HighestTierName = ""
+			return true, nil
+		} else {
+			return false, fmt.Errorf("failed to find hypernode tier name %s", spec.HighestTierName)
+		}
+	}
+	return false, nil
 }

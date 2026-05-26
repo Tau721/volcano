@@ -65,7 +65,7 @@ func TestNewSubJobInfo(t *testing.T) {
 				Tasks:           make(map[TaskID]*TaskInfo),
 				TaskStatusIndex: make(map[TaskStatus]TasksMap),
 				taskPriorities:  make(map[int32]sets.Set[TaskID]),
-				networkTopology: &scheduling.NetworkTopologySpec{
+				NetworkTopology: &scheduling.NetworkTopologySpec{
 					Mode:               scheduling.HardNetworkTopologyMode,
 					HighestTierAllowed: ptr.To(1),
 				},
@@ -89,7 +89,7 @@ func TestNewSubJobInfo(t *testing.T) {
 				Tasks:           make(map[TaskID]*TaskInfo),
 				TaskStatusIndex: make(map[TaskStatus]TasksMap),
 				taskPriorities:  make(map[int32]sets.Set[TaskID]),
-				networkTopology: nil,
+				NetworkTopology: nil,
 			},
 		},
 		{
@@ -115,7 +115,7 @@ func TestNewSubJobInfo(t *testing.T) {
 				Tasks:           make(map[TaskID]*TaskInfo),
 				TaskStatusIndex: make(map[TaskStatus]TasksMap),
 				taskPriorities:  make(map[int32]sets.Set[TaskID]),
-				networkTopology: &scheduling.NetworkTopologySpec{
+				NetworkTopology: &scheduling.NetworkTopologySpec{
 					Mode:               scheduling.HardNetworkTopologyMode,
 					HighestTierAllowed: ptr.To(1),
 				},
@@ -141,7 +141,7 @@ func TestNewSubJobInfo(t *testing.T) {
 				Tasks:           make(map[TaskID]*TaskInfo),
 				TaskStatusIndex: make(map[TaskStatus]TasksMap),
 				taskPriorities:  make(map[int32]sets.Set[TaskID]),
-				networkTopology: nil,
+				NetworkTopology: nil,
 			},
 		},
 	}
@@ -223,7 +223,7 @@ func TestSubJobInfo_IsHardTopologyMode(t *testing.T) {
 				TaskStatusIndex:    tt.fields.TaskStatusIndex,
 				taskPriorities:     tt.fields.taskPriorities,
 				AllocatedHyperNode: tt.fields.AllocateHyperNode,
-				networkTopology:    tt.fields.networkTopology,
+				NetworkTopology:    tt.fields.networkTopology,
 			}
 			gotIsHard, gotTier := sji.IsHardTopologyMode()
 			assert.Equal(t, tt.expectedHard, gotIsHard, "IsHardTopologyMode()")
@@ -278,7 +278,7 @@ func TestSubJobInfo_IsSoftTopologyMode(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sji := &SubJobInfo{
-				networkTopology: tt.fields.networkTopology,
+				NetworkTopology: tt.fields.networkTopology,
 			}
 			assert.Equalf(t, tt.expectedHard, sji.IsSoftTopologyMode(), "IsSoftTopologyMode()")
 		})
@@ -858,4 +858,98 @@ func TestSubJobInfo_getTaskHighestPriority(t *testing.T) {
 		},
 	}
 	assert.Equal(t, int32(0), sji.getTaskHighestPriority(), "Expected -1 when taskPriorities has multiple negative elements")
+}
+
+func TestConvertToHardTopology(t *testing.T) {
+	tests := []struct {
+		name            string
+		networkTopology *scheduling.NetworkTopologySpec
+		maxTier         int
+		wantMode        scheduling.NetworkTopologyMode
+		wantTier        *int
+		wantChanged     bool
+	}{
+		{
+			name: "soft mode is converted to hard mode",
+			networkTopology: &scheduling.NetworkTopologySpec{
+				Mode: scheduling.SoftNetworkTopologyMode,
+			},
+			maxTier:     4,
+			wantMode:    scheduling.HardNetworkTopologyMode,
+			wantTier:    ptr.To(4),
+			wantChanged: true,
+		},
+		{
+			name: "hard mode is not changed",
+			networkTopology: &scheduling.NetworkTopologySpec{
+				Mode:               scheduling.HardNetworkTopologyMode,
+				HighestTierAllowed: ptr.To(2),
+			},
+			maxTier:     4,
+			wantMode:    scheduling.HardNetworkTopologyMode,
+			wantTier:    ptr.To(2),
+			wantChanged: false,
+		},
+		{
+			name:            "nil networkTopology is not changed",
+			networkTopology: nil,
+			maxTier:         4,
+			wantChanged:     false,
+		},
+		{
+			name: "soft mode with existing HighestTierAllowed is overwritten",
+			networkTopology: &scheduling.NetworkTopologySpec{
+				Mode:               scheduling.SoftNetworkTopologyMode,
+				HighestTierAllowed: ptr.To(1),
+			},
+			maxTier:     5,
+			wantMode:    scheduling.HardNetworkTopologyMode,
+			wantTier:    ptr.To(5),
+			wantChanged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy := &scheduling.SubGroupPolicySpec{
+				SubGroupSize:    ptr.To(int32(4)),
+				NetworkTopology: tt.networkTopology,
+			}
+			sji := NewSubJobInfo("gid", "uid", "job", policy, nil)
+
+			// Record original values for comparison
+			var origMode scheduling.NetworkTopologyMode
+			var origTier *int
+			if sji.NetworkTopology != nil {
+				origMode = sji.NetworkTopology.Mode
+				origTier = sji.NetworkTopology.HighestTierAllowed
+			}
+
+			sji.ConvertToHardTopology(tt.maxTier)
+
+			if tt.networkTopology == nil {
+				assert.False(t, sji.WithNetworkTopology(), "networkTopology should remain nil")
+				return
+			}
+
+			assert.Equal(t, tt.wantMode, sji.NetworkTopology.Mode, "mode mismatch")
+			if tt.wantTier != nil {
+				assert.NotNil(t, sji.NetworkTopology.HighestTierAllowed)
+				assert.Equal(t, *tt.wantTier, *sji.NetworkTopology.HighestTierAllowed, "tier mismatch")
+			}
+
+			if tt.wantChanged {
+				assert.NotEqual(t, origMode, scheduling.HardNetworkTopologyMode, "original should have been soft")
+				isHard, tier := sji.IsHardTopologyMode()
+				assert.True(t, isHard, "should be hard mode after conversion")
+				assert.Equal(t, tt.maxTier, tier, "tier should equal maxTier")
+				assert.False(t, sji.IsSoftTopologyMode(), "should not be soft mode after conversion")
+			} else {
+				if sji.NetworkTopology != nil {
+					assert.Equal(t, origMode, sji.NetworkTopology.Mode, "mode should not have changed")
+					assert.Equal(t, origTier, sji.NetworkTopology.HighestTierAllowed, "tier should not have changed")
+				}
+			}
+		})
+	}
 }
