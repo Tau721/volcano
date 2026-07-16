@@ -346,12 +346,112 @@ func TestValidateTopologyAffinityPreferredWeight(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errMsg := validateTopologyAffinity(tt.spec)
+			errMsg := validateTopologyAffinity(tt.spec, nil)
 			if tt.wantErr {
 				assert.NotEmpty(t, errMsg)
 				if tt.errMsg != "" {
 					assert.Contains(t, errMsg, tt.errMsg)
 				}
+				return
+			}
+			assert.Empty(t, errMsg)
+		})
+	}
+}
+
+func TestValidateSubGroupTopologyAffinity(t *testing.T) {
+	tier1 := int32(1)
+	tier2 := int32(2)
+	minSubGroups := int32(2)
+	policies := []schedulingv1beta1.SubGroupPolicySpec{
+		{Name: "prefill"},
+		{Name: "decode"},
+		{Name: "worker", MinSubGroups: &minSubGroups},
+	}
+
+	tests := []struct {
+		name    string
+		spec    *schedulingv1beta1.TopologyAffinitySpec
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name: "valid subGroupAffinity",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAffinity: &schedulingv1beta1.SubGroupAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTier: &tier2}},
+				},
+			},
+		},
+		{
+			name: "subGroupAffinity requires two policies",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAffinity: &schedulingv1beta1.SubGroupAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill"}, TopologyTier: &tier2}},
+				},
+			},
+			wantErr: true,
+			errMsg:  "subGroupAffinity requires at least two subGroups",
+		},
+		{
+			name: "unknown policy is rejected",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAntiAffinity: &schedulingv1beta1.SubGroupAntiAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"missing"}, TopologyTier: &tier2}},
+				},
+			},
+			wantErr: true,
+			errMsg:  "is not defined",
+		},
+		{
+			name: "single policy anti-affinity accepts splittable policy",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAntiAffinity: &schedulingv1beta1.SubGroupAntiAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"worker"}, TopologyTier: &tier2}},
+				},
+			},
+		},
+		{
+			name: "single policy anti-affinity rejects non-splittable policy",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAntiAffinity: &schedulingv1beta1.SubGroupAntiAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill"}, TopologyTier: &tier2}},
+				},
+			},
+			wantErr: true,
+			errMsg:  "single-policy subGroupAntiAffinity requires",
+		},
+		{
+			name: "hard affinity cannot be finer than hard anti-affinity",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAffinity: &schedulingv1beta1.SubGroupAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTier: &tier1}},
+				},
+				SubGroupAntiAffinity: &schedulingv1beta1.SubGroupAntiAffinity{
+					Required: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTier: &tier2}},
+				},
+			},
+			wantErr: true,
+			errMsg:  "tier must be greater than or equal",
+		},
+		{
+			name: "preferred subGroupAffinity requires weight",
+			spec: &schedulingv1beta1.TopologyAffinitySpec{
+				SubGroupAffinity: &schedulingv1beta1.SubGroupAffinity{
+					Preferred: []schedulingv1beta1.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTier: &tier2}},
+				},
+			},
+			wantErr: true,
+			errMsg:  "weight must be an integer in the range 1-100",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			errMsg := validateTopologyAffinity(tt.spec, policies)
+			if tt.wantErr {
+				assert.NotEmpty(t, errMsg)
+				assert.Contains(t, errMsg, tt.errMsg)
 				return
 			}
 			assert.Empty(t, errMsg)

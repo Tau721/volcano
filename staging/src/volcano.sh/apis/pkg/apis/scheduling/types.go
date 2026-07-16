@@ -268,7 +268,8 @@ type NetworkTopologySpec struct {
 	// +optional
 	Mode NetworkTopologyMode `json:"mode,omitempty" protobuf:"bytes,1,opt,name=mode"`
 
-	// HighestTierAllowed specifies the highest tier that a job allowed to cross when scheduling.
+	// HighestTierAllowed is a mandatory maximum LCA tier in hard mode and a preferred,
+	// fallback-capable maximum LCA tier in soft mode. It is optional in soft mode.
 	// +optional
 	HighestTierAllowed *int `json:"highestTierAllowed,omitempty" protobuf:"varint,2,opt,name=highestTierAllowed"`
 
@@ -278,9 +279,13 @@ type NetworkTopologySpec struct {
 	HighestTierName string `json:"highestTierName,omitempty" protobuf:"bytes,3,opt,name=highestTierName"`
 }
 
-// TopologyAffinitySpec holds cross-PodGroup topology rules.
+// TopologyAffinitySpec holds topology affinity rules on the HyperNode tree.
 type TopologyAffinitySpec struct {
 	PodGroupAntiAffinity *PodGroupAntiAffinity `json:"podGroupAntiAffinity,omitempty" protobuf:"bytes,1,opt,name=podGroupAntiAffinity"`
+
+	SubGroupAffinity *SubGroupAffinity `json:"subGroupAffinity,omitempty" protobuf:"bytes,2,opt,name=subGroupAffinity"`
+
+	SubGroupAntiAffinity *SubGroupAntiAffinity `json:"subGroupAntiAffinity,omitempty" protobuf:"bytes,3,opt,name=subGroupAntiAffinity"`
 }
 
 // PodGroupAntiAffinity defines required/preferred anti-affinity against other PodGroups.
@@ -310,6 +315,36 @@ type PodGroupAffinityTerm struct {
 	// TopologyTier compares domains at HyperNode.spec.tier. Mutually exclusive with TopologyTierName.
 	// +optional
 	TopologyTier *int32 `json:"topologyTier,omitempty" protobuf:"varint,5,opt,name=topologyTier"`
+}
+
+// SubGroupAffinity defines required/preferred affinity between SubJobs in the same PodGroup.
+type SubGroupAffinity struct {
+	Required  []SubGroupAffinityTerm `json:"required,omitempty" protobuf:"bytes,1,rep,name=required"`
+	Preferred []SubGroupAffinityTerm `json:"preferred,omitempty" protobuf:"bytes,2,rep,name=preferred"`
+}
+
+// SubGroupAntiAffinity defines required/preferred anti-affinity between SubJobs in the same PodGroup.
+type SubGroupAntiAffinity struct {
+	Required  []SubGroupAffinityTerm `json:"required,omitempty" protobuf:"bytes,1,rep,name=required"`
+	Preferred []SubGroupAffinityTerm `json:"preferred,omitempty" protobuf:"bytes,2,rep,name=preferred"`
+}
+
+// SubGroupAffinityTerm selects SubGroupPolicy names and the topology tier for HyperNode comparison.
+type SubGroupAffinityTerm struct {
+	// SubGroups lists SubGroupPolicy names participating in this term.
+	SubGroups []string `json:"subGroups" protobuf:"bytes,1,rep,name=subGroups"`
+
+	// Weight applies to preferred terms only (1-100).
+	// +optional
+	Weight int32 `json:"weight,omitempty" protobuf:"varint,2,opt,name=weight"`
+
+	// TopologyTierName compares ancestor HyperNodes at HyperNode.spec.tierName. Mutually exclusive with TopologyTier.
+	// +optional
+	TopologyTierName string `json:"topologyTierName,omitempty" protobuf:"bytes,3,opt,name=topologyTierName"`
+
+	// TopologyTier compares domains at HyperNode.spec.tier. Mutually exclusive with TopologyTierName.
+	// +optional
+	TopologyTier *int32 `json:"topologyTier,omitempty" protobuf:"varint,4,opt,name=topologyTier"`
 }
 
 // PodGroupStatus represents the current state of a pod group.

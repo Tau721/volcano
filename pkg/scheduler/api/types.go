@@ -379,12 +379,14 @@ type SimulatePredicateFn func(ctx context.Context, state fwk.CycleState, task *T
 // Plugins implement this function to verify if the queue has enough resources to schedule the task while maintaining topology constraints
 type SimulateAllocatableFn func(ctx context.Context, state fwk.CycleState, queue *QueueInfo, task *TaskInfo) bool
 
-// HyperNodeGradientForJobFn group hyperNodes into several gradients,
-// and discard hyperNodes that unmatched the job topology requirements.
-// Registered plugins always return a non-nil slice; an empty slice means no eligible HyperNodes remain.
+// HyperNodeGradientForJobFn groups HyperNodes into several gradients and
+// discards HyperNodes that do not match the job topology requirements.
+// Registered plugins return a non-nil slice; an empty slice means that no
+// eligible HyperNodes remain.
 type HyperNodeGradientForJobFn func(job *JobInfo, hyperNode *HyperNodeInfo) [][]*HyperNodeInfo
 
-// HyperNodeGradientForSubJobFn group hyperNodes into several gradients,
-// and discard hyperNodes that unmatched the subJob topology requirements.
-// Registered plugins always return a non-nil slice; an empty slice means no eligible HyperNodes remain.
+// HyperNodeGradientForSubJobFn groups HyperNodes into several gradients and
+// discards HyperNodes that do not match the SubJob topology requirements.
+// Registered plugins return a non-nil slice; an empty slice means that no
+// eligible HyperNodes remain.
 type HyperNodeGradientForSubJobFn func(subJob *SubJobInfo, hyperNode *HyperNodeInfo) [][]*HyperNodeInfo

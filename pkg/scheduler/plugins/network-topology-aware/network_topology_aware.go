@@ -287,19 +287,7 @@ func (nta *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 	})
 
 	ssn.AddHyperNodeGradientForSubJobFn(nta.Name(), func(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
-		if job, found := ssn.Jobs[subJob.Job]; found && !job.ContainsSubJobPolicy() {
-			return [][]*api.HyperNodeInfo{{hyperNode}} // it is unnecessary to try child hyperNode when there is no actual subJob
-		}
-		if hardMode, highestAllowedTier := subJob.IsHardTopologyMode(); hardMode {
-			result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, subJob.AllocatedHyperNode)
-			if err != nil {
-				klog.Errorf("build hyperNode gradient fail, subJob=%s, hyperNode=%s, highestAllowedTier=%d, allocatedHyperNode=%s, err=%v",
-					subJob.UID, hyperNode.Name, highestAllowedTier, subJob.AllocatedHyperNode, err)
-				return emptyHyperNodeGradients
-			}
-			return result
-		}
-		return [][]*api.HyperNodeInfo{{hyperNode}}
+		return nta.hyperNodeGradientForSubJob(ssn, subJob, hyperNode)
 	})
 
 	ssn.AddEventHandler(&framework.EventHandler{
@@ -332,6 +320,30 @@ func (nta *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 		},
 	})
+}
+
+func (nta *networkTopologyAwarePlugin) hyperNodeGradientForSubJob(
+	ssn *framework.Session,
+	subJob *api.SubJobInfo,
+	hyperNode *api.HyperNodeInfo,
+) [][]*api.HyperNodeInfo {
+	if job, found := ssn.Jobs[subJob.Job]; found && !job.ContainsSubJobPolicy() {
+		return [][]*api.HyperNodeInfo{{hyperNode}}
+	}
+
+	highestAllowedTier := maxHyperNodeTier(ssn.HyperNodesSetByTier)
+	allocatedHyperNode := ""
+	if hardMode, tier := subJob.IsHardTopologyMode(); hardMode {
+		highestAllowedTier = tier
+		allocatedHyperNode = subJob.AllocatedHyperNode
+	}
+	result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, allocatedHyperNode)
+	if err != nil {
+		klog.Errorf("build hyperNode gradient fail, subJob=%s, hyperNode=%s, highestAllowedTier=%d, allocatedHyperNode=%s, err=%v",
+			subJob.UID, hyperNode.Name, highestAllowedTier, allocatedHyperNode, err)
+		return emptyHyperNodeGradients
+	}
+	return result
 }
 
 func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {

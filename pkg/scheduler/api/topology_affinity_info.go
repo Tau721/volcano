@@ -48,6 +48,52 @@ func (ji *JobInfo) HasPreferredPodGroupAntiAffinity() bool {
 	return anti != nil && len(anti.Preferred) > 0
 }
 
+// ContainsHardSubGroupAffinity returns whether the job has hard intra-PodGroup SubJob affinity.
+func (ji *JobInfo) ContainsHardSubGroupAffinity() bool {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil {
+		return false
+	}
+	affinity := ji.PodGroup.Spec.TopologyAffinity.SubGroupAffinity
+	return affinity != nil && len(affinity.Required) > 0
+}
+
+// ContainsHardSubGroupAntiAffinity returns whether the job has hard intra-PodGroup SubJob anti-affinity.
+func (ji *JobInfo) ContainsHardSubGroupAntiAffinity() bool {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil {
+		return false
+	}
+	anti := ji.PodGroup.Spec.TopologyAffinity.SubGroupAntiAffinity
+	return anti != nil && len(anti.Required) > 0
+}
+
+// ContainsHardSubGroupTopologyAffinity returns whether the job has any hard SubGroup topology affinity rule.
+func (ji *JobInfo) ContainsHardSubGroupTopologyAffinity() bool {
+	return ji.ContainsHardSubGroupAffinity() || ji.ContainsHardSubGroupAntiAffinity()
+}
+
+// HasPreferredSubGroupAffinity returns whether the job has soft intra-PodGroup SubJob affinity.
+func (ji *JobInfo) HasPreferredSubGroupAffinity() bool {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil {
+		return false
+	}
+	affinity := ji.PodGroup.Spec.TopologyAffinity.SubGroupAffinity
+	return affinity != nil && len(affinity.Preferred) > 0
+}
+
+// HasPreferredSubGroupAntiAffinity returns whether the job has soft intra-PodGroup SubJob anti-affinity.
+func (ji *JobInfo) HasPreferredSubGroupAntiAffinity() bool {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil {
+		return false
+	}
+	anti := ji.PodGroup.Spec.TopologyAffinity.SubGroupAntiAffinity
+	return anti != nil && len(anti.Preferred) > 0
+}
+
+// HasPreferredSubGroupTopologyAffinity returns whether the job has any soft SubGroup topology affinity rule.
+func (ji *JobInfo) HasPreferredSubGroupTopologyAffinity() bool {
+	return ji.HasPreferredSubGroupAffinity() || ji.HasPreferredSubGroupAntiAffinity()
+}
+
 // RequiredPodGroupAntiAffinityTerms returns hard cross-PodGroup anti-affinity terms.
 func (ji *JobInfo) RequiredPodGroupAntiAffinityTerms() []scheduling.PodGroupAffinityTerm {
 	if !ji.ContainsHardPodGroupAntiAffinity() {
@@ -63,6 +109,40 @@ func (ji *JobInfo) PreferredPodGroupAntiAffinityTerms() []scheduling.PodGroupAff
 		return nil
 	}
 	return ji.PodGroup.Spec.TopologyAffinity.PodGroupAntiAffinity.Preferred
+}
+
+// RequiredSubGroupAffinityTerms returns hard intra-PodGroup SubJob affinity terms.
+func (ji *JobInfo) RequiredSubGroupAffinityTerms() []scheduling.SubGroupAffinityTerm {
+	if !ji.ContainsHardSubGroupAffinity() {
+		return nil
+	}
+	return ji.PodGroup.Spec.TopologyAffinity.SubGroupAffinity.Required
+}
+
+// PreferredSubGroupAffinityTerms returns soft intra-PodGroup SubJob affinity terms.
+func (ji *JobInfo) PreferredSubGroupAffinityTerms() []scheduling.SubGroupAffinityTerm {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil ||
+		ji.PodGroup.Spec.TopologyAffinity.SubGroupAffinity == nil {
+		return nil
+	}
+	return ji.PodGroup.Spec.TopologyAffinity.SubGroupAffinity.Preferred
+}
+
+// RequiredSubGroupAntiAffinityTerms returns hard intra-PodGroup SubJob anti-affinity terms.
+func (ji *JobInfo) RequiredSubGroupAntiAffinityTerms() []scheduling.SubGroupAffinityTerm {
+	if !ji.ContainsHardSubGroupAntiAffinity() {
+		return nil
+	}
+	return ji.PodGroup.Spec.TopologyAffinity.SubGroupAntiAffinity.Required
+}
+
+// PreferredSubGroupAntiAffinityTerms returns soft intra-PodGroup SubJob anti-affinity terms.
+func (ji *JobInfo) PreferredSubGroupAntiAffinityTerms() []scheduling.SubGroupAffinityTerm {
+	if ji.PodGroup == nil || ji.PodGroup.Spec.TopologyAffinity == nil ||
+		ji.PodGroup.Spec.TopologyAffinity.SubGroupAntiAffinity == nil {
+		return nil
+	}
+	return ji.PodGroup.Spec.TopologyAffinity.SubGroupAntiAffinity.Preferred
 }
 
 // WithTopologyAffinity returns whether the job declares topologyAffinity.
@@ -86,6 +166,37 @@ func ResolvePodGroupTermTier(term scheduling.PodGroupAffinityTerm, tierNameMap H
 		return tier, nil
 	}
 	return 0, fmt.Errorf("topologyTier or topologyTierName must be set")
+}
+
+// ResolveSubGroupTermTier resolves topologyTier or topologyTierName on a SubGroupAffinityTerm.
+func ResolveSubGroupTermTier(term scheduling.SubGroupAffinityTerm, tierNameMap HyperNodeTierNameMap) (int, error) {
+	if term.TopologyTier != nil && term.TopologyTierName != "" {
+		return 0, fmt.Errorf("topologyTier and topologyTierName are mutually exclusive")
+	}
+	if term.TopologyTier != nil {
+		return int(*term.TopologyTier), nil
+	}
+	if term.TopologyTierName != "" {
+		tier, ok := tierNameMap[term.TopologyTierName]
+		if !ok {
+			return 0, fmt.Errorf("unknown topologyTierName %q", term.TopologyTierName)
+		}
+		return tier, nil
+	}
+	return 0, fmt.Errorf("topologyTier or topologyTierName must be set")
+}
+
+// SubJobPolicyName returns the SubGroupPolicy name for a SubJob created from a policy.
+func SubJobPolicyName(subJob *SubJobInfo) string {
+	if subJob == nil {
+		return ""
+	}
+	prefix := fmt.Sprintf("%s/", subJob.Job)
+	gid := string(subJob.GID)
+	if strings.HasPrefix(gid, prefix) {
+		return strings.TrimPrefix(gid, prefix)
+	}
+	return ""
 }
 
 // PodGroupMatchesTerm reports whether otherJob is selected by term's podGroupSelector (excluding selfJob).
@@ -391,6 +502,31 @@ func CollectJobOccupiedHyperNodesAtTier(
 	return occupied
 }
 
+// CollectSubJobOccupiedHyperNodesAtTier returns HyperNode names at tier where a SubJob is already placed.
+func CollectSubJobOccupiedHyperNodesAtTier(
+	subJob *SubJobInfo,
+	hyperNodes HyperNodeInfoMap,
+	tier int,
+	nodesByHyperNode map[string]sets.Set[string],
+) sets.Set[string] {
+	occupied := sets.New[string]()
+	if subJob == nil {
+		return occupied
+	}
+	for _, task := range collectSubJobAllocatedTasks(subJob) {
+		if hyperNode := taskOccupiedHyperNodeAtTier(task, hyperNodes, tier, nodesByHyperNode); hyperNode != "" {
+			occupied.Insert(hyperNode)
+		}
+	}
+	if occupied.Len() > 0 {
+		return occupied
+	}
+	for _, hyperNode := range hyperNodes.ResolveHyperNodesAtTier(subJob.AllocatedHyperNode, tier) {
+		occupied.Insert(hyperNode)
+	}
+	return occupied
+}
+
 func taskOccupiedHyperNodeAtTier(
 	task *TaskInfo,
 	hyperNodes HyperNodeInfoMap,
@@ -438,7 +574,7 @@ func MatchingPodGroupsAllocatedHyperNodesForTerm(
 		return nil, err
 	}
 
-		matchingHyperNodes := sets.New[string]()
+	matchingHyperNodes := sets.New[string]()
 	for _, matchingJob := range jobs {
 		if !PodGroupMatchesTerm(term, selfJob, matchingJob) {
 			continue

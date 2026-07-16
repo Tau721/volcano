@@ -90,10 +90,10 @@ func TestHyperNodeGradientForPodGroupAntiAffinity(t *testing.T) {
 			wantTierOrder:  []int{2, 3},
 		},
 		{
-			name:           "preferred only returns full subtree for hyperNode order",
-			hn:             buildTwoSupernodeTree(),
-			setByTier:      twoSupernodeSetByTier(),
-			jobs:           map[api.JobID]*api.JobInfo{},
+			name:      "preferred only returns full subtree for hyperNode order",
+			hn:        buildTwoSupernodeTree(),
+			setByTier: twoSupernodeSetByTier(),
+			jobs:      map[api.JobID]*api.JobInfo{},
 			selfJob: jobWithTopologyAffinity(nil, []scheduling.PodGroupAffinityTerm{
 				{
 					PodGroupSelector: prodSelector,
@@ -147,9 +147,9 @@ func TestHyperNodeGradientForPodGroupAntiAffinity(t *testing.T) {
 			wantHyperNodes: []string{"sn-b"},
 		},
 		{
-			name:           "multiple required terms are ANDed",
-			hn:             buildRackUnderSupernodeTree(),
-			setByTier:      rackSupernodeSetByTier(),
+			name:      "multiple required terms are ANDed",
+			hn:        buildRackUnderSupernodeTree(),
+			setByTier: rackSupernodeSetByTier(),
 			jobs: map[api.JobID]*api.JobInfo{
 				"j-sn": otherJobOn("j-sn", "sn-a", "prod"),
 				"j-rk": otherJobOn("j-rk", "cab-a", "prod"),
@@ -326,6 +326,134 @@ func TestHyperNodeGradientForSubJobPreferredOnly(t *testing.T) {
 	}
 }
 
+func TestHyperNodeGradientForJobPreferredSubGroupContainer(t *testing.T) {
+	job := jobWithSubGroupTopologyAffinity(
+		nil,
+		[]scheduling.SubGroupAffinityTerm{
+			{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode", Weight: 100},
+		},
+		nil,
+		[]scheduling.SubGroupAffinityTerm{
+			{SubGroups: []string{"prefill"}, TopologyTierName: "rack", Weight: 100},
+			{SubGroups: []string{"decode"}, TopologyTierName: "rack", Weight: 100},
+			{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "rack", Weight: 50},
+		},
+	)
+	prefill0 := subJobForPolicy(job, "prefill", "prefill-0", "")
+	prefill1 := subJobForPolicy(job, "prefill", "prefill-1", "")
+	decode0 := subJobForPolicy(job, "decode", "decode-0", "")
+	decode1 := subJobForPolicy(job, "decode", "decode-1", "")
+	job.SubJobs = map[api.SubJobID]*api.SubJobInfo{
+		prefill0.UID: prefill0,
+		prefill1.UID: prefill1,
+		decode0.UID:  decode0,
+		decode1.UID:  decode1,
+	}
+
+	hn := buildTwoRacksPerSupernodeTree()
+	ssn := &framework.Session{
+		Jobs:                 map[api.JobID]*api.JobInfo{job.UID: job},
+		HyperNodes:           hn,
+		HyperNodesSetByTier:  twoRacksPerSupernodeSetByTier(),
+		HyperNodeTierNameMap: defaultTierNameMap(),
+	}
+	plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
+
+	gradients := plugin.hyperNodeGradientForJob(ssn, job, hn["root"])
+	if got := tiersFromGradients(gradients); !sets.New(2, 3, 1).Equal(sets.New(got...)) ||
+		len(got) != 3 || got[0] != 2 || got[1] != 3 || got[2] != 1 {
+		t.Fatalf("expected preferred tier order [2 3 1], got %v", got)
+	}
+	wantNames := sets.New("rack-a1", "rack-a2", "rack-b1", "rack-b2", "sn-a", "sn-b", "root")
+	if gotNames := sets.New(hyperNodeNamesFromGradients(gradients)...); !wantNames.Equal(gotNames) {
+		t.Fatalf("expected complete candidate set %v, got %v", wantNames.UnsortedList(), gotNames.UnsortedList())
+	}
+
+	// Without a matching peer, the preferred term cannot affect placement and
+	// the default physical-tier order remains unchanged.
+	job.SubJobs = map[api.SubJobID]*api.SubJobInfo{prefill0.UID: prefill0}
+	gradients = plugin.hyperNodeGradientForJob(ssn, job, hn["root"])
+	if got := tiersFromGradients(gradients); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
+		t.Fatalf("expected default tier order [1 2 3] without a peer, got %v", got)
+	}
+}
+
+func TestHyperNodeGradientForSubGroupHardTerms(t *testing.T) {
+	tests := []struct {
+		name           string
+		job            *api.JobInfo
+		currentPolicy  string
+		peerPolicy     string
+		peerHyperNode  string
+		wantHyperNodes []string
+	}{
+		{
+			name: "subGroupAffinity keeps current subJob with peer policy",
+			job: jobWithSubGroupTopologyAffinity(
+				[]scheduling.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode"}},
+				nil,
+				nil,
+				nil,
+			),
+			currentPolicy:  "decode",
+			peerPolicy:     "prefill",
+			peerHyperNode:  "sn-a",
+			wantHyperNodes: []string{"sn-a"},
+		},
+		{
+			name: "single-policy subGroupAntiAffinity spreads subJobs under same policy",
+			job: jobWithSubGroupTopologyAffinity(
+				nil,
+				nil,
+				[]scheduling.SubGroupAffinityTerm{{SubGroups: []string{"worker"}, TopologyTierName: "supernode"}},
+				nil,
+			),
+			currentPolicy:  "worker",
+			peerPolicy:     "worker",
+			peerHyperNode:  "sn-a",
+			wantHyperNodes: []string{"sn-b"},
+		},
+		{
+			name: "multi-policy subGroupAntiAffinity separates different policies only",
+			job: jobWithSubGroupTopologyAffinity(
+				nil,
+				nil,
+				[]scheduling.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode"}},
+				nil,
+			),
+			currentPolicy:  "decode",
+			peerPolicy:     "prefill",
+			peerHyperNode:  "sn-a",
+			wantHyperNodes: []string{"sn-b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hn := buildTwoSupernodeTree()
+			current := subJobForPolicy(tt.job, tt.currentPolicy, "current", "")
+			peer := subJobForPolicy(tt.job, tt.peerPolicy, "peer", tt.peerHyperNode)
+			tt.job.SubJobs = map[api.SubJobID]*api.SubJobInfo{
+				current.UID: current,
+				peer.UID:    peer,
+			}
+			ssn := &framework.Session{
+				Jobs:                 map[api.JobID]*api.JobInfo{tt.job.UID: tt.job},
+				HyperNodes:           hn,
+				HyperNodesSetByTier:  twoSupernodeSetByTier(),
+				HyperNodeTierNameMap: defaultTierNameMap(),
+			}
+			plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
+
+			gradients := plugin.hyperNodeGradientForSubJob(ssn, tt.job, current, hn["root"])
+			gotNames := hyperNodeNamesFromGradients(gradients)
+			if !sets.New(tt.wantHyperNodes...).Equal(sets.New(gotNames...)) {
+				t.Fatalf("eligible hyperNodes mismatch: want %v, got %v", tt.wantHyperNodes, gotNames)
+			}
+		})
+	}
+}
+
 func TestHyperNodeOrderFn(t *testing.T) {
 	prodSelector := &metav1.LabelSelector{
 		MatchLabels: map[string]string{testGroupLabel: "prod"},
@@ -337,14 +465,14 @@ func TestHyperNodeOrderFn(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		weight      int
-		jobs        map[api.JobID]*api.JobInfo
-		selfJob     *api.JobInfo
-		candidates  map[string][]*api.NodeInfo
-		wantNil     bool
-		wantScores  map[string]float64
-		wantErr     bool
+		name       string
+		weight     int
+		jobs       map[api.JobID]*api.JobInfo
+		selfJob    *api.JobInfo
+		candidates map[string][]*api.NodeInfo
+		wantNil    bool
+		wantScores map[string]float64
+		wantErr    bool
 	}{
 		{
 			name:    "no preferred terms returns nil",
@@ -415,7 +543,8 @@ func TestHyperNodeOrderFn(t *testing.T) {
 			}
 			plugin := New(framework.Arguments{PluginWeight: tt.weight}).(*groupTopologyAffinityPlugin)
 
-			scores, err := plugin.hyperNodeOrderFn(ssn, tt.selfJob, tt.candidates)
+			subJob := &api.SubJobInfo{UID: "subjob-1", Job: tt.selfJob.UID}
+			scores, err := plugin.hyperNodeOrderFn(ssn, tt.selfJob, subJob, tt.candidates)
 			if tt.wantErr {
 				if err == nil {
 					t.Fatal("expected error, got nil")
@@ -430,6 +559,84 @@ func TestHyperNodeOrderFn(t *testing.T) {
 					t.Fatalf("expected nil scores, got %#v", scores)
 				}
 				return
+			}
+			for hyperNode, want := range tt.wantScores {
+				got, ok := scores[hyperNode]
+				if !ok {
+					t.Fatalf("missing score for %s", hyperNode)
+				}
+				if got != want {
+					t.Fatalf("score for %s: want %v, got %v", hyperNode, want, got)
+				}
+			}
+		})
+	}
+}
+
+func TestHyperNodeOrderFnForSubGroupPreferredTerms(t *testing.T) {
+	tests := []struct {
+		name       string
+		job        *api.JobInfo
+		current    *api.SubJobInfo
+		peer       *api.SubJobInfo
+		candidates map[string][]*api.NodeInfo
+		wantScores map[string]float64
+	}{
+		{
+			name: "subGroupAffinity prefers peer domain",
+			job: jobWithSubGroupTopologyAffinity(
+				nil,
+				[]scheduling.SubGroupAffinityTerm{{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode", Weight: 50}},
+				nil,
+				nil,
+			),
+			candidates: map[string][]*api.NodeInfo{"sn-a": {}, "sn-b": {}},
+			wantScores: map[string]float64{
+				"sn-a": 1.0 * float64(k8sFramework.MaxNodeScore),
+				"sn-b": 0.5 * float64(k8sFramework.MaxNodeScore),
+			},
+		},
+		{
+			name: "subGroupAntiAffinity penalizes peer domain",
+			job: jobWithSubGroupTopologyAffinity(
+				nil,
+				nil,
+				nil,
+				[]scheduling.SubGroupAffinityTerm{{SubGroups: []string{"worker"}, TopologyTierName: "supernode", Weight: 50}},
+			),
+			candidates: map[string][]*api.NodeInfo{"sn-a": {}, "sn-b": {}},
+			wantScores: map[string]float64{
+				"sn-a": 0.5 * float64(k8sFramework.MaxNodeScore),
+				"sn-b": 1.0 * float64(k8sFramework.MaxNodeScore),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			currentPolicy := "decode"
+			peerPolicy := "prefill"
+			if tt.name == "subGroupAntiAffinity penalizes peer domain" {
+				currentPolicy = "worker"
+				peerPolicy = "worker"
+			}
+			current := subJobForPolicy(tt.job, currentPolicy, "current", "")
+			peer := subJobForPolicy(tt.job, peerPolicy, "peer", "sn-a")
+			tt.job.SubJobs = map[api.SubJobID]*api.SubJobInfo{
+				current.UID: current,
+				peer.UID:    peer,
+			}
+			hn := buildTwoSupernodeTree()
+			ssn := &framework.Session{
+				Jobs:                 map[api.JobID]*api.JobInfo{tt.job.UID: tt.job},
+				HyperNodes:           hn,
+				HyperNodeTierNameMap: defaultTierNameMap(),
+			}
+			plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
+
+			scores, err := plugin.hyperNodeOrderFn(ssn, tt.job, current, tt.candidates)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
 			for hyperNode, want := range tt.wantScores {
 				got, ok := scores[hyperNode]
@@ -561,6 +768,17 @@ func buildRackUnderSupernodeTree() api.HyperNodeInfoMap {
 	return hn
 }
 
+func buildTwoRacksPerSupernodeTree() api.HyperNodeInfoMap {
+	hn := buildTwoSupernodeTree()
+	hn["rack-a1"] = newTestHyperNode("rack-a1", 1, "rack", "sn-a")
+	hn["rack-a2"] = newTestHyperNode("rack-a2", 1, "rack", "sn-a")
+	hn["rack-b1"] = newTestHyperNode("rack-b1", 1, "rack", "sn-b")
+	hn["rack-b2"] = newTestHyperNode("rack-b2", 1, "rack", "sn-b")
+	hn["sn-a"].Children = sets.New("rack-a1", "rack-a2")
+	hn["sn-b"].Children = sets.New("rack-b1", "rack-b2")
+	return hn
+}
+
 func twoSupernodeSetByTier() map[int]sets.Set[string] {
 	return map[int]sets.Set[string]{
 		2: sets.New("sn-a", "sn-b"),
@@ -571,6 +789,14 @@ func twoSupernodeSetByTier() map[int]sets.Set[string] {
 func rackSupernodeSetByTier() map[int]sets.Set[string] {
 	return map[int]sets.Set[string]{
 		1: sets.New("cab-a", "cab-b"),
+		2: sets.New("sn-a", "sn-b"),
+		3: sets.New("root"),
+	}
+}
+
+func twoRacksPerSupernodeSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{
+		1: sets.New("rack-a1", "rack-a2", "rack-b1", "rack-b2"),
 		2: sets.New("sn-a", "sn-b"),
 		3: sets.New("root"),
 	}
@@ -656,6 +882,41 @@ func jobWithTopologyAffinity(required, preferred []scheduling.PodGroupAffinityTe
 		PodGroup: &api.PodGroup{
 			PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{TopologyAffinity: spec}},
 		},
+	}
+}
+
+func jobWithSubGroupTopologyAffinity(
+	requiredAffinity, preferredAffinity, requiredAntiAffinity, preferredAntiAffinity []scheduling.SubGroupAffinityTerm,
+) *api.JobInfo {
+	spec := &scheduling.TopologyAffinitySpec{}
+	if len(requiredAffinity) > 0 || len(preferredAffinity) > 0 {
+		spec.SubGroupAffinity = &scheduling.SubGroupAffinity{
+			Required:  requiredAffinity,
+			Preferred: preferredAffinity,
+		}
+	}
+	if len(requiredAntiAffinity) > 0 || len(preferredAntiAffinity) > 0 {
+		spec.SubGroupAntiAffinity = &scheduling.SubGroupAntiAffinity{
+			Required:  requiredAntiAffinity,
+			Preferred: preferredAntiAffinity,
+		}
+	}
+	return &api.JobInfo{
+		UID:       "self",
+		Namespace: "default",
+		PodGroup: &api.PodGroup{
+			PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{TopologyAffinity: spec}},
+		},
+	}
+}
+
+func subJobForPolicy(job *api.JobInfo, policy, uid, hyperNode string) *api.SubJobInfo {
+	subJobID := api.SubJobID(uid)
+	return &api.SubJobInfo{
+		GID:                api.SubJobGID(fmt.Sprintf("%s/%s", job.UID, policy)),
+		UID:                subJobID,
+		Job:                job.UID,
+		AllocatedHyperNode: hyperNode,
 	}
 }
 

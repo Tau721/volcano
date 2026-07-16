@@ -192,6 +192,37 @@ func TestIntersectHyperNodeGradients(t *testing.T) {
 	}, stats.ExcludedByReason)
 }
 
+func TestIntersectHyperNodeGradientsPreservesPluginLayerPriority(t *testing.T) {
+	tier1A := testHyperNodeInfo("tier1-a", 1)
+	tier1B := testHyperNodeInfo("tier1-b", 1)
+	tier2 := testHyperNodeInfo("tier2", 2)
+	normalOrder := [][]*api.HyperNodeInfo{
+		{tier1A, tier1B},
+		{tier2},
+	}
+	preferredOrder := [][]*api.HyperNodeInfo{
+		{tier2},
+		{tier1A, tier1B},
+	}
+
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "normal", Gradients: normalOrder},
+		{PluginName: "preferred", Gradients: preferredOrder},
+	})
+	assert.Equal(t, []string{"tier2"}, hyperNodeNamesAtTier(result, 0))
+	assert.Equal(t, []string{"tier1-a", "tier1-b"}, hyperNodeNamesAtTier(result, 1))
+	assert.Equal(t, map[int]int{1: 2, 2: 1}, stats.IntersectedByTier)
+
+	// A hard plugin may remove the preferred container. The retained fine-tier
+	// candidate must remain available as soft fallback.
+	result, stats = intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "preferred", Gradients: preferredOrder},
+		{PluginName: "hard", Gradients: [][]*api.HyperNodeInfo{{tier1B}}},
+	})
+	assert.Equal(t, [][]*api.HyperNodeInfo{{tier1B}}, result)
+	assert.Equal(t, map[int]int{1: 1}, stats.IntersectedByTier)
+}
+
 func TestIntersectHyperNodeGradientsSinglePlugin(t *testing.T) {
 	gradients := [][]*api.HyperNodeInfo{{testHyperNodeInfo("x", 1)}}
 	result, stats := intersectHyperNodeGradients(gradientByPluginOnly(gradients))
@@ -200,7 +231,7 @@ func TestIntersectHyperNodeGradientsSinglePlugin(t *testing.T) {
 
 	empty := [][]*api.HyperNodeInfo{}
 	result, stats = intersectHyperNodeGradients(gradientByPluginOnly(empty))
-	assert.Equal(t, empty, result)
+	assert.Empty(t, result)
 	assert.Empty(t, stats.IntersectedByTier)
 }
 
@@ -216,6 +247,27 @@ func TestIntersectHyperNodeGradientsWithEmptyPluginResult(t *testing.T) {
 	assert.Empty(t, stats.PluginEligibleByTier["empty"])
 	assert.Empty(t, stats.IntersectedByTier)
 	assert.Equal(t, map[string]string{"a": "empty"}, stats.ExcludedByReason)
+}
+
+func TestIntersectHyperNodeGradientsFullCandidatePlugin(t *testing.T) {
+	a := testHyperNodeInfo("a", 1)
+	b := testHyperNodeInfo("b", 2)
+	fullCandidates := [][]*api.HyperNodeInfo{{a}, {b}}
+
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "full-candidate", Gradients: fullCandidates},
+		{PluginName: "constraint", Gradients: [][]*api.HyperNodeInfo{{b}}},
+	})
+	assert.Equal(t, []string{"b"}, hyperNodeNamesAtTier(result, 0))
+	assert.Equal(t, map[int]int{1: 1, 2: 1}, stats.PluginEligibleByTier["full-candidate"])
+	assert.Equal(t, map[int]int{2: 1}, stats.PluginEligibleByTier["constraint"])
+
+	result, stats = intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "full-candidate-a", Gradients: fullCandidates},
+		{PluginName: "full-candidate-b", Gradients: fullCandidates},
+	})
+	assert.Equal(t, fullCandidates, result)
+	assert.Equal(t, map[int]int{1: 1, 2: 1}, stats.IntersectedByTier)
 }
 
 func TestHyperNodeGradientForJobFnEmptyGradient(t *testing.T) {

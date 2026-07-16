@@ -24,13 +24,14 @@ import (
 // PodGroupSpecApplyConfiguration represents a declarative configuration of the PodGroupSpec type for use
 // with apply.
 type PodGroupSpecApplyConfiguration struct {
-	MinMember         *int32                                 `json:"minMember,omitempty"`
-	MinTaskMember     map[string]int32                       `json:"minTaskMember,omitempty"`
-	Queue             *string                                `json:"queue,omitempty"`
-	PriorityClassName *string                                `json:"priorityClassName,omitempty"`
-	MinResources      *v1.ResourceList                       `json:"minResources,omitempty"`
-	NetworkTopology   *NetworkTopologySpecApplyConfiguration `json:"networkTopology,omitempty"`
-	SubGroupPolicy    []SubGroupPolicySpecApplyConfiguration `json:"subGroupPolicy,omitempty"`
+	MinMember         *int32                                  `json:"minMember,omitempty"`
+	MinTaskMember     map[string]int32                        `json:"minTaskMember,omitempty"`
+	Queue             *string                                 `json:"queue,omitempty"`
+	PriorityClassName *string                                 `json:"priorityClassName,omitempty"`
+	MinResources      *v1.ResourceList                        `json:"minResources,omitempty"`
+	NetworkTopology   *NetworkTopologySpecApplyConfiguration  `json:"networkTopology,omitempty"`
+	SubGroupPolicy    []SubGroupPolicySpecApplyConfiguration  `json:"subGroupPolicy,omitempty"`
+	TopologyAffinity  *TopologyAffinitySpecApplyConfiguration `json:"topologyAffinity,omitempty"`
 }
 
 // PodGroupSpecApplyConfiguration constructs a declarative configuration of the PodGroupSpec type for use with
@@ -103,5 +104,13 @@ func (b *PodGroupSpecApplyConfiguration) WithSubGroupPolicy(values ...*SubGroupP
 		}
 		b.SubGroupPolicy = append(b.SubGroupPolicy, *values[i])
 	}
+	return b
+}
+
+// WithTopologyAffinity sets the TopologyAffinity field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the TopologyAffinity field is set to the value of the last call.
+func (b *PodGroupSpecApplyConfiguration) WithTopologyAffinity(value *TopologyAffinitySpecApplyConfiguration) *PodGroupSpecApplyConfiguration {
+	b.TopologyAffinity = value
 	return b
 }

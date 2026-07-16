@@ -1379,7 +1379,8 @@ func (ji *JobInfo) ContainsHardTopology() bool {
 // normal node scheduling and the anti-affinity preference is never evaluated.
 func (ji *JobInfo) RequiresHyperNodeAllocate() bool {
 	return ji.ContainsHardTopology() || ji.ContainsSubJobPolicy() ||
-		ji.ContainsHardPodGroupAntiAffinity() || ji.HasPreferredPodGroupAntiAffinity()
+		ji.ContainsHardPodGroupAntiAffinity() || ji.HasPreferredPodGroupAntiAffinity() ||
+		ji.ContainsHardSubGroupTopologyAffinity() || ji.HasPreferredSubGroupTopologyAffinity()
 }
 
 // ContainsNetworkTopologyInSubJob returns whether the subJobs in the job contain network topology

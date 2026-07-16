@@ -94,7 +94,7 @@ func validatePodGroup(pg *schedulingv1beta1.PodGroup) string {
 
 	errMsg += checkQueueState(pg.Spec.Queue)
 	errMsg += validateNetworkTopology(pg.Spec.NetworkTopology, pg.Spec.SubGroupPolicy)
-	errMsg += validateTopologyAffinity(pg.Spec.TopologyAffinity)
+	errMsg += validateTopologyAffinity(pg.Spec.TopologyAffinity, pg.Spec.SubGroupPolicy)
 
 	return errMsg
 }
@@ -132,7 +132,7 @@ func validateNetworkTopology(networkTopology *schedulingv1beta1.NetworkTopologyS
 	return strings.Join(errs, " ")
 }
 
-func validateTopologyAffinity(topologyAffinity *schedulingv1beta1.TopologyAffinitySpec) string {
+func validateTopologyAffinity(topologyAffinity *schedulingv1beta1.TopologyAffinitySpec, policies []schedulingv1beta1.SubGroupPolicySpec) string {
 	if topologyAffinity == nil {
 		return ""
 	}
@@ -149,6 +149,28 @@ func validateTopologyAffinity(topologyAffinity *schedulingv1beta1.TopologyAffini
 				fmt.Sprintf("topologyAffinity.podGroupAntiAffinity.preferred[%d]", index), term, false)...)
 		}
 	}
+	policyMap := subGroupPolicyMap(policies)
+	if affinity := topologyAffinity.SubGroupAffinity; affinity != nil {
+		for index, term := range affinity.Required {
+			errs = append(errs, validateSubGroupAffinityTerm(
+				fmt.Sprintf("topologyAffinity.subGroupAffinity.required[%d]", index), term, true, true, policyMap)...)
+		}
+		for index, term := range affinity.Preferred {
+			errs = append(errs, validateSubGroupAffinityTerm(
+				fmt.Sprintf("topologyAffinity.subGroupAffinity.preferred[%d]", index), term, false, true, policyMap)...)
+		}
+	}
+	if anti := topologyAffinity.SubGroupAntiAffinity; anti != nil {
+		for index, term := range anti.Required {
+			errs = append(errs, validateSubGroupAffinityTerm(
+				fmt.Sprintf("topologyAffinity.subGroupAntiAffinity.required[%d]", index), term, true, false, policyMap)...)
+		}
+		for index, term := range anti.Preferred {
+			errs = append(errs, validateSubGroupAffinityTerm(
+				fmt.Sprintf("topologyAffinity.subGroupAntiAffinity.preferred[%d]", index), term, false, false, policyMap)...)
+		}
+	}
+	errs = append(errs, validateHardSubGroupAffinityConflicts(topologyAffinity)...)
 
 	return strings.Join(errs, " ")
 }
@@ -171,4 +193,85 @@ func validatePodGroupAffinityTerm(path string, term schedulingv1beta1.PodGroupAf
 		errs = append(errs, fmt.Sprintf("%s: must specify topologyTier or topologyTierName.", path))
 	}
 	return errs
+}
+
+func validateSubGroupAffinityTerm(path string, term schedulingv1beta1.SubGroupAffinityTerm, required, affinity bool, policies map[string]schedulingv1beta1.SubGroupPolicySpec) []string {
+	var errs []string
+	if required && term.Weight != 0 {
+		errs = append(errs, fmt.Sprintf("%s: weight must not be set on required terms.", path))
+	}
+	if !required && (term.Weight < 1 || term.Weight > 100) {
+		errs = append(errs, fmt.Sprintf("%s: weight must be an integer in the range 1-100 for preferred terms.", path))
+	}
+	if len(term.SubGroups) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: subGroups is required.", path))
+	}
+	if affinity && len(term.SubGroups) < 2 {
+		errs = append(errs, fmt.Sprintf("%s: subGroupAffinity requires at least two subGroups.", path))
+	}
+	seen := map[string]struct{}{}
+	for _, subGroup := range term.SubGroups {
+		if _, ok := seen[subGroup]; ok {
+			errs = append(errs, fmt.Sprintf("%s: subGroups must not contain duplicate name %q.", path, subGroup))
+			continue
+		}
+		seen[subGroup] = struct{}{}
+		if _, ok := policies[subGroup]; !ok {
+			errs = append(errs, fmt.Sprintf("%s: subGroupPolicy %q is not defined.", path, subGroup))
+		}
+	}
+	if !affinity && len(term.SubGroups) == 1 {
+		if policy, ok := policies[term.SubGroups[0]]; ok && len(policy.MatchLabelKeys) == 0 && (policy.MinSubGroups == nil || *policy.MinSubGroups < 2) {
+			errs = append(errs, fmt.Sprintf("%s: single-policy subGroupAntiAffinity requires MatchLabelKeys or minSubGroups >= 2 on subGroupPolicy %q.", path, policy.Name))
+		}
+	}
+	if term.TopologyTier != nil && term.TopologyTierName != "" {
+		errs = append(errs, fmt.Sprintf("%s: must not specify topologyTier and topologyTierName simultaneously.", path))
+	}
+	if term.TopologyTier == nil && term.TopologyTierName == "" {
+		errs = append(errs, fmt.Sprintf("%s: must specify topologyTier or topologyTierName.", path))
+	}
+	return errs
+}
+
+func subGroupPolicyMap(policies []schedulingv1beta1.SubGroupPolicySpec) map[string]schedulingv1beta1.SubGroupPolicySpec {
+	result := make(map[string]schedulingv1beta1.SubGroupPolicySpec, len(policies))
+	for _, policy := range policies {
+		result[policy.Name] = policy
+	}
+	return result
+}
+
+func validateHardSubGroupAffinityConflicts(topologyAffinity *schedulingv1beta1.TopologyAffinitySpec) []string {
+	if topologyAffinity.SubGroupAffinity == nil || topologyAffinity.SubGroupAntiAffinity == nil {
+		return nil
+	}
+	var errs []string
+	for affinityIndex, affinityTerm := range topologyAffinity.SubGroupAffinity.Required {
+		for antiIndex, antiTerm := range topologyAffinity.SubGroupAntiAffinity.Required {
+			if !subGroupsOverlap(affinityTerm.SubGroups, antiTerm.SubGroups) {
+				continue
+			}
+			if affinityTerm.TopologyTier != nil && antiTerm.TopologyTier != nil && *affinityTerm.TopologyTier < *antiTerm.TopologyTier {
+				errs = append(errs, fmt.Sprintf("topologyAffinity: subGroupAffinity.required[%d] tier must be greater than or equal to subGroupAntiAffinity.required[%d] tier for overlapping subGroups.", affinityIndex, antiIndex))
+			}
+			if affinityTerm.TopologyTierName != "" && affinityTerm.TopologyTierName == antiTerm.TopologyTierName {
+				continue
+			}
+		}
+	}
+	return errs
+}
+
+func subGroupsOverlap(left, right []string) bool {
+	seen := map[string]struct{}{}
+	for _, value := range left {
+		seen[value] = struct{}{}
+	}
+	for _, value := range right {
+		if _, ok := seen[value]; ok {
+			return true
+		}
+	}
+	return false
 }

@@ -83,7 +83,7 @@ func (gta *groupTopologyAffinityPlugin) OnSessionOpen(ssn *framework.Session) {
 		if !ok {
 			return nil, nil
 		}
-		return gta.hyperNodeOrderFn(ssn, job, hyperNodes)
+		return gta.hyperNodeOrderFn(ssn, job, subJob, hyperNodes)
 	})
 }
 
@@ -97,7 +97,146 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeGradientForJob(
 	job *api.JobInfo,
 	root *api.HyperNodeInfo,
 ) [][]*api.HyperNodeInfo {
-	return gta.hyperNodeGradient(ssn, job, root, job.AllocatedHyperNode)
+	gradients := gta.hyperNodeGradient(ssn, job, root, job.AllocatedHyperNode)
+	return prioritizePreferredSubGroupJobGradients(ssn, job, gradients)
+}
+
+// prioritizePreferredSubGroupJobGradients keeps the complete candidate set but
+// tries a Job container that exposes the topology domains needed by preferred
+// SubGroup terms before finer, single-domain candidates. The existing SubJob
+// order callback can then compare sibling domains after the first peer is
+// placed. Coarser and finer candidates remain available as soft fallbacks.
+func prioritizePreferredSubGroupJobGradients(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	gradients [][]*api.HyperNodeInfo,
+) [][]*api.HyperNodeInfo {
+	preferredTier, found := preferredSubGroupJobContainerTier(ssn, job)
+	if !found || len(gradients) == 0 {
+		return gradients
+	}
+
+	hyperNodesByTier := make(map[int][]*api.HyperNodeInfo)
+	for _, gradient := range gradients {
+		for _, hyperNode := range gradient {
+			hyperNodesByTier[hyperNode.Tier()] = append(hyperNodesByTier[hyperNode.Tier()], hyperNode)
+		}
+	}
+
+	if len(hyperNodesByTier[preferredTier]) == 0 {
+		// If another hard constraint removed the preferred container tier, keep
+		// the original ordering. Preferred topology must not become a filter.
+		return gradients
+	}
+
+	coarserTiers := make([]int, 0, len(hyperNodesByTier))
+	finerTiers := make([]int, 0, len(hyperNodesByTier))
+	for tier := range hyperNodesByTier {
+		switch {
+		case tier > preferredTier:
+			coarserTiers = append(coarserTiers, tier)
+		case tier < preferredTier:
+			finerTiers = append(finerTiers, tier)
+		}
+	}
+	sort.Ints(coarserTiers)
+	sort.Ints(finerTiers)
+
+	tierOrder := make([]int, 0, len(hyperNodesByTier))
+	tierOrder = append(tierOrder, preferredTier)
+	tierOrder = append(tierOrder, coarserTiers...)
+	tierOrder = append(tierOrder, finerTiers...)
+
+	result := make([][]*api.HyperNodeInfo, 0, len(tierOrder))
+	for _, tier := range tierOrder {
+		hyperNodes := hyperNodesByTier[tier]
+		sort.SliceStable(hyperNodes, func(i, j int) bool {
+			return hyperNodes[i].Name < hyperNodes[j].Name
+		})
+		result = append(result, hyperNodes)
+	}
+
+	klog.V(3).Infof("subGroup topology affinity: prioritize Job gradient, job=%s, preferredContainerTier=%d, tierOrder=%v",
+		klog.KRef(job.Namespace, job.Name), preferredTier, tierOrder)
+	return result
+}
+
+func preferredSubGroupJobContainerTier(ssn *framework.Session, job *api.JobInfo) (int, bool) {
+	if job == nil || len(job.SubJobs) < 2 {
+		return 0, false
+	}
+
+	preferredTier := 0
+	found := false
+	for _, term := range job.PreferredSubGroupAffinityTerms() {
+		if term.Weight < 1 || term.Weight > 100 || !hasSubJobPeerPairForTerm(job, term, false) {
+			continue
+		}
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.V(3).Infof("subGroup affinity: resolve preferred Job container tier failed, job=%s, err=%v",
+				klog.KRef(job.Namespace, job.Name), err)
+			continue
+		}
+		if !found || tier > preferredTier {
+			preferredTier = tier
+			found = true
+		}
+	}
+
+	availableTiers := make([]int, 0, len(ssn.HyperNodesSetByTier))
+	for tier := range ssn.HyperNodesSetByTier {
+		availableTiers = append(availableTiers, tier)
+	}
+	sort.Ints(availableTiers)
+	for _, term := range job.PreferredSubGroupAntiAffinityTerms() {
+		if term.Weight < 1 || term.Weight > 100 || !hasSubJobPeerPairForTerm(job, term, true) {
+			continue
+		}
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.V(3).Infof("subGroup anti-affinity: resolve preferred Job container tier failed, job=%s, err=%v",
+				klog.KRef(job.Namespace, job.Name), err)
+			continue
+		}
+		parentTier, ok := nextHigherTier(availableTiers, tier)
+		if !ok {
+			continue
+		}
+		if !found || parentTier > preferredTier {
+			preferredTier = parentTier
+			found = true
+		}
+	}
+	return preferredTier, found
+}
+
+func hasSubJobPeerPairForTerm(job *api.JobInfo, term scheduling.SubGroupAffinityTerm, antiAffinity bool) bool {
+	subJobs := make([]*api.SubJobInfo, 0, len(job.SubJobs))
+	for _, subJob := range job.SubJobs {
+		if subJob != nil {
+			subJobs = append(subJobs, subJob)
+		}
+	}
+	for i := 0; i < len(subJobs); i++ {
+		selfPolicy := api.SubJobPolicyName(subJobs[i])
+		for j := i + 1; j < len(subJobs); j++ {
+			peerPolicy := api.SubJobPolicyName(subJobs[j])
+			if subGroupPeerMatchesTerm(selfPolicy, peerPolicy, term, antiAffinity) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func nextHigherTier(sortedTiers []int, tier int) (int, bool) {
+	for _, candidate := range sortedTiers {
+		if candidate > tier {
+			return candidate, true
+		}
+	}
+	return 0, false
 }
 
 func (gta *groupTopologyAffinityPlugin) hyperNodeGradientForSubJob(
@@ -106,7 +245,11 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeGradientForSubJob(
 	subJob *api.SubJobInfo,
 	root *api.HyperNodeInfo,
 ) [][]*api.HyperNodeInfo {
-	return gta.hyperNodeGradient(ssn, job, root, subJob.AllocatedHyperNode)
+	gradients := gta.hyperNodeGradient(ssn, job, root, subJob.AllocatedHyperNode)
+	if !job.ContainsHardSubGroupTopologyAffinity() || len(gradients) == 0 {
+		return gradients
+	}
+	return gta.filterSubGroupHardTerms(ssn, job, subJob, gradients)
 }
 
 func (gta *groupTopologyAffinityPlugin) hyperNodeGradient(
@@ -346,13 +489,97 @@ func (gta *groupTopologyAffinityPlugin) isEligibleForPodGroupAntiAffinity(
 	return true
 }
 
+func (gta *groupTopologyAffinityPlugin) filterSubGroupHardTerms(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	gradients [][]*api.HyperNodeInfo,
+) [][]*api.HyperNodeInfo {
+	result := make([][]*api.HyperNodeInfo, 0, len(gradients))
+	for _, tierGroup := range gradients {
+		filtered := make([]*api.HyperNodeInfo, 0, len(tierGroup))
+		for _, hn := range tierGroup {
+			if gta.isEligibleForSubGroupHardTerms(ssn, job, subJob, hn) {
+				filtered = append(filtered, hn)
+			}
+		}
+		if len(filtered) > 0 {
+			result = append(result, filtered)
+		}
+	}
+	return result
+}
+
+func (gta *groupTopologyAffinityPlugin) isEligibleForSubGroupHardTerms(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	hn *api.HyperNodeInfo,
+) bool {
+	for termIndex, term := range job.RequiredSubGroupAffinityTerms() {
+		if !subGroupTermIncludes(term, api.SubJobPolicyName(subJob)) {
+			continue
+		}
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.V(3).Infof("subGroup affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=resolveTermTierFailed, termIndex=%d",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex)
+			return false
+		}
+		ancestorHyperNode := ssn.HyperNodes.GetAncestorHyperNode(hn.Name, tier)
+		if ancestorHyperNode == "" {
+			klog.V(3).Infof("subGroup affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=emptyAncestorHyperNode, termIndex=%d, tier=%d",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex, tier)
+			return false
+		}
+		peerHyperNodes := peerSubJobOccupiedHyperNodesAtTier(job, subJob, term, ssn.HyperNodes, tier, ssn.RealNodesSet, false)
+		if peerHyperNodes.Len() == 0 {
+			continue
+		}
+		if peerHyperNodes.Len() != 1 || !peerHyperNodes.Has(ancestorHyperNode) {
+			klog.V(3).Infof("subGroup affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=notWithPeerSubGroups, termIndex=%d, tier=%d, candidateHyperNode=%s, peerHyperNodes=%s",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex, tier, ancestorHyperNode, strings.Join(sortedSet(peerHyperNodes), ","))
+			return false
+		}
+	}
+
+	for termIndex, term := range job.RequiredSubGroupAntiAffinityTerms() {
+		if !subGroupTermIncludes(term, api.SubJobPolicyName(subJob)) {
+			continue
+		}
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			klog.V(3).Infof("subGroup anti-affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=resolveTermTierFailed, termIndex=%d",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex)
+			return false
+		}
+		ancestorHyperNode := ssn.HyperNodes.GetAncestorHyperNode(hn.Name, tier)
+		if ancestorHyperNode == "" {
+			klog.V(3).Infof("subGroup anti-affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=emptyAncestorHyperNode, termIndex=%d, tier=%d",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex, tier)
+			return false
+		}
+		peerHyperNodes := peerSubJobOccupiedHyperNodesAtTier(job, subJob, term, ssn.HyperNodes, tier, ssn.RealNodesSet, true)
+		if peerHyperNodes.Has(ancestorHyperNode) {
+			klog.V(3).Infof("subGroup anti-affinity: reject hyperNode, job=%s, subJob=%s, hyperNode=%s, reason=conflictWithPeerSubGroup, termIndex=%d, tier=%d, conflictHyperNode=%s",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hn.Name, termIndex, tier, ancestorHyperNode)
+			return false
+		}
+	}
+
+	return true
+}
+
 func (gta *groupTopologyAffinityPlugin) hyperNodeOrderFn(
 	ssn *framework.Session,
 	job *api.JobInfo,
+	subJob *api.SubJobInfo,
 	hyperNodes map[string][]*api.NodeInfo,
 ) (map[string]float64, error) {
-	terms := job.PreferredPodGroupAntiAffinityTerms()
-	if len(terms) == 0 {
+	podGroupAntiTerms := job.PreferredPodGroupAntiAffinityTerms()
+	subGroupAffinityTerms := job.PreferredSubGroupAffinityTerms()
+	subGroupAntiTerms := job.PreferredSubGroupAntiAffinityTerms()
+	if len(podGroupAntiTerms) == 0 && len(subGroupAffinityTerms) == 0 && len(subGroupAntiTerms) == 0 {
 		return nil, nil
 	}
 
@@ -369,13 +596,50 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeOrderFn(
 		scores[hyperNode] = FullScore
 	}
 
+	if err := gta.scorePreferredPodGroupAntiAffinityTerms(ssn, job, hyperNodes, scores, podGroupAntiTerms); err != nil {
+		return nil, err
+	}
+	if err := gta.scorePreferredSubGroupAffinityTerms(ssn, job, subJob, hyperNodes, scores, subGroupAffinityTerms); err != nil {
+		return nil, err
+	}
+	if err := gta.scorePreferredSubGroupAntiAffinityTerms(ssn, job, subJob, hyperNodes, scores, subGroupAntiTerms); err != nil {
+		return nil, err
+	}
+
+	for hyperNode, score := range scores {
+		scores[hyperNode] = float64(gta.weight) * score * float64(k8sFramework.MaxNodeScore)
+	}
+	if len(scores) > 0 {
+		scoredHyperNodes := make([]string, 0, len(scores))
+		for hyperNode := range scores {
+			scoredHyperNodes = append(scoredHyperNodes, hyperNode)
+		}
+		sort.Strings(scoredHyperNodes)
+
+		details := make([]string, 0, len(scoredHyperNodes))
+		for _, hyperNode := range scoredHyperNodes {
+			details = append(details, fmt.Sprintf("%s:%.2f", hyperNode, scores[hyperNode]))
+		}
+		klog.V(3).Infof("podGroup anti-affinity: preferred final scores, job=%s, pluginWeight=%d, scores=%s",
+			klog.KRef(job.Namespace, job.Name), gta.weight, strings.Join(details, ","))
+	}
+	return scores, nil
+}
+
+func (gta *groupTopologyAffinityPlugin) scorePreferredPodGroupAntiAffinityTerms(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	hyperNodes map[string][]*api.NodeInfo,
+	scores map[string]float64,
+	terms []scheduling.PodGroupAffinityTerm,
+) error {
 	matchingHyperNodesByTerm := make([]sets.Set[string], len(terms))
 	for termIndex, term := range terms {
 		matchingHyperNodes, err := api.MatchingPodGroupsAllocatedHyperNodesForTerm(
 			ssn.Jobs, ssn.HyperNodes, ssn.HyperNodeTierNameMap, job, term, ssn.RealNodesSet,
 		)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		matchingHyperNodesByTerm[termIndex] = matchingHyperNodes
 	}
@@ -398,7 +662,7 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeOrderFn(
 		matchingHyperNodes := matchingHyperNodesByTerm[termIndex]
 		tier, err := api.ResolvePodGroupTermTier(term, ssn.HyperNodeTierNameMap)
 		if err != nil {
-			return nil, err
+			return err
 		}
 
 		if term.Weight < 1 || term.Weight > 100 {
@@ -421,25 +685,140 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeOrderFn(
 			}
 		}
 	}
+	return nil
+}
 
-	for hyperNode, score := range scores {
-		scores[hyperNode] = float64(gta.weight) * score * float64(k8sFramework.MaxNodeScore)
-	}
-	if len(scores) > 0 {
-		scoredHyperNodes := make([]string, 0, len(scores))
-		for hyperNode := range scores {
-			scoredHyperNodes = append(scoredHyperNodes, hyperNode)
+func (gta *groupTopologyAffinityPlugin) scorePreferredSubGroupAffinityTerms(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	hyperNodes map[string][]*api.NodeInfo,
+	scores map[string]float64,
+	terms []scheduling.SubGroupAffinityTerm,
+) error {
+	for termIndex, term := range terms {
+		if !subGroupTermIncludes(term, api.SubJobPolicyName(subJob)) || term.Weight < 1 || term.Weight > 100 {
+			continue
 		}
-		sort.Strings(scoredHyperNodes)
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			return err
+		}
+		peerHyperNodes := peerSubJobOccupiedHyperNodesAtTier(job, subJob, term, ssn.HyperNodes, tier, ssn.RealNodesSet, false)
+		if peerHyperNodes.Len() == 0 {
+			continue
+		}
+		weightFactor := float64(term.Weight) / 100.0
+		for hyperNode := range hyperNodes {
+			ancestorHyperNode := ssn.HyperNodes.GetAncestorHyperNode(hyperNode, tier)
+			if ancestorHyperNode == "" {
+				continue
+			}
+			if peerHyperNodes.Len() == 1 && peerHyperNodes.Has(ancestorHyperNode) {
+				continue
+			}
+			scoreBefore := scores[hyperNode]
+			scores[hyperNode] -= weightFactor * FullScore
+			if scores[hyperNode] < ZeroScore {
+				scores[hyperNode] = ZeroScore
+			}
+			klog.V(4).Infof("subGroup affinity: preferred score detail, job=%s, subJob=%s, hyperNode=%s, termIndex=%d, weight=%d, scoreBefore=%.2f, scoreAfter=%.2f",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hyperNode, termIndex, term.Weight, scoreBefore, scores[hyperNode])
+		}
+	}
+	return nil
+}
 
-		details := make([]string, 0, len(scoredHyperNodes))
-		for _, hyperNode := range scoredHyperNodes {
-			details = append(details, fmt.Sprintf("%s:%.2f", hyperNode, scores[hyperNode]))
+func (gta *groupTopologyAffinityPlugin) scorePreferredSubGroupAntiAffinityTerms(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	hyperNodes map[string][]*api.NodeInfo,
+	scores map[string]float64,
+	terms []scheduling.SubGroupAffinityTerm,
+) error {
+	for termIndex, term := range terms {
+		if !subGroupTermIncludes(term, api.SubJobPolicyName(subJob)) || term.Weight < 1 || term.Weight > 100 {
+			continue
 		}
-		klog.V(3).Infof("podGroup anti-affinity: preferred final scores, job=%s, pluginWeight=%d, scores=%s",
-			klog.KRef(job.Namespace, job.Name), gta.weight, strings.Join(details, ","))
+		tier, err := api.ResolveSubGroupTermTier(term, ssn.HyperNodeTierNameMap)
+		if err != nil {
+			return err
+		}
+		peerHyperNodes := peerSubJobOccupiedHyperNodesAtTier(job, subJob, term, ssn.HyperNodes, tier, ssn.RealNodesSet, true)
+		if peerHyperNodes.Len() == 0 {
+			continue
+		}
+		weightFactor := float64(term.Weight) / 100.0
+		for hyperNode := range hyperNodes {
+			ancestorHyperNode := ssn.HyperNodes.GetAncestorHyperNode(hyperNode, tier)
+			if ancestorHyperNode == "" || !peerHyperNodes.Has(ancestorHyperNode) {
+				continue
+			}
+			scoreBefore := scores[hyperNode]
+			scores[hyperNode] -= weightFactor * FullScore
+			if scores[hyperNode] < ZeroScore {
+				scores[hyperNode] = ZeroScore
+			}
+			klog.V(4).Infof("subGroup anti-affinity: preferred score detail, job=%s, subJob=%s, hyperNode=%s, termIndex=%d, weight=%d, scoreBefore=%.2f, scoreAfter=%.2f",
+				klog.KRef(job.Namespace, job.Name), subJob.UID, hyperNode, termIndex, term.Weight, scoreBefore, scores[hyperNode])
+		}
 	}
-	return scores, nil
+	return nil
+}
+
+func peerSubJobOccupiedHyperNodesAtTier(
+	job *api.JobInfo,
+	selfSubJob *api.SubJobInfo,
+	term scheduling.SubGroupAffinityTerm,
+	hyperNodes api.HyperNodeInfoMap,
+	tier int,
+	nodesByHyperNode map[string]sets.Set[string],
+	antiAffinity bool,
+) sets.Set[string] {
+	occupied := sets.New[string]()
+	selfPolicy := api.SubJobPolicyName(selfSubJob)
+	for _, peerSubJob := range job.SubJobs {
+		if peerSubJob == nil || selfSubJob == nil || peerSubJob.UID == selfSubJob.UID {
+			continue
+		}
+		peerPolicy := api.SubJobPolicyName(peerSubJob)
+		if !subGroupPeerMatchesTerm(selfPolicy, peerPolicy, term, antiAffinity) {
+			continue
+		}
+		for hyperNode := range api.CollectSubJobOccupiedHyperNodesAtTier(peerSubJob, hyperNodes, tier, nodesByHyperNode) {
+			occupied.Insert(hyperNode)
+		}
+	}
+	return occupied
+}
+
+func subGroupPeerMatchesTerm(selfPolicy, peerPolicy string, term scheduling.SubGroupAffinityTerm, antiAffinity bool) bool {
+	if selfPolicy == "" || peerPolicy == "" || !subGroupTermIncludes(term, selfPolicy) || !subGroupTermIncludes(term, peerPolicy) {
+		return false
+	}
+	if !antiAffinity {
+		return true
+	}
+	if len(term.SubGroups) == 1 {
+		return peerPolicy == selfPolicy
+	}
+	return peerPolicy != selfPolicy
+}
+
+func subGroupTermIncludes(term scheduling.SubGroupAffinityTerm, policy string) bool {
+	for _, subGroup := range term.SubGroups {
+		if subGroup == policy {
+			return true
+		}
+	}
+	return false
+}
+
+func sortedSet(values sets.Set[string]) []string {
+	result := values.UnsortedList()
+	sort.Strings(result)
+	return result
 }
 
 func maxHyperNodeTier(hyperNodesSetByTier map[int]sets.Set[string]) int {

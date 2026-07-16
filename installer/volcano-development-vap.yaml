@@ -9094,6 +9094,8 @@ data:
       - name: proportion
       - name: nodeorder
       - name: binpack
+      - name: network-topology-aware
+      - name: group-topology-affinity
 ---
 # Source: volcano/templates/scheduler.yaml
 kind: ClusterRole
