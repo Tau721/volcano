@@ -537,8 +537,15 @@ func (alloc *Action) allocateForSubJob(
 			continue // try next gradient
 		}
 
+		// Keep a job-level soft topology preference across subJobs. The candidates in
+		// stmtBackup have already passed the dry-run, so narrowing the candidate set
+		// here does not change predicate or resource feasibility. If the preferred
+		// topology domain has no feasible candidate, keep all candidates to preserve
+		// soft-mode fallback semantics.
+		candidateStmts := alloc.preferJobSoftTopologyCandidates(job, subJob, stmtBackup)
+
 		// select the best solution
-		bestHyperNode, bestScore, err := alloc.selectBestHyperNodeForSubJob(stmtBackup, subJob)
+		bestHyperNode, bestScore, err := alloc.selectBestHyperNodeForSubJob(candidateStmts, subJob)
 		if err != nil {
 			klog.Errorf("Cannot find best hyper node for subJob, subJob=%s, gradient=%d, err=%v", subJob.UID, gradient, err)
 			return nil, 0
@@ -567,6 +574,50 @@ func (alloc *Action) allocateForSubJob(
 
 	klog.V(5).Infof("Cannot find any solution for subJob, subJob=%s", subJob.UID)
 	return nil, 0
+}
+
+// preferJobSoftTopologyCandidates keeps feasible candidates within the Job's
+// soft topology domain when another SubJob has already established that domain.
+// It deliberately returns all candidates when no preferred candidate exists so
+// soft topology remains fallback-capable.
+func (alloc *Action) preferJobSoftTopologyCandidates(
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	stmts map[string]*framework.Statement,
+) map[string]*framework.Statement {
+	if len(stmts) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.PodGroup.Spec.NetworkTopology.HighestTierAllowed == nil ||
+		job.AllocatedHyperNode == "" || !hasAllocatedPeerSubJob(job, subJob) {
+		return stmts
+	}
+
+	ssn := alloc.session
+	if _, found := ssn.HyperNodes[job.AllocatedHyperNode]; !found {
+		return stmts
+	}
+
+	highestTierAllowed := *job.PodGroup.Spec.NetworkTopology.HighestTierAllowed
+	preferred := make(map[string]*framework.Statement, len(stmts))
+	for hyperNode, stmt := range stmts {
+		lca := ssn.HyperNodes.GetLCAHyperNode(job.AllocatedHyperNode, hyperNode)
+		lcaHyperNode, found := ssn.HyperNodes[lca]
+		if found && lcaHyperNode.Tier() <= highestTierAllowed {
+			preferred[hyperNode] = stmt
+		}
+	}
+
+	if len(preferred) == 0 {
+		return stmts
+	}
+	return preferred
+}
+
+func hasAllocatedPeerSubJob(job *api.JobInfo, current *api.SubJobInfo) bool {
+	for _, subJob := range job.SubJobs {
+		if subJob != nil && subJob.UID != current.UID && subJob.AllocatedHyperNode != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // selectBestHyperNodeForJob return the best hyperNode for the job,

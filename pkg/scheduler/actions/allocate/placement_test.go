@@ -20,6 +20,7 @@ import (
 	"testing"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"volcano.sh/apis/pkg/apis/scheduling"
 	topologyv1alpha1 "volcano.sh/apis/pkg/apis/topology/v1alpha1"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/framework"
@@ -59,9 +60,9 @@ func TestUpdateJobAllocatedHyperNodeFromSubJob(t *testing.T) {
 		"sn-b": newPlacementTestHyperNode("sn-b", 2, "root"),
 	}
 	ssn := &framework.Session{
-		HyperNodes:                 hn,
+		HyperNodes:                hn,
 		HyperNodesReadyToSchedule: true,
-		DirtyJobs:                  sets.New[api.JobID](),
+		DirtyJobs:                 sets.New[api.JobID](),
 	}
 	job := &api.JobInfo{UID: "job-1", AllocatedHyperNode: "sn-a"}
 	subJob := &api.SubJobInfo{UID: "sub-1"}
@@ -69,6 +70,120 @@ func TestUpdateJobAllocatedHyperNodeFromSubJob(t *testing.T) {
 	updateJobAllocatedHyperNodeFromSubJob(ssn, job, subJob, "sn-b")
 	if job.AllocatedHyperNode != "root" {
 		t.Fatalf("job AllocatedHyperNode = %q, want root", job.AllocatedHyperNode)
+	}
+}
+
+func TestPreferJobSoftTopologyCandidates(t *testing.T) {
+	hyperNodes := api.HyperNodeInfoMap{
+		"root-a":   newPlacementTestHyperNode("root-a", 3, ""),
+		"a-tier2":  newPlacementTestHyperNode("a-tier2", 2, "root-a"),
+		"a-tier1":  newPlacementTestHyperNode("a-tier1", 1, "a-tier2"),
+		"a-tier1b": newPlacementTestHyperNode("a-tier1b", 1, "a-tier2"),
+		"root-b":   newPlacementTestHyperNode("root-b", 3, ""),
+		"b-tier2":  newPlacementTestHyperNode("b-tier2", 2, "root-b"),
+		"b-tier1":  newPlacementTestHyperNode("b-tier1", 1, "b-tier2"),
+	}
+	alloc := &Action{session: &framework.Session{HyperNodes: hyperNodes}}
+	jobTier := 2
+
+	newJob := func(mode scheduling.NetworkTopologyMode, tier *int, withPeer bool, jobAnchor, currentAnchor string) (*api.JobInfo, *api.SubJobInfo) {
+		if jobAnchor == "" {
+			jobAnchor = "a-tier1"
+		}
+		current := &api.SubJobInfo{UID: "current", AllocatedHyperNode: currentAnchor}
+		subJobs := map[api.SubJobID]*api.SubJobInfo{"current": current}
+		if withPeer {
+			subJobs["peer"] = &api.SubJobInfo{UID: "peer", AllocatedHyperNode: "a-tier1"}
+		}
+		return &api.JobInfo{
+			AllocatedHyperNode: jobAnchor,
+			PodGroup: &api.PodGroup{PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{
+				NetworkTopology: &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
+				SubGroupPolicy:  []scheduling.SubGroupPolicySpec{{Name: "partition"}},
+			}}},
+			SubJobs: subJobs,
+		}, current
+	}
+
+	tests := []struct {
+		name          string
+		mode          scheduling.NetworkTopologyMode
+		tier          *int
+		withPeer      bool
+		jobAnchor     string
+		currentAnchor string
+		input         []string
+		want          []string
+	}{
+		{
+			name:     "prefers candidates under established job tier",
+			mode:     scheduling.SoftNetworkTopologyMode,
+			tier:     &jobTier,
+			withPeer: true,
+			input:    []string{"a-tier1b", "b-tier1"},
+			want:     []string{"a-tier1b"},
+		},
+		{
+			name:     "falls back when only remote candidate is feasible",
+			mode:     scheduling.SoftNetworkTopologyMode,
+			tier:     &jobTier,
+			withPeer: true,
+			input:    []string{"b-tier1"},
+			want:     []string{"b-tier1"},
+		},
+		{
+			name:     "does not change hard topology candidates",
+			mode:     scheduling.HardNetworkTopologyMode,
+			tier:     &jobTier,
+			withPeer: true,
+			input:    []string{"a-tier1b", "b-tier1"},
+			want:     []string{"a-tier1b", "b-tier1"},
+		},
+		{
+			name:     "does not constrain first subjob",
+			mode:     scheduling.SoftNetworkTopologyMode,
+			tier:     &jobTier,
+			withPeer: false,
+			input:    []string{"a-tier1b", "b-tier1"},
+			want:     []string{"a-tier1b", "b-tier1"},
+		},
+		{
+			name:     "does not constrain without a job tier",
+			mode:     scheduling.SoftNetworkTopologyMode,
+			withPeer: true,
+			input:    []string{"a-tier1b", "b-tier1"},
+			want:     []string{"a-tier1b", "b-tier1"},
+		},
+		{
+			name:          "keeps preference for partially allocated current subjob",
+			mode:          scheduling.SoftNetworkTopologyMode,
+			tier:          &jobTier,
+			withPeer:      true,
+			jobAnchor:     "a-tier2",
+			currentAnchor: "a-tier1b",
+			input:         []string{"a-tier1b", "b-tier1"},
+			want:          []string{"a-tier1b"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job, current := newJob(tt.mode, tt.tier, tt.withPeer, tt.jobAnchor, tt.currentAnchor)
+			candidates := make(map[string]*framework.Statement, len(tt.input))
+			for _, hyperNode := range tt.input {
+				candidates[hyperNode] = nil
+			}
+
+			got := alloc.preferJobSoftTopologyCandidates(job, current, candidates)
+			if len(got) != len(tt.want) {
+				t.Fatalf("candidate count = %d, want %d: %#v", len(got), len(tt.want), got)
+			}
+			for _, hyperNode := range tt.want {
+				if _, found := got[hyperNode]; !found {
+					t.Fatalf("candidate %q missing from %#v", hyperNode, got)
+				}
+			}
+		})
 	}
 }
 
