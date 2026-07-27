@@ -187,6 +187,113 @@ func TestPreferJobSoftTopologyCandidates(t *testing.T) {
 	}
 }
 
+func TestPreferJobSoftTopologyScoreCandidates(t *testing.T) {
+	hyperNodes := api.HyperNodeInfoMap{
+		"root-a":   newPlacementTestHyperNode("root-a", 3, ""),
+		"a-tier2":  newPlacementTestHyperNode("a-tier2", 2, "root-a"),
+		"a-tier1":  newPlacementTestHyperNode("a-tier1", 1, "a-tier2"),
+		"a-tier1b": newPlacementTestHyperNode("a-tier1b", 1, "a-tier2"),
+		"root-b":   newPlacementTestHyperNode("root-b", 3, ""),
+		"b-tier2":  newPlacementTestHyperNode("b-tier2", 2, "root-b"),
+		"b-tier1":  newPlacementTestHyperNode("b-tier1", 1, "b-tier2"),
+	}
+	alloc := &Action{session: &framework.Session{HyperNodes: hyperNodes}}
+	jobTier := 2
+
+	newJob := func(mode scheduling.NetworkTopologyMode, tier *int, withPolicy bool, jobAnchor string) *api.JobInfo {
+		policies := []scheduling.SubGroupPolicySpec(nil)
+		if withPolicy {
+			policies = []scheduling.SubGroupPolicySpec{{Name: "partition"}}
+		}
+		return &api.JobInfo{
+			AllocatedHyperNode: jobAnchor,
+			PodGroup: &api.PodGroup{PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{
+				NetworkTopology: &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
+				SubGroupPolicy:  policies,
+			}}},
+		}
+	}
+
+	tests := []struct {
+		name       string
+		mode       scheduling.NetworkTopologyMode
+		tier       *int
+		withPolicy bool
+		jobAnchor  string
+		input      map[string]float64
+		want       map[string]float64
+	}{
+		{
+			name:       "prefers established job tier before score comparison",
+			mode:       scheduling.SoftNetworkTopologyMode,
+			tier:       &jobTier,
+			withPolicy: true,
+			jobAnchor:  "a-tier1",
+			input:      map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+			want:       map[string]float64{"a-tier1b": 10},
+		},
+		{
+			name:       "falls back when only remote outer candidate is feasible",
+			mode:       scheduling.SoftNetworkTopologyMode,
+			tier:       &jobTier,
+			withPolicy: true,
+			jobAnchor:  "a-tier1",
+			input:      map[string]float64{"b-tier1": 100},
+			want:       map[string]float64{"b-tier1": 100},
+		},
+		{
+			name:       "does not change hard topology scores",
+			mode:       scheduling.HardNetworkTopologyMode,
+			tier:       &jobTier,
+			withPolicy: true,
+			jobAnchor:  "a-tier1",
+			input:      map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+			want:       map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+		},
+		{
+			name:       "does not constrain without a previous job anchor",
+			mode:       scheduling.SoftNetworkTopologyMode,
+			tier:       &jobTier,
+			withPolicy: true,
+			input:      map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+			want:       map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+		},
+		{
+			name:       "does not constrain without a job tier",
+			mode:       scheduling.SoftNetworkTopologyMode,
+			withPolicy: true,
+			jobAnchor:  "a-tier1",
+			input:      map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+			want:       map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+		},
+		{
+			name:      "does not constrain jobs without subgroup policy",
+			mode:      scheduling.SoftNetworkTopologyMode,
+			tier:      &jobTier,
+			jobAnchor: "a-tier1",
+			input:     map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+			want:      map[string]float64{"a-tier1b": 10, "b-tier1": 100},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := alloc.preferJobSoftTopologyScoreCandidates(
+				newJob(tt.mode, tt.tier, tt.withPolicy, tt.jobAnchor), tt.input,
+			)
+			if len(got) != len(tt.want) {
+				t.Fatalf("candidate count = %d, want %d: %#v", len(got), len(tt.want), got)
+			}
+			for hyperNode, wantScore := range tt.want {
+				gotScore, found := got[hyperNode]
+				if !found || gotScore != wantScore {
+					t.Fatalf("candidate %q score = %v, want %v; all candidates: %#v", hyperNode, gotScore, wantScore, got)
+				}
+			}
+		})
+	}
+}
+
 func TestFilterGradientsByMinResourceTierStats(t *testing.T) {
 	nodeInfo := api.NewNodeInfo(util.BuildNode(
 		"node-a",

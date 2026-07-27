@@ -440,7 +440,15 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 			continue // try next gradient
 		}
 
-		bestHyperNode, err := alloc.selectBestHyperNodeForJob(subJobsAllocationScores, job)
+		// A previous allocation may already have established the Job's soft
+		// topology domain. Each outer HyperNode is dry-run independently, so a
+		// remote candidate can legitimately survive the inner SubJob-level soft
+		// fallback. Prefer successful outer candidates in the established domain
+		// before comparing their scores, while keeping all candidates when that
+		// domain has no feasible solution.
+		candidateScores := alloc.preferJobSoftTopologyScoreCandidates(job, subJobsAllocationScores)
+
+		bestHyperNode, err := alloc.selectBestHyperNodeForJob(candidateScores, job)
 		if err != nil {
 			klog.Errorf("Cannot find best hyper node for job, job=%s, gradient=%d, err=%v", job.UID, gradient, err)
 			return nil
@@ -618,6 +626,37 @@ func hasAllocatedPeerSubJob(job *api.JobInfo, current *api.SubJobInfo) bool {
 		}
 	}
 	return false
+}
+
+// preferJobSoftTopologyScoreCandidates keeps successful outer HyperNode
+// candidates within the Job's established soft topology domain. Unlike the
+// SubJob-level candidate filter, this is evaluated after all outer HyperNode
+// dry-runs have completed, so it can preserve the Job anchor across separate
+// allocateForJob calls. It deliberately returns all candidates when no
+// preferred candidate exists so soft topology remains fallback-capable.
+func (alloc *Action) preferJobSoftTopologyScoreCandidates(job *api.JobInfo, scores map[string]float64) map[string]float64 {
+	if len(scores) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.PodGroup.Spec.NetworkTopology.HighestTierAllowed == nil ||
+		job.AllocatedHyperNode == "" {
+		return scores
+	}
+
+	ssn := alloc.session
+	if _, found := ssn.HyperNodes[job.AllocatedHyperNode]; !found {
+		return scores
+	}
+
+	preferred := make(map[string]float64, len(scores))
+	for hyperNode, score := range scores {
+		lca := ssn.HyperNodes.GetLCAHyperNode(job.AllocatedHyperNode, hyperNode)
+		if lcaHyperNode, found := ssn.HyperNodes[lca]; found && lcaHyperNode.Tier() <= *job.PodGroup.Spec.NetworkTopology.HighestTierAllowed {
+			preferred[hyperNode] = score
+		}
+	}
+	if len(preferred) == 0 {
+		return scores
+	}
+
+	return preferred
 }
 
 // selectBestHyperNodeForJob return the best hyperNode for the job,
