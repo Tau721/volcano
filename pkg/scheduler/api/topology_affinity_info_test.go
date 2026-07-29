@@ -98,11 +98,11 @@ func TestPodGroupMatchesTerm(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		term scheduling.PodGroupAffinityTerm
-		self *JobInfo
+		name  string
+		term  scheduling.PodGroupAffinityTerm
+		self  *JobInfo
 		other *JobInfo
-		want bool
+		want  bool
 	}{
 		{
 			name: "matching label in same namespace",
@@ -170,11 +170,11 @@ func TestMatchingPodGroupsAllocatedHyperNodesForTerm(t *testing.T) {
 	selfJob := &JobInfo{UID: "self", Namespace: "default", PodGroup: &PodGroup{}}
 
 	tests := []struct {
-		name      string
-		jobs      map[JobID]*JobInfo
-		term      scheduling.PodGroupAffinityTerm
-		want      sets.Set[string]
-		wantErr   bool
+		name    string
+		jobs    map[JobID]*JobInfo
+		term    scheduling.PodGroupAffinityTerm
+		want    sets.Set[string]
+		wantErr bool
 	}{
 		{
 			name: "single matching PodGroup at supernode tier",
@@ -269,17 +269,17 @@ func TestMatchingPodGroupsAllocatedHyperNodesForTerm(t *testing.T) {
 			want: sets.New("sn-a"),
 		},
 		{
-			name: "invalid term returns error",
-			jobs: map[JobID]*JobInfo{},
-			term: scheduling.PodGroupAffinityTerm{PodGroupSelector: selector, TopologyTierName: "missing"},
+			name:    "invalid term returns error",
+			jobs:    map[JobID]*JobInfo{},
+			term:    scheduling.PodGroupAffinityTerm{PodGroupSelector: selector, TopologyTierName: "missing"},
 			wantErr: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			nodesByHyperNode := map[string]sets.Set[string]{
-				"sn-a": sets.New("node-a"),
-				"sn-b": sets.New("node-b"),
+				"sn-a":  sets.New("node-a"),
+				"sn-b":  sets.New("node-b"),
 				"cab-a": sets.New("node-cab-a"),
 			}
 			got, err := MatchingPodGroupsAllocatedHyperNodesForTerm(tt.jobs, hn, tierNameMap, selfJob, tt.term, nodesByHyperNode)
@@ -380,13 +380,13 @@ func TestJobTopologyAffinityHelpers(t *testing.T) {
 	}
 
 	tests := []struct {
-		name       string
-		job        *JobInfo
-		hard       bool
-		soft       bool
-		withTopo   bool
-		reqLen     int
-		prefLen    int
+		name     string
+		job      *JobInfo
+		hard     bool
+		soft     bool
+		withTopo bool
+		reqLen   int
+		prefLen  int
 	}{
 		{name: "required only", job: withRequired, hard: true, withTopo: true, reqLen: 1},
 		{name: "preferred only", job: withPreferred, soft: true, withTopo: true, prefLen: 1},
@@ -538,10 +538,10 @@ func TestMatchingPodGroupsOccupiedHyperNodesWhenJobSpansSiblingDomains(t *testin
 	}
 	tierNameMap := HyperNodeTierNameMap{"supernode": 2, "cluster": 3}
 	nodesByHyperNode := map[string]sets.Set[string]{
-		"sn-a":  sets.New("node-a"),
-		"sn-b":  sets.New("node-b"),
-		"sn-c":  sets.New("node-c"),
-		"root":  sets.New("node-a", "node-b", "node-c"),
+		"sn-a": sets.New("node-a"),
+		"sn-b": sets.New("node-b"),
+		"sn-c": sets.New("node-c"),
+		"root": sets.New("node-a", "node-b", "node-c"),
 	}
 
 	podgroup1 := &JobInfo{

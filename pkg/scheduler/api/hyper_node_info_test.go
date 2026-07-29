@@ -956,10 +956,10 @@ func TestResolveHyperNodesAtTier(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
+		name      string
 		hyperNode string
-		tier     int
-		want     []string
+		tier      int
+		want      []string
 	}{
 		{name: "finer placement resolves ancestor at coarser tier", hyperNode: "cab-a", tier: 2, want: []string{"sn-a"}},
 		{name: "same tier returns self", hyperNode: "cab-a", tier: 1, want: []string{"cab-a"}},
