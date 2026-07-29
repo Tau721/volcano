@@ -3301,7 +3301,7 @@ func hyperNodeTier(hyperNode *api.HyperNodeInfo) interface{} {
 	return hyperNode.Tier()
 }
 
-func TestAllocateWithPartitionPolicyNetworkTopology(t *testing.T) {
+func TestMixedNetworkTopologyAllocationWithPartitionPolicy(t *testing.T) {
 	plugins := map[string]framework.PluginBuilder{
 		predicates.PluginName:           predicates.New,
 		gang.PluginName:                 gang.New,
