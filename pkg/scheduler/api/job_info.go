@@ -1380,11 +1380,10 @@ func (ji *JobInfo) ContainsHardTopology() bool {
 }
 
 // RequiresHyperNodeAllocate returns whether the job needs HyperNode-level allocation.
-// Soft (preferred) podGroup anti-affinity also requires the HyperNode path so the
-// HyperNodeOrderFn can score and prefer HyperNodes; without it such jobs fall back to
-// normal node scheduling and the anti-affinity preference is never evaluated.
+// Soft network topology and preferred topology affinity also require this path
+// so HyperNodeOrderFn can score the full candidate universe before falling back.
 func (ji *JobInfo) RequiresHyperNodeAllocate() bool {
-	return ji.ContainsHardTopology() || ji.ContainsSubJobPolicy() ||
+	return ji.ContainsNetworkTopology() || ji.ContainsSubJobPolicy() ||
 		ji.ContainsHardPodGroupAntiAffinity() || ji.HasPreferredPodGroupAntiAffinity() ||
 		ji.ContainsHardSubGroupTopologyAffinity() || ji.HasPreferredSubGroupTopologyAffinity()
 }

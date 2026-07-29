@@ -829,3 +829,24 @@ func TestParseMinMemberInfoChanged(t *testing.T) {
 		})
 	}
 }
+
+func TestRequiresHyperNodeAllocateIncludesSoftNetworkTopology(t *testing.T) {
+	t.Run("job soft topology", func(t *testing.T) {
+		job := NewJobInfo("job")
+		job.NetworkTopology = &scheduling.NetworkTopologySpec{Mode: scheduling.SoftNetworkTopologyMode}
+		assert.True(t, job.RequiresHyperNodeAllocate())
+	})
+
+	t.Run("subJob soft topology", func(t *testing.T) {
+		job := NewJobInfo("job")
+		job.SubJobs["soft"] = &SubJobInfo{
+			UID:             "soft",
+			NetworkTopology: &scheduling.NetworkTopologySpec{Mode: scheduling.SoftNetworkTopologyMode},
+		}
+		assert.True(t, job.RequiresHyperNodeAllocate())
+	})
+
+	t.Run("no topology", func(t *testing.T) {
+		assert.False(t, NewJobInfo("job").RequiresHyperNodeAllocate())
+	})
+}

@@ -54,6 +54,32 @@ func TestNew(t *testing.T) {
 	}
 }
 
+func TestPreferredTopologyAffinityGradientAbstains(t *testing.T) {
+	podGroupPreferred := []scheduling.PodGroupAffinityTerm{{
+		Weight:           50,
+		TopologyTierName: "supernode",
+	}}
+	subGroupPreferred := []scheduling.SubGroupAffinityTerm{{
+		SubGroups:        []string{"worker"},
+		Weight:           50,
+		TopologyTierName: "supernode",
+	}}
+	plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
+
+	job := jobWithTopologyAffinity(nil, podGroupPreferred)
+	jobResult := plugin.hyperNodeConstraintForJob(nil, job, nil)
+	if jobResult.Applied || jobResult.Gradients != nil {
+		t.Fatalf("preferred-only PodGroup affinity must abstain, got %+v", jobResult)
+	}
+
+	subJobOwner := jobWithSubGroupTopologyAffinity(nil, subGroupPreferred, nil, nil)
+	subJob := subJobForPolicy(subJobOwner, "worker", "subjob-1", "")
+	subJobResult := plugin.hyperNodeConstraintForSubJob(nil, subJobOwner, subJob, nil)
+	if subJobResult.Applied || subJobResult.Gradients != nil {
+		t.Fatalf("preferred-only SubGroup affinity must abstain, got %+v", subJobResult)
+	}
+}
+
 func TestHyperNodeGradientForPodGroupAntiAffinity(t *testing.T) {
 	prodSelector := &metav1.LabelSelector{
 		MatchLabels: map[string]string{testGroupLabel: "prod"},

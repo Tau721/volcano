@@ -592,7 +592,7 @@ func (alloc *Action) preferJobSoftTopologyCandidates(
 	subJob *api.SubJobInfo,
 	stmts map[string]*framework.Statement,
 ) map[string]*framework.Statement {
-	if len(stmts) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.PodGroup.Spec.NetworkTopology.HighestTierAllowed == nil ||
+	if len(stmts) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.NetworkTopology == nil || job.NetworkTopology.HighestTierAllowed == nil ||
 		job.AllocatedHyperNode == "" || !hasAllocatedPeerSubJob(job, subJob) {
 		return stmts
 	}
@@ -602,7 +602,7 @@ func (alloc *Action) preferJobSoftTopologyCandidates(
 		return stmts
 	}
 
-	highestTierAllowed := *job.PodGroup.Spec.NetworkTopology.HighestTierAllowed
+	highestTierAllowed := *job.NetworkTopology.HighestTierAllowed
 	preferred := make(map[string]*framework.Statement, len(stmts))
 	for hyperNode, stmt := range stmts {
 		lca := ssn.HyperNodes.GetLCAHyperNode(job.AllocatedHyperNode, hyperNode)
@@ -634,7 +634,7 @@ func hasAllocatedPeerSubJob(job *api.JobInfo, current *api.SubJobInfo) bool {
 // allocateForJob calls. It deliberately returns all candidates when no
 // preferred candidate exists so soft topology remains fallback-capable.
 func (alloc *Action) preferJobSoftTopologyScoreCandidates(job *api.JobInfo, scores map[string]float64) map[string]float64 {
-	if len(scores) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.PodGroup.Spec.NetworkTopology.HighestTierAllowed == nil ||
+	if len(scores) == 0 || !job.ContainsSubJobPolicy() || !job.IsSoftTopologyMode() || job.NetworkTopology == nil || job.NetworkTopology.HighestTierAllowed == nil ||
 		job.AllocatedHyperNode == "" {
 		return scores
 	}
@@ -647,7 +647,7 @@ func (alloc *Action) preferJobSoftTopologyScoreCandidates(job *api.JobInfo, scor
 	preferred := make(map[string]float64, len(scores))
 	for hyperNode, score := range scores {
 		lca := ssn.HyperNodes.GetLCAHyperNode(job.AllocatedHyperNode, hyperNode)
-		if lcaHyperNode, found := ssn.HyperNodes[lca]; found && lcaHyperNode.Tier() <= *job.PodGroup.Spec.NetworkTopology.HighestTierAllowed {
+		if lcaHyperNode, found := ssn.HyperNodes[lca]; found && lcaHyperNode.Tier() <= *job.NetworkTopology.HighestTierAllowed {
 			preferred[hyperNode] = score
 		}
 	}

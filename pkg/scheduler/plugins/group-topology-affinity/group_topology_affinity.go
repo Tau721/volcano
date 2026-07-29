@@ -66,16 +66,17 @@ func (gta *groupTopologyAffinityPlugin) Name() string {
 }
 
 func (gta *groupTopologyAffinityPlugin) OnSessionOpen(ssn *framework.Session) {
-	ssn.AddHyperNodeGradientForJobFn(gta.Name(), func(job *api.JobInfo, hyperNode *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
-		return gta.hyperNodeGradientForJob(ssn, job, hyperNode)
+	ssn.AddHyperNodeGradientForJobFn(gta.Name(), func(job *api.JobInfo, hyperNode *api.HyperNodeInfo) api.HyperNodeGradientResult {
+		return gta.hyperNodeConstraintForJob(ssn, job, hyperNode)
 	})
 
-	ssn.AddHyperNodeGradientForSubJobFn(gta.Name(), func(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
+	ssn.AddHyperNodeGradientForSubJobFn(gta.Name(), func(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo) api.HyperNodeGradientResult {
 		job, ok := ssn.Jobs[subJob.Job]
 		if !ok {
-			return emptyHyperNodeGradients
+			klog.Errorf("job %s for subJob %s not found", subJob.Job, subJob.UID)
+			return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
 		}
-		return gta.hyperNodeGradientForSubJob(ssn, job, subJob, hyperNode)
+		return gta.hyperNodeConstraintForSubJob(ssn, job, subJob, hyperNode)
 	})
 
 	ssn.AddHyperNodeOrderFn(gta.Name(), func(subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {
@@ -88,6 +89,77 @@ func (gta *groupTopologyAffinityPlugin) OnSessionOpen(ssn *framework.Session) {
 }
 
 func (gta *groupTopologyAffinityPlugin) OnSessionClose(ssn *framework.Session) {}
+
+func (gta *groupTopologyAffinityPlugin) hyperNodeConstraintForJob(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	root *api.HyperNodeInfo,
+) api.HyperNodeGradientResult {
+	hardTerms := job.RequiredPodGroupAntiAffinityTerms()
+	if len(hardTerms) == 0 {
+		return api.HyperNodeGradientAbstain()
+	}
+	result, err := gta.buildPodGroupAntiAffinityGradient(
+		ssn, job, root, hardTerms, maxHyperNodeTier(ssn.HyperNodesSetByTier), job.AllocatedHyperNode,
+	)
+	if err != nil {
+		klog.Errorf("build podGroup anti-affinity gradient failed, job=%s, err=%v", job.UID, err)
+		return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
+	}
+	return api.HyperNodeGradientConstrain(result)
+}
+
+func (gta *groupTopologyAffinityPlugin) hyperNodeConstraintForSubJob(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	subJob *api.SubJobInfo,
+	root *api.HyperNodeInfo,
+) api.HyperNodeGradientResult {
+	hasPodGroupHardTerms := len(job.RequiredPodGroupAntiAffinityTerms()) > 0
+	hasSubGroupHardTerms := gta.subJobHasHardTerms(job, subJob)
+	if !hasPodGroupHardTerms && !hasSubGroupHardTerms {
+		return api.HyperNodeGradientAbstain()
+	}
+
+	maxTier := maxHyperNodeTier(ssn.HyperNodesSetByTier)
+	var (
+		gradients [][]*api.HyperNodeInfo
+		err       error
+	)
+	if hasPodGroupHardTerms {
+		gradients, err = gta.buildPodGroupAntiAffinityGradient(
+			ssn, job, root, job.RequiredPodGroupAntiAffinityTerms(), maxTier, subJob.AllocatedHyperNode,
+		)
+	} else {
+		gradients, err = gta.buildFullHyperNodeGradient(ssn, root, maxTier, subJob.AllocatedHyperNode)
+	}
+	if err != nil {
+		klog.Errorf("build hard group topology gradient failed, job=%s, subJob=%s, err=%v", job.UID, subJob.UID, err)
+		return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
+	}
+	if hasSubGroupHardTerms {
+		gradients = gta.filterSubGroupHardTerms(ssn, job, subJob, gradients)
+	}
+	return api.HyperNodeGradientConstrain(gradients)
+}
+
+func (gta *groupTopologyAffinityPlugin) subJobHasHardTerms(job *api.JobInfo, subJob *api.SubJobInfo) bool {
+	policyName := api.SubJobPolicyName(subJob)
+	if policyName == "" {
+		return false
+	}
+	for _, term := range job.RequiredSubGroupAffinityTerms() {
+		if subGroupTermIncludes(term, policyName) {
+			return true
+		}
+	}
+	for _, term := range job.RequiredSubGroupAntiAffinityTerms() {
+		if subGroupTermIncludes(term, policyName) {
+			return true
+		}
+	}
+	return false
+}
 
 // hyperNodeGradientForJob returns HyperNode candidates for podGroupAntiAffinity.
 // Hard required terms filter candidates; jobs without hard rules return the full subtree

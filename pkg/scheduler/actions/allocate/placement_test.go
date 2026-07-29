@@ -97,6 +97,7 @@ func TestPreferJobSoftTopologyCandidates(t *testing.T) {
 		}
 		return &api.JobInfo{
 			AllocatedHyperNode: jobAnchor,
+			NetworkTopology:    &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
 			PodGroup: &api.PodGroup{PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{
 				NetworkTopology: &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
 				SubGroupPolicy:  []scheduling.SubGroupPolicySpec{{Name: "partition"}},
@@ -207,6 +208,7 @@ func TestPreferJobSoftTopologyScoreCandidates(t *testing.T) {
 		}
 		return &api.JobInfo{
 			AllocatedHyperNode: jobAnchor,
+			NetworkTopology:    &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
 			PodGroup: &api.PodGroup{PodGroup: scheduling.PodGroup{Spec: scheduling.PodGroupSpec{
 				NetworkTopology: &scheduling.NetworkTopologySpec{Mode: mode, HighestTierAllowed: tier},
 				SubGroupPolicy:  policies,

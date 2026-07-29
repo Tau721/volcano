@@ -379,14 +379,27 @@ type SimulatePredicateFn func(ctx context.Context, state fwk.CycleState, task *T
 // Plugins implement this function to verify if the queue has enough resources to schedule the task while maintaining topology constraints
 type SimulateAllocatableFn func(ctx context.Context, state fwk.CycleState, queue *QueueInfo, task *TaskInfo) bool
 
-// HyperNodeGradientForJobFn groups HyperNodes into several gradients and
-// discards HyperNodes that do not match the job topology requirements.
-// Registered plugins return a non-nil slice; an empty slice means that no
-// eligible HyperNodes remain.
-type HyperNodeGradientForJobFn func(job *JobInfo, hyperNode *HyperNodeInfo) [][]*HyperNodeInfo
+// HyperNodeGradientResult distinguishes an applicable hard constraint from a
+// plugin that has no hard opinion for the current Job or SubJob.
+type HyperNodeGradientResult struct {
+	Applied   bool
+	Gradients [][]*HyperNodeInfo
+}
 
-// HyperNodeGradientForSubJobFn groups HyperNodes into several gradients and
-// discards HyperNodes that do not match the SubJob topology requirements.
-// Registered plugins return a non-nil slice; an empty slice means that no
-// eligible HyperNodes remain.
-type HyperNodeGradientForSubJobFn func(subJob *SubJobInfo, hyperNode *HyperNodeInfo) [][]*HyperNodeInfo
+// HyperNodeGradientAbstain returns a neutral result that does not participate
+// in framework candidate intersection.
+func HyperNodeGradientAbstain() HyperNodeGradientResult {
+	return HyperNodeGradientResult{}
+}
+
+// HyperNodeGradientConstrain returns an applicable hard constraint. An empty
+// gradient is an applicable unschedulable result, not an abstention.
+func HyperNodeGradientConstrain(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Applied: true, Gradients: gradients}
+}
+
+// HyperNodeGradientForJobFn returns one plugin's hard HyperNode constraint.
+type HyperNodeGradientForJobFn func(job *JobInfo, hyperNode *HyperNodeInfo) HyperNodeGradientResult
+
+// HyperNodeGradientForSubJobFn returns one plugin's hard HyperNode constraint.
+type HyperNodeGradientForSubJobFn func(subJob *SubJobInfo, hyperNode *HyperNodeInfo) HyperNodeGradientResult

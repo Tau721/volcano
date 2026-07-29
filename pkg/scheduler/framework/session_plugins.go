@@ -1047,10 +1047,8 @@ func (ssn *Session) NodeOrderReduceFn(task *api.TaskInfo, pluginNodeScoreMap map
 	return nodeScoreMap, nil
 }
 
-// HyperNodeGradientForJobFn groups HyperNodes into several gradients and
-// discards HyperNodes that do not match the job topology requirements.
-// Gradients from all registered plugins are intersected (AND), then rebuilt by
-// HyperNode tier.
+// HyperNodeGradientForJobFn intersects applicable hard HyperNode constraints.
+// Plugins that abstain do not narrow the caller's candidate universe.
 func (ssn *Session) HyperNodeGradientForJobFn(
 	job *api.JobInfo,
 	hyperNode *api.HyperNodeInfo,
@@ -1065,23 +1063,23 @@ func (ssn *Session) HyperNodeGradientForJobFn(
 			if !found {
 				continue
 			}
-			gradients := fn(job, hyperNode)
+			result := fn(job, hyperNode)
 			gradientByPlugin = append(gradientByPlugin, api.HyperNodePluginGradient{
 				PluginName: plugin.Name,
-				Gradients:  gradients,
+				Applied:    result.Applied,
+				Gradients:  result.Gradients,
 			})
 		}
 	}
+	universe := ssn.hyperNodeCandidateUniverse(hyperNode)
 	if len(gradientByPlugin) == 0 {
-		return [][]*api.HyperNodeInfo{{hyperNode}}, nil
+		return universe, nil
 	}
-	return intersectHyperNodeGradients(gradientByPlugin)
+	return intersectHyperNodeGradients(gradientByPlugin, universe)
 }
 
-// HyperNodeGradientForSubJobFn groups HyperNodes into several gradients and
-// discards HyperNodes that do not match the SubJob topology requirements.
-// Gradients from all registered plugins are intersected (AND), then rebuilt by
-// HyperNode tier.
+// HyperNodeGradientForSubJobFn intersects applicable hard HyperNode constraints.
+// Plugins that abstain do not narrow the caller's candidate universe.
 func (ssn *Session) HyperNodeGradientForSubJobFn(
 	subJob *api.SubJobInfo,
 	hyperNode *api.HyperNodeInfo,
@@ -1096,17 +1094,63 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(
 			if !found {
 				continue
 			}
-			gradients := fn(subJob, hyperNode)
+			result := fn(subJob, hyperNode)
 			gradientByPlugin = append(gradientByPlugin, api.HyperNodePluginGradient{
 				PluginName: plugin.Name,
-				Gradients:  gradients,
+				Applied:    result.Applied,
+				Gradients:  result.Gradients,
 			})
 		}
 	}
+	universe := ssn.hyperNodeCandidateUniverse(hyperNode)
 	if len(gradientByPlugin) == 0 {
-		return [][]*api.HyperNodeInfo{{hyperNode}}, nil
+		return universe, nil
 	}
-	return intersectHyperNodeGradients(gradientByPlugin)
+	return intersectHyperNodeGradients(gradientByPlugin, universe)
+}
+
+// hyperNodeCandidateUniverse returns every HyperNode below root in deterministic
+// low-tier-first layers. It is the greedy soft/no-constraint search order and
+// the upper bound for all hard plugin results.
+func (ssn *Session) hyperNodeCandidateUniverse(root *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
+	if root == nil {
+		return nil
+	}
+
+	visited := sets.New[string]()
+	queue := []*api.HyperNodeInfo{root}
+	byTier := make(map[int][]*api.HyperNodeInfo)
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current == nil || visited.Has(current.Name) {
+			continue
+		}
+		visited.Insert(current.Name)
+		byTier[current.Tier()] = append(byTier[current.Tier()], current)
+
+		children := current.Children.UnsortedList()
+		sort.Strings(children)
+		for _, child := range children {
+			if childHyperNode, found := ssn.HyperNodes[child]; found {
+				queue = append(queue, childHyperNode)
+			}
+		}
+	}
+
+	tiers := make([]int, 0, len(byTier))
+	for tier := range byTier {
+		tiers = append(tiers, tier)
+	}
+	sort.Ints(tiers)
+	result := make([][]*api.HyperNodeInfo, 0, len(tiers))
+	for _, tier := range tiers {
+		sort.SliceStable(byTier[tier], func(i, j int) bool {
+			return byTier[tier][i].Name < byTier[tier][j].Name
+		})
+		result = append(result, byTier[tier])
+	}
+	return result
 }
 
 func hyperNodeCountByTier(gradients [][]*api.HyperNodeInfo) map[int]int {
@@ -1119,175 +1163,94 @@ func hyperNodeCountByTier(gradients [][]*api.HyperNodeInfo) map[int]int {
 	return counts
 }
 
-// intersectHyperNodeGradients keeps HyperNodes that appear in every plugin
-// gradient (AND). Each plugin is responsible for returning the full candidate
-// subtree whenever it has no hard constraint to apply. A plugin may use a
-// non-default layer order to express which complete candidate gradient should
-// be tried first; membership remains the exact set intersection.
-func intersectHyperNodeGradients(gradientByPlugin []api.HyperNodePluginGradient) ([][]*api.HyperNodeInfo, *api.HyperNodeGradientStats) {
+// intersectHyperNodeGradients intersects only applicable hard plugin results.
+// The first applicable hard plugin retains traversal order. Abstaining plugins
+// do not narrow the caller-provided universe.
+func intersectHyperNodeGradients(
+	gradientByPlugin []api.HyperNodePluginGradient,
+	universes ...[][]*api.HyperNodeInfo,
+) ([][]*api.HyperNodeInfo, *api.HyperNodeGradientStats) {
+	var universe [][]*api.HyperNodeInfo
+	if len(universes) > 0 {
+		universe = universes[0]
+	}
 	stats := &api.HyperNodeGradientStats{
 		PluginEligibleByTier: make(map[string]map[int]int, len(gradientByPlugin)),
 	}
+	applicable := make([]api.HyperNodePluginGradient, 0, len(gradientByPlugin))
 	for _, pluginGradient := range gradientByPlugin {
+		if !pluginGradient.Applied {
+			continue
+		}
+		applicable = append(applicable, pluginGradient)
 		stats.PluginEligibleByTier[pluginGradient.PluginName] = hyperNodeCountByTier(pluginGradient.Gradients)
 	}
 
-	if len(gradientByPlugin) == 0 {
-		return nil, stats
-	}
-	if len(gradientByPlugin) == 1 {
-		stats.IntersectedByTier = hyperNodeCountByTier(gradientByPlugin[0].Gradients)
-		return gradientByPlugin[0].Gradients, stats
+	if len(applicable) == 0 {
+		stats.IntersectedByTier = hyperNodeCountByTier(universe)
+		return universe, stats
 	}
 
-	pluginGradients := make([][][]*api.HyperNodeInfo, len(gradientByPlugin))
-	for index, pluginGradient := range gradientByPlugin {
-		pluginGradients[index] = pluginGradient.Gradients
-	}
-
-	// Phase 1: AND HyperNode names from each plugin into eligible.
-	eligible := api.HyperNodeNamesInGradients(pluginGradients[0])
-	for index := 1; index < len(pluginGradients); index++ {
-		eligible = eligible.Intersection(api.HyperNodeNamesInGradients(pluginGradients[index]))
+	eligible := api.HyperNodeNamesInGradients(universe)
+	initialized := eligible.Len() > 0
+	for _, pluginGradient := range applicable {
+		pluginEligible := api.HyperNodeNamesInGradients(pluginGradient.Gradients)
+		if !initialized {
+			eligible = pluginEligible
+			initialized = true
+		} else {
+			eligible = eligible.Intersection(pluginEligible)
+		}
 		if eligible.Len() == 0 {
-			stats.ExcludedByReason = api.ComputePluginExcludedHyperNodes(gradientByPlugin, eligible)
+			stats.ExcludedByReason = api.ComputePluginExcludedHyperNodes(applicable, eligible)
 			return nil, stats
 		}
 	}
-	stats.ExcludedByReason = api.ComputePluginExcludedHyperNodes(gradientByPlugin, eligible)
+	stats.ExcludedByReason = api.ComputePluginExcludedHyperNodes(applicable, eligible)
 
-	// Phase 2: collect HyperNodeInfo for names in `eligible`.
 	hyperNodeByName := make(map[string]*api.HyperNodeInfo, eligible.Len())
-	for _, gradients := range pluginGradients {
-		for _, layer := range gradients {
+	for _, layer := range universe {
+		for _, hn := range layer {
+			if hn != nil && eligible.Has(hn.Name) {
+				hyperNodeByName[hn.Name] = hn
+			}
+		}
+	}
+	for _, pluginGradient := range applicable {
+		for _, layer := range pluginGradient.Gradients {
 			for _, hn := range layer {
-				if eligible.Has(hn.Name) {
+				if hn != nil && eligible.Has(hn.Name) {
 					hyperNodeByName[hn.Name] = hn
 				}
 			}
 		}
 	}
 
-	result := rebuildIntersectedGradients(gradientByPlugin, hyperNodeByName, eligible)
+	result := filterHyperNodeGradientOrder(applicable[0].Gradients, eligible)
+	if len(result) == 0 {
+		result = rebuildGradientsByTier(hyperNodeByName, eligible)
+	}
 	stats.IntersectedByTier = hyperNodeCountByTier(result)
 	return result, stats
 }
 
-func rebuildIntersectedGradients(
-	gradientByPlugin []api.HyperNodePluginGradient,
-	hyperNodeByName map[string]*api.HyperNodeInfo,
-	eligible sets.Set[string],
-) [][]*api.HyperNodeInfo {
-	explicitOrders := make([][][]*api.HyperNodeInfo, 0, len(gradientByPlugin))
-	for _, pluginGradient := range gradientByPlugin {
-		if !isDefaultHyperNodeGradientOrder(pluginGradient.Gradients) {
-			explicitOrders = append(explicitOrders, pluginGradient.Gradients)
-		}
-	}
-
-	if len(explicitOrders) == 0 {
-		return rebuildGradientsByTier(hyperNodeByName, eligible)
-	}
-	if len(explicitOrders) == 1 {
-		return filterGradientOrder(explicitOrders[0], hyperNodeByName, eligible)
-	}
-
-	// A candidate is not tried before any explicitly ordered plugin permits it.
-	// Default ascending-tier gradients do not erase explicit soft preference.
-	rankByHyperNode := make(map[string]int, eligible.Len())
-	for _, gradients := range explicitOrders {
-		for rank, layer := range gradients {
-			for _, hyperNode := range layer {
-				if !eligible.Has(hyperNode.Name) {
-					continue
-				}
-				if previous, found := rankByHyperNode[hyperNode.Name]; !found || rank > previous {
-					rankByHyperNode[hyperNode.Name] = rank
-				}
-			}
-		}
-	}
-
-	byRank := make(map[int][]*api.HyperNodeInfo)
-	for name := range eligible {
-		rank := rankByHyperNode[name]
-		byRank[rank] = append(byRank[rank], hyperNodeByName[name])
-	}
-	ranks := make([]int, 0, len(byRank))
-	for rank := range byRank {
-		ranks = append(ranks, rank)
-	}
-	sort.Ints(ranks)
-
-	result := make([][]*api.HyperNodeInfo, 0, len(ranks))
-	for _, rank := range ranks {
-		sortHyperNodesByTierAndName(byRank[rank])
-		result = append(result, byRank[rank])
-	}
-	return result
-}
-
-// isDefaultHyperNodeGradientOrder reports whether each non-empty layer contains
-// exactly one physical tier and those tiers are strictly ascending.
-func isDefaultHyperNodeGradientOrder(gradients [][]*api.HyperNodeInfo) bool {
-	previousTier := 0
-	hasPreviousTier := false
-	for _, layer := range gradients {
-		if len(layer) == 0 {
-			continue
-		}
-		tier := layer[0].Tier()
-		for _, hyperNode := range layer[1:] {
-			if hyperNode.Tier() != tier {
-				return false
-			}
-		}
-		if hasPreviousTier && tier <= previousTier {
-			return false
-		}
-		previousTier = tier
-		hasPreviousTier = true
-	}
-	return true
-}
-
-func filterGradientOrder(
+func filterHyperNodeGradientOrder(
 	gradients [][]*api.HyperNodeInfo,
-	hyperNodeByName map[string]*api.HyperNodeInfo,
 	eligible sets.Set[string],
 ) [][]*api.HyperNodeInfo {
-	seen := sets.New[string]()
 	result := make([][]*api.HyperNodeInfo, 0, len(gradients))
 	for _, layer := range gradients {
 		filtered := make([]*api.HyperNodeInfo, 0, len(layer))
 		for _, hyperNode := range layer {
-			if !eligible.Has(hyperNode.Name) || seen.Has(hyperNode.Name) {
-				continue
+			if hyperNode != nil && eligible.Has(hyperNode.Name) {
+				filtered = append(filtered, hyperNode)
 			}
-			filtered = append(filtered, hyperNodeByName[hyperNode.Name])
-			seen.Insert(hyperNode.Name)
 		}
-		if len(filtered) == 0 {
-			continue
+		if len(filtered) > 0 {
+			result = append(result, filtered)
 		}
-		sortHyperNodesByTierAndName(filtered)
-		result = append(result, filtered)
-	}
-
-	missing := eligible.Difference(seen)
-	if missing.Len() > 0 {
-		result = append(result, rebuildGradientsByTier(hyperNodeByName, missing)...)
 	}
 	return result
-}
-
-func sortHyperNodesByTierAndName(hyperNodes []*api.HyperNodeInfo) {
-	sort.SliceStable(hyperNodes, func(i, j int) bool {
-		if hyperNodes[i].Tier() != hyperNodes[j].Tier() {
-			return hyperNodes[i].Tier() < hyperNodes[j].Tier()
-		}
-		return hyperNodes[i].Name < hyperNodes[j].Name
-	})
 }
 
 // rebuildGradientsByTier groups eligible HyperNodes by tier and returns layers in ascending tier order.
@@ -1306,7 +1269,9 @@ func rebuildGradientsByTier(hyperNodeByName map[string]*api.HyperNodeInfo, eligi
 
 	result := make([][]*api.HyperNodeInfo, 0, len(tiers))
 	for _, tier := range tiers {
-		sortHyperNodesByTierAndName(byTier[tier])
+		sort.SliceStable(byTier[tier], func(i, j int) bool {
+			return byTier[tier][i].Name < byTier[tier][j].Name
+		})
 		result = append(result, byTier[tier])
 	}
 	return result

@@ -128,9 +128,9 @@ func TestAllocateResourcesForTasks_KeepsPlacementWhenSubJobPipelined(t *testing.
 			{name: "p2", cpu: "4", mem: "4G", role: "worker"},
 			{name: "p3", cpu: "4", mem: "4G", role: "worker"},
 		},
-		minMember:              3,
-		subGroupSize:           3,
-		forceSubJobPipelined:   true,
+		minMember:            3,
+		subGroupSize:         3,
+		forceSubJobPipelined: true,
 	})
 
 	subJob := env.subJob
@@ -188,7 +188,7 @@ func TestAllocateForSubJob_DryRunSelectsSiblingNotLCA(t *testing.T) {
 		tasks: []dryRunTaskSpec{
 			{name: "p1", cpu: "4", mem: "4G"},
 		},
-		minMember: 1,
+		minMember:       1,
 		subJobGradients: [][]string{{"sn-a", "sn-b"}},
 		hyperNodeScores: map[string]float64{
 			"sn-a": 1,
@@ -455,8 +455,8 @@ func newDryRunPlacementEnv(t *testing.T, opts dryRunEnvOptions) *dryRunPlacement
 				gradientLayers[i] = append(gradientLayers[i], ssn.HyperNodes[name])
 			}
 		}
-		ssn.AddHyperNodeGradientForSubJobFn(dryRunTestPlugin, func(_ *api.SubJobInfo, _ *api.HyperNodeInfo) [][]*api.HyperNodeInfo {
-			return gradientLayers
+		ssn.AddHyperNodeGradientForSubJobFn(dryRunTestPlugin, func(_ *api.SubJobInfo, _ *api.HyperNodeInfo) api.HyperNodeGradientResult {
+			return api.HyperNodeGradientConstrain(gradientLayers)
 		})
 	}
 
@@ -511,6 +511,7 @@ func buildDryRunHyperNodeTree(ssn *framework.Session, nodeCPU map[string]string)
 		"sn-b": newPlacementTestHyperNode("sn-b", 2, "root"),
 	}
 	ssn.HyperNodes["root"].Parent = ""
+	ssn.HyperNodes["root"].Children.Insert("sn-a", "sn-b")
 	ssn.HyperNodesSetByTier = map[int]sets.Set[string]{
 		2: sets.New("sn-a", "sn-b"),
 		3: sets.New("root"),
