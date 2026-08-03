@@ -32,6 +32,7 @@ import (
 	resourcev1 "k8s.io/api/resource/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -48,6 +49,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/plugins/binpack"
 	"volcano.sh/volcano/pkg/scheduler/plugins/drf"
 	"volcano.sh/volcano/pkg/scheduler/plugins/gang"
+	grouptopologyaffinity "volcano.sh/volcano/pkg/scheduler/plugins/group-topology-affinity"
 	networktopologyaware "volcano.sh/volcano/pkg/scheduler/plugins/network-topology-aware"
 	"volcano.sh/volcano/pkg/scheduler/plugins/nodeorder"
 	"volcano.sh/volcano/pkg/scheduler/plugins/predicates"
@@ -3092,6 +3094,155 @@ func TestAllocateJobSoftAffinityAcrossSubJobs(t *testing.T) {
 	jobLCAHyperNode := ssn.HyperNodes[jobLCA]
 	if jobLCAHyperNode == nil || jobLCAHyperNode.Tier() != 2 {
 		t.Fatalf("all partition pods LCA = %q (tier %v), want one tier-2 HyperNode", jobLCA, hyperNodeTier(jobLCAHyperNode))
+	}
+}
+
+func TestAllocatePreferredSubGroupAffinityAndAntiAffinity(t *testing.T) {
+	tier1HyperNodes := sets.New[string]()
+	tier2HyperNodes := sets.New[string]()
+	tier3HyperNodes := sets.New[string]("root")
+	hyperNodes := make(map[string]*api.HyperNodeInfo)
+	realNodes := make(map[string]sets.Set[string])
+	nodes := make([]*v1.Node, 0, 4)
+
+	rootMembers := make([]api.MemberConfig, 0, 2)
+	allNodes := sets.New[string]()
+	for _, pair := range []struct {
+		name   string
+		leaves []string
+	}{
+		{name: "pair-ab", leaves: []string{"a", "b"}},
+		{name: "pair-cd", leaves: []string{"c", "d"}},
+	} {
+		pairMembers := make([]api.MemberConfig, 0, len(pair.leaves))
+		pairNodes := sets.New[string]()
+		for _, leaf := range pair.leaves {
+			nodeName := "node-" + leaf
+			nodes = append(nodes, util.BuildNode(nodeName,
+				api.BuildResourceList("8", "16Gi", []api.ScalarResource{{Name: "pods", Value: "20"}}...), nil))
+			hyperNodes[leaf] = api.NewHyperNodeInfo(api.BuildHyperNode(leaf, 1, []api.MemberConfig{{
+				Name: nodeName, Type: topologyv1alpha1.MemberTypeNode, Selector: "exact",
+			}}))
+			realNodes[leaf] = sets.New[string](nodeName)
+			tier1HyperNodes.Insert(leaf)
+			pairNodes.Insert(nodeName)
+			allNodes.Insert(nodeName)
+			pairMembers = append(pairMembers, api.MemberConfig{
+				Name: leaf, Type: topologyv1alpha1.MemberTypeHyperNode, Selector: "exact",
+			})
+		}
+		hyperNodes[pair.name] = api.NewHyperNodeInfo(api.BuildHyperNode(pair.name, 2, pairMembers))
+		realNodes[pair.name] = pairNodes
+		tier2HyperNodes.Insert(pair.name)
+		rootMembers = append(rootMembers, api.MemberConfig{
+			Name: pair.name, Type: topologyv1alpha1.MemberTypeHyperNode, Selector: "exact",
+		})
+	}
+	hyperNodes["root"] = api.NewHyperNodeInfo(api.BuildHyperNode("root", 3, rootMembers))
+	realNodes["root"] = allNodes
+
+	one := int32(1)
+	two := int32(2)
+	pg := util.BuildPodGroupWithSubGroupPolicy(
+		"pg1", "c1", "", "q1", 4, nil, schedulingv1.PodGroupInqueue, "", 0,
+		[]schedulingv1.SubGroupPolicySpec{
+			{
+				Name: "prefill", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "prefill"}},
+				MatchLabelKeys: []string{"shard"}, SubGroupSize: &one, MinSubGroups: &two,
+			},
+			{
+				Name: "decode", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "decode"}},
+				MatchLabelKeys: []string{"shard"}, SubGroupSize: &one, MinSubGroups: &two,
+			},
+		},
+	)
+	pg.Spec.TopologyAffinity = &schedulingv1.TopologyAffinitySpec{
+		SubGroupAffinity: &schedulingv1.SubGroupAffinity{Preferred: []schedulingv1.SubGroupAffinityTerm{{
+			SubGroups: []string{"prefill", "decode"}, TopologyTier: ptr.To(int32(2)), Weight: 100,
+		}}},
+		SubGroupAntiAffinity: &schedulingv1.SubGroupAntiAffinity{Preferred: []schedulingv1.SubGroupAffinityTerm{
+			{SubGroups: []string{"prefill"}, TopologyTier: ptr.To(int32(1)), Weight: 100},
+			{SubGroups: []string{"decode"}, TopologyTier: ptr.To(int32(1)), Weight: 100},
+		}},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{{Plugins: []conf.PluginOption{
+		{
+			Name: gang.PluginName, EnabledJobOrder: &trueValue, EnabledJobReady: &trueValue,
+			EnabledJobPipelined: &trueValue, EnabledJobStarving: &trueValue,
+			EnabledSubJobReady: &trueValue, EnabledSubJobOrder: &trueValue,
+		},
+		{Name: predicates.PluginName, EnabledPredicate: &trueValue},
+		{
+			Name: grouptopologyaffinity.PluginName, EnabledHyperNodeGradient: &trueValue,
+			EnabledHyperNodeOrder: &trueValue,
+		},
+	}}}
+
+	test := uthelper.TestCommonStruct{
+		Name: "preferred subgroup affinity keeps one pair and anti-affinity spreads each role",
+		Plugins: map[string]framework.PluginBuilder{
+			predicates.PluginName:            predicates.New,
+			gang.PluginName:                  gang.New,
+			grouptopologyaffinity.PluginName: grouptopologyaffinity.New,
+		},
+		PodGroups: []*schedulingv1.PodGroup{pg},
+		Pods: []*v1.Pod{
+			util.BuildPod("c1", "prefill-0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "prefill", "shard": "0"}, nil),
+			util.BuildPod("c1", "prefill-1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "prefill", "shard": "1"}, nil),
+			util.BuildPod("c1", "decode-0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "decode", "shard": "0"}, nil),
+			util.BuildPod("c1", "decode-1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "decode", "shard": "1"}, nil),
+		},
+		Nodes:                     nodes,
+		HyperNodesSetByTier:       map[int]sets.Set[string]{1: tier1HyperNodes, 2: tier2HyperNodes, 3: tier3HyperNodes},
+		HyperNodesMap:             hyperNodes,
+		HyperNodes:                realNodes,
+		Queues:                    []*schedulingv1.Queue{util.BuildQueue("q1", 1, nil)},
+		ExpectBindsNum:            4,
+		MinimalBindCheck:          true,
+		HyperNodesReadyToSchedule: true,
+	}
+
+	ssn := test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+
+	job := ssn.Jobs[api.JobID("c1/pg1")]
+	if job == nil {
+		t.Fatal("scheduled job c1/pg1 was not found")
+	}
+	selectedPair := ""
+	rolesByLeaf := make(map[string]map[string]int)
+	for _, task := range job.Tasks {
+		if task.NodeName == "" {
+			t.Fatalf("task %s was not allocated", task.UID)
+		}
+		leaf := util.FindHyperNodeForNode(task.NodeName, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
+		pair := ssn.HyperNodes.GetAncestorHyperNode(leaf, 2)
+		if selectedPair == "" {
+			selectedPair = pair
+		} else if pair != selectedPair {
+			t.Fatalf("tasks crossed instance groups: first=%s task=%s pair=%s", selectedPair, task.UID, pair)
+		}
+		if rolesByLeaf[leaf] == nil {
+			rolesByLeaf[leaf] = make(map[string]int)
+		}
+		rolesByLeaf[leaf][task.Pod.Labels["role"]]++
+	}
+	if len(rolesByLeaf) != 2 {
+		t.Fatalf("roles were placed on %d tier-1 HyperNodes, want 2: %#v", len(rolesByLeaf), rolesByLeaf)
+	}
+	for leaf, roles := range rolesByLeaf {
+		if roles["prefill"] != 1 || roles["decode"] != 1 {
+			t.Fatalf("tier-1 HyperNode %s roles = %#v, want one prefill and one decode", leaf, roles)
+		}
+	}
+	if job.AllocatedHyperNode != selectedPair {
+		t.Fatalf("job placement = %q, want selected instance group %q", job.AllocatedHyperNode, selectedPair)
 	}
 }
 

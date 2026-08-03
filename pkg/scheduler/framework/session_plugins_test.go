@@ -329,6 +329,78 @@ func TestHyperNodeGradientAbstentionUsesDeterministicCandidateUniverse(t *testin
 	assert.Equal(t, map[int]int{1: 2, 2: 1, 3: 1}, subJobStats.IntersectedByTier)
 }
 
+func TestHyperNodeGradientPreferredOrderAfterHardIntersection(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	pairAB := testHyperNodeInfo("pair-ab", 2)
+	pairCD := testHyperNodeInfo("pair-cd", 2)
+	leafA := testHyperNodeInfo("leaf-a", 1)
+	leafB := testHyperNodeInfo("leaf-b", 1)
+	leafC := testHyperNodeInfo("leaf-c", 1)
+	leafD := testHyperNodeInfo("leaf-d", 1)
+	root.Children.Insert(pairAB.Name, pairCD.Name)
+	pairAB.Children.Insert(leafA.Name, leafB.Name)
+	pairCD.Children.Insert(leafC.Name, leafD.Name)
+
+	ssn := &Session{
+		Tiers: []conf.Tier{{Plugins: []conf.PluginOption{
+			{Name: "hard", EnabledHyperNodeGradient: &enabled},
+			{Name: "soft-order", EnabledHyperNodeGradient: &enabled},
+		}}},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name: root, pairAB.Name: pairAB, pairCD.Name: pairCD,
+			leafA.Name: leafA, leafB.Name: leafB, leafC.Name: leafC, leafD.Name: leafD,
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("hard", func(_ *api.JobInfo, _ *api.HyperNodeInfo) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{leafC, leafD}, {pairCD}})
+	})
+	ssn.AddHyperNodeGradientForJobFn("soft-order", func(_ *api.JobInfo, _ *api.HyperNodeInfo) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientPrefer([][]*api.HyperNodeInfo{
+			{pairAB, pairCD}, {root}, {leafA, leafB, leafC, leafD},
+		})
+	})
+
+	result, stats := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root)
+	assert.Equal(t, [][]*api.HyperNodeInfo{{pairCD}, {leafC, leafD}}, result)
+	assert.Equal(t, map[int]int{1: 2, 2: 1}, stats.PluginEligibleByTier["hard"])
+	_, softRecordedAsHard := stats.PluginEligibleByTier["soft-order"]
+	assert.False(t, softRecordedAsHard)
+	for _, reason := range stats.ExcludedByReason {
+		assert.NotContains(t, reason, "soft-order")
+	}
+}
+
+func TestHyperNodeGradientPreferredOrderKeepsCompleteUniverseFallback(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	pair := testHyperNodeInfo("pair", 2)
+	leafA := testHyperNodeInfo("leaf-a", 1)
+	leafB := testHyperNodeInfo("leaf-b", 1)
+	root.Children.Insert(pair.Name)
+	pair.Children.Insert(leafA.Name, leafB.Name)
+
+	ssn := &Session{
+		Tiers: []conf.Tier{{Plugins: []conf.PluginOption{
+			{Name: "soft-order", EnabledHyperNodeGradient: &enabled},
+		}}},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name: root, pair.Name: pair, leafA.Name: leafA, leafB.Name: leafB,
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("soft-order", func(_ *api.JobInfo, _ *api.HyperNodeInfo) api.HyperNodeGradientResult {
+		// Deliberately omit root. It must be appended from the universe as a
+		// fallback instead of being filtered by this soft opinion.
+		return api.HyperNodeGradientPrefer([][]*api.HyperNodeInfo{{pair}, {leafA, leafB}})
+	})
+
+	result, stats := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root)
+	assert.Equal(t, [][]*api.HyperNodeInfo{{pair}, {leafA, leafB}, {root}}, result)
+	assert.Equal(t, map[int]int{1: 2, 2: 1, 3: 1}, stats.IntersectedByTier)
+}
+
 func TestHyperNodeGradientForJobFnUnregisteredPlugin(t *testing.T) {
 	enabled := true
 	root := testHyperNodeInfo("root", 3)

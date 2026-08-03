@@ -1054,6 +1054,7 @@ func (ssn *Session) HyperNodeGradientForJobFn(
 	hyperNode *api.HyperNodeInfo,
 ) ([][]*api.HyperNodeInfo, *api.HyperNodeGradientStats) {
 	var gradientByPlugin []api.HyperNodePluginGradient
+	var orderedGradients [][]*api.HyperNodeInfo
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledHyperNodeGradient) {
@@ -1064,6 +1065,9 @@ func (ssn *Session) HyperNodeGradientForJobFn(
 				continue
 			}
 			result := fn(job, hyperNode)
+			if result.Ordered && len(orderedGradients) == 0 {
+				orderedGradients = result.Gradients
+			}
 			gradientByPlugin = append(gradientByPlugin, api.HyperNodePluginGradient{
 				PluginName: plugin.Name,
 				Applied:    result.Applied,
@@ -1075,7 +1079,8 @@ func (ssn *Session) HyperNodeGradientForJobFn(
 	if len(gradientByPlugin) == 0 {
 		return universe, nil
 	}
-	return intersectHyperNodeGradients(gradientByPlugin, universe)
+	gradients, stats := intersectHyperNodeGradients(gradientByPlugin, universe)
+	return applyPreferredHyperNodeGradientOrder(gradients, orderedGradients), stats
 }
 
 // HyperNodeGradientForSubJobFn intersects applicable hard HyperNode constraints.
@@ -1085,6 +1090,7 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(
 	hyperNode *api.HyperNodeInfo,
 ) ([][]*api.HyperNodeInfo, *api.HyperNodeGradientStats) {
 	var gradientByPlugin []api.HyperNodePluginGradient
+	var orderedGradients [][]*api.HyperNodeInfo
 	for _, tier := range ssn.Tiers {
 		for _, plugin := range tier.Plugins {
 			if !isEnabled(plugin.EnabledHyperNodeGradient) {
@@ -1095,6 +1101,9 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(
 				continue
 			}
 			result := fn(subJob, hyperNode)
+			if result.Ordered && len(orderedGradients) == 0 {
+				orderedGradients = result.Gradients
+			}
 			gradientByPlugin = append(gradientByPlugin, api.HyperNodePluginGradient{
 				PluginName: plugin.Name,
 				Applied:    result.Applied,
@@ -1106,7 +1115,8 @@ func (ssn *Session) HyperNodeGradientForSubJobFn(
 	if len(gradientByPlugin) == 0 {
 		return universe, nil
 	}
-	return intersectHyperNodeGradients(gradientByPlugin, universe)
+	gradients, stats := intersectHyperNodeGradients(gradientByPlugin, universe)
+	return applyPreferredHyperNodeGradientOrder(gradients, orderedGradients), stats
 }
 
 // hyperNodeCandidateUniverse returns every HyperNode below root in deterministic
@@ -1249,6 +1259,30 @@ func filterHyperNodeGradientOrder(
 		if len(filtered) > 0 {
 			result = append(result, filtered)
 		}
+	}
+	return result
+}
+
+// applyPreferredHyperNodeGradientOrder filters the first configured soft order
+// to the hard-eligible candidates, then appends any candidates not mentioned by
+// that order using the existing hard/universe order as fallback.
+func applyPreferredHyperNodeGradientOrder(
+	eligibleGradients [][]*api.HyperNodeInfo,
+	orderedGradients [][]*api.HyperNodeInfo,
+) [][]*api.HyperNodeInfo {
+	if len(eligibleGradients) == 0 || len(orderedGradients) == 0 {
+		return eligibleGradients
+	}
+
+	eligible := api.HyperNodeNamesInGradients(eligibleGradients)
+	result := filterHyperNodeGradientOrder(orderedGradients, eligible)
+	ordered := api.HyperNodeNamesInGradients(result)
+	missing := eligible.Difference(ordered)
+	if missing.Len() > 0 {
+		result = append(result, filterHyperNodeGradientOrder(eligibleGradients, missing)...)
+	}
+	if len(result) == 0 {
+		return eligibleGradients
 	}
 	return result
 }

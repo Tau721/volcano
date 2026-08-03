@@ -97,7 +97,21 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeConstraintForJob(
 ) api.HyperNodeGradientResult {
 	hardTerms := job.RequiredPodGroupAntiAffinityTerms()
 	if len(hardTerms) == 0 {
-		return api.HyperNodeGradientAbstain()
+		if _, found := preferredSubGroupJobContainerTier(ssn, job); !found {
+			return api.HyperNodeGradientAbstain()
+		}
+		gradients, err := gta.buildFullHyperNodeGradient(
+			ssn, root, maxHyperNodeTier(ssn.HyperNodesSetByTier), job.AllocatedHyperNode,
+		)
+		if err != nil {
+			klog.Errorf("build preferred subgroup Job gradient failed, job=%s, err=%v", job.UID, err)
+			return api.HyperNodeGradientAbstain()
+		}
+		orderedGradients, ordered := prioritizePreferredSubGroupJobGradients(ssn, job, gradients)
+		if !ordered {
+			return api.HyperNodeGradientAbstain()
+		}
+		return api.HyperNodeGradientPrefer(orderedGradients)
 	}
 	result, err := gta.buildPodGroupAntiAffinityGradient(
 		ssn, job, root, hardTerms, maxHyperNodeTier(ssn.HyperNodesSetByTier), job.AllocatedHyperNode,
@@ -105,6 +119,9 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeConstraintForJob(
 	if err != nil {
 		klog.Errorf("build podGroup anti-affinity gradient failed, job=%s, err=%v", job.UID, err)
 		return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
+	}
+	if orderedGradients, ordered := prioritizePreferredSubGroupJobGradients(ssn, job, result); ordered {
+		return api.HyperNodeGradientConstrainAndPrefer(orderedGradients)
 	}
 	return api.HyperNodeGradientConstrain(result)
 }
@@ -170,7 +187,8 @@ func (gta *groupTopologyAffinityPlugin) hyperNodeGradientForJob(
 	root *api.HyperNodeInfo,
 ) [][]*api.HyperNodeInfo {
 	gradients := gta.hyperNodeGradient(ssn, job, root, job.AllocatedHyperNode)
-	return prioritizePreferredSubGroupJobGradients(ssn, job, gradients)
+	orderedGradients, _ := prioritizePreferredSubGroupJobGradients(ssn, job, gradients)
+	return orderedGradients
 }
 
 // prioritizePreferredSubGroupJobGradients keeps the complete candidate set but
@@ -182,10 +200,10 @@ func prioritizePreferredSubGroupJobGradients(
 	ssn *framework.Session,
 	job *api.JobInfo,
 	gradients [][]*api.HyperNodeInfo,
-) [][]*api.HyperNodeInfo {
+) ([][]*api.HyperNodeInfo, bool) {
 	preferredTier, found := preferredSubGroupJobContainerTier(ssn, job)
 	if !found || len(gradients) == 0 {
-		return gradients
+		return gradients, false
 	}
 
 	hyperNodesByTier := make(map[int][]*api.HyperNodeInfo)
@@ -198,7 +216,7 @@ func prioritizePreferredSubGroupJobGradients(
 	if len(hyperNodesByTier[preferredTier]) == 0 {
 		// If another hard constraint removed the preferred container tier, keep
 		// the original ordering. Preferred topology must not become a filter.
-		return gradients
+		return gradients, false
 	}
 
 	coarserTiers := make([]int, 0, len(hyperNodesByTier))
@@ -230,7 +248,7 @@ func prioritizePreferredSubGroupJobGradients(
 
 	klog.V(3).Infof("subGroup topology affinity: prioritize Job gradient, job=%s, preferredContainerTier=%d, tierOrder=%v",
 		klog.KRef(job.Namespace, job.Name), preferredTier, tierOrder)
-	return result
+	return result, true
 }
 
 func preferredSubGroupJobContainerTier(ssn *framework.Session, job *api.JobInfo) (int, bool) {

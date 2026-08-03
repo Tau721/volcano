@@ -352,7 +352,7 @@ func TestHyperNodeGradientForSubJobPreferredOnly(t *testing.T) {
 	}
 }
 
-func TestHyperNodeGradientForJobPreferredSubGroupContainer(t *testing.T) {
+func TestHyperNodeConstraintForJobPreferredSubGroupContainer(t *testing.T) {
 	job := jobWithSubGroupTopologyAffinity(
 		nil,
 		[]scheduling.SubGroupAffinityTerm{
@@ -385,7 +385,11 @@ func TestHyperNodeGradientForJobPreferredSubGroupContainer(t *testing.T) {
 	}
 	plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
 
-	gradients := plugin.hyperNodeGradientForJob(ssn, job, hn["root"])
+	result := plugin.hyperNodeConstraintForJob(ssn, job, hn["root"])
+	if result.Applied || !result.Ordered {
+		t.Fatalf("expected soft ordered result, got applied=%t ordered=%t", result.Applied, result.Ordered)
+	}
+	gradients := result.Gradients
 	if got := tiersFromGradients(gradients); !sets.New(2, 3, 1).Equal(sets.New(got...)) ||
 		len(got) != 3 || got[0] != 2 || got[1] != 3 || got[2] != 1 {
 		t.Fatalf("expected preferred tier order [2 3 1], got %v", got)
@@ -398,9 +402,9 @@ func TestHyperNodeGradientForJobPreferredSubGroupContainer(t *testing.T) {
 	// Without a matching peer, the preferred term cannot affect placement and
 	// the default physical-tier order remains unchanged.
 	job.SubJobs = map[api.SubJobID]*api.SubJobInfo{prefill0.UID: prefill0}
-	gradients = plugin.hyperNodeGradientForJob(ssn, job, hn["root"])
-	if got := tiersFromGradients(gradients); len(got) != 3 || got[0] != 1 || got[1] != 2 || got[2] != 3 {
-		t.Fatalf("expected default tier order [1 2 3] without a peer, got %v", got)
+	result = plugin.hyperNodeConstraintForJob(ssn, job, hn["root"])
+	if result.Applied || result.Ordered || len(result.Gradients) != 0 {
+		t.Fatalf("expected complete abstention without a peer, got %#v", result)
 	}
 }
 

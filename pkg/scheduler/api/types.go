@@ -379,10 +379,13 @@ type SimulatePredicateFn func(ctx context.Context, state fwk.CycleState, task *T
 // Plugins implement this function to verify if the queue has enough resources to schedule the task while maintaining topology constraints
 type SimulateAllocatableFn func(ctx context.Context, state fwk.CycleState, queue *QueueInfo, task *TaskInfo) bool
 
-// HyperNodeGradientResult distinguishes an applicable hard constraint from a
-// plugin that has no hard opinion for the current Job or SubJob.
+// HyperNodeGradientResult distinguishes hard candidate membership from soft
+// traversal order. Applied gradients participate in hard intersection. Ordered
+// gradients only prioritize complete candidate layers and must not remove
+// otherwise eligible candidates.
 type HyperNodeGradientResult struct {
 	Applied   bool
+	Ordered   bool
 	Gradients [][]*HyperNodeInfo
 }
 
@@ -392,10 +395,22 @@ func HyperNodeGradientAbstain() HyperNodeGradientResult {
 	return HyperNodeGradientResult{}
 }
 
+// HyperNodeGradientPrefer returns a soft traversal preference. The gradients
+// provide candidate layer order but do not participate in hard intersection.
+func HyperNodeGradientPrefer(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Ordered: true, Gradients: gradients}
+}
+
 // HyperNodeGradientConstrain returns an applicable hard constraint. An empty
 // gradient is an applicable unschedulable result, not an abstention.
 func HyperNodeGradientConstrain(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
 	return HyperNodeGradientResult{Applied: true, Gradients: gradients}
+}
+
+// HyperNodeGradientConstrainAndPrefer returns a hard constraint whose complete
+// candidate layers also carry a soft traversal preference.
+func HyperNodeGradientConstrainAndPrefer(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Applied: true, Ordered: true, Gradients: gradients}
 }
 
 // HyperNodeGradientForJobFn returns one plugin's hard HyperNode constraint.
