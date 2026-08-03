@@ -19,7 +19,6 @@ package networktopologyaware
 import (
 	"fmt"
 	"math"
-	"sort"
 	"testing"
 	"time"
 

@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"sort"
 	"time"
 
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -353,9 +354,17 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 	alloc.recorder.SnapshotSubJobStatus(job, jobWorksheet)
 
 	hyperNodeGradients, gradientStats := ssn.HyperNodeGradientForJobFn(job, hyperNodeToAllocate)
-	hyperNodeGradients, resourceStats := FilterGradientsByMinResource(
-		ssn, hyperNodeGradients, job.GetMinResources(), job.AllocatedHyperNode,
-	)
+	useCandidateForest := shouldUsePodGroupAntiAffinityCandidateForest(job)
+	var resourceStats *api.HyperNodeMinResourceFilterStats
+	if useCandidateForest {
+		hyperNodeGradients, resourceStats = FilterCandidateForestGradientsByMinResource(
+			ssn, hyperNodeGradients, job.GetMinResources(), job.AllocatedHyperNode,
+		)
+	} else {
+		hyperNodeGradients, resourceStats = FilterGradientsByMinResource(
+			ssn, hyperNodeGradients, job.GetMinResources(), job.AllocatedHyperNode,
+		)
+	}
 	job.SetHyperNodeFitErrors(gradientStats, resourceStats, job.GetMinResources(),
 		ssn.HyperNodesSetByTier, ssn.HyperNodeTierNameMap, ssn.HyperNodes)
 	// jobHyperNodeBaseline is the job-level HyperNode diagnostic written to JobFitErrors.
@@ -375,9 +384,23 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 		klog.V(3).Infof("HyperNode excluded by minResource, job=%s, excluded=%v", job.UID, resourceStats.ExcludedByReason)
 	}
 	for gradient, hyperNodes := range hyperNodeGradients {
+		var allowedRoots []*api.HyperNodeInfo
+		if useCandidateForest {
+			allowedRoots = normalizeCandidateForestRoots(hyperNodes)
+			envelope := candidateForestEnvelope(ssn.HyperNodes, allowedRoots)
+			if envelope == nil {
+				klog.V(3).Infof("Skip invalid PodGroup anti-affinity candidate forest, job=%s, allowedRoots=%v, tierLayer=%d",
+					job.UID, candidateForestRootNames(allowedRoots), gradient)
+				continue
+			}
+			hyperNodes = []*api.HyperNodeInfo{envelope}
+			klog.V(3).Infof("Build PodGroup anti-affinity candidate forest, job=%s, allowedRoots=%v, envelope=%s, tierLayer=%d",
+				job.UID, candidateForestRootNames(allowedRoots), envelope.Name, gradient)
+		}
 		stmtBackup := make(map[string]*framework.Statement)   // backup the statement after the job is allocated to a hyperNode
 		jobWorksheetsBackup := make(map[string]*JobWorksheet) // backup the job worksheet after the job is allocated to a hyperNode
 		subJobsAllocationScores := make(map[string]float64)   // save the subJobs allocation score of the job allocated to a hyperNode
+		candidateForestPlacements := make(map[string]candidateForestPlacement)
 
 		for _, hyperNode := range hyperNodes {
 			var stmtList []*framework.Statement
@@ -393,7 +416,9 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 				subJob := jobWorksheetCopy.subJobs.Pop().(*api.SubJobInfo)
 				subJobWorksheet := jobWorksheetCopy.subJobWorksheets[subJob.UID]
 
-				stmt, allocationScore := alloc.allocateForSubJob(subJob, subJobWorksheet, hyperNode, jobHyperNodeBaseline)
+				stmt, allocationScore := alloc.allocateForSubJobInCandidateForest(
+					subJob, subJobWorksheet, hyperNode, allowedRoots, jobHyperNodeBaseline,
+				)
 
 				if stmt != nil && len(stmt.Operations()) > 0 {
 					stmtList = append(stmtList, stmt)
@@ -407,6 +432,9 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 						break
 					}
 				}
+			}
+			if useCandidateForest {
+				candidateForestPlacements[hyperNode.Name] = captureCandidateForestPlacement(job)
 			}
 			// reset the subJobs to initial status
 			alloc.recorder.RecoverSubJobStatus(job)
@@ -464,7 +492,13 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 		// inherit the remains worksheet after allocate to the best hyperNode
 		jobWorksheet.ShallowCopyFrom(jobWorksheetsBackup[bestHyperNode])
 
-		alloc.recorder.SaveJobDecision(job.UID, bestHyperNode)
+		if useCandidateForest {
+			saveCandidateForestDecision(
+				alloc.recorder, job, candidateForestPlacements[bestHyperNode], bestHyperNode,
+			)
+		} else {
+			alloc.recorder.SaveJobDecision(job.UID, bestHyperNode)
+		}
 		klog.V(3).Infof("Allocate job to hyperNode success, job=%s, hyperNode=%s", job.UID, bestHyperNode)
 
 		return finalStmt
@@ -474,10 +508,134 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 	return nil
 }
 
+// shouldUsePodGroupAntiAffinityCandidateForest enables the exact-union path only
+// when required PodGroup anti-affinity is the Job-level hard topology boundary.
+// Native soft Job/SubJob topology remains soft and can be scored inside the
+// forest. A real Job-level hard network topology keeps the legacy single-root
+// path. Soft SubJobs without required PodGroup anti-affinity keep the existing
+// coarser-root fallback and do not activate this path.
+func shouldUsePodGroupAntiAffinityCandidateForest(job *api.JobInfo) bool {
+	if job == nil || !job.ContainsHardPodGroupAntiAffinity() {
+		return false
+	}
+	hardMode, _ := job.IsHardTopologyMode()
+	return !hardMode
+}
+
+func normalizeCandidateForestRoots(layer []*api.HyperNodeInfo) []*api.HyperNodeInfo {
+	unique := make(map[string]*api.HyperNodeInfo, len(layer))
+	for _, root := range layer {
+		if root != nil {
+			unique[root.Name] = root
+		}
+	}
+	names := make([]string, 0, len(unique))
+	for name := range unique {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	roots := make([]*api.HyperNodeInfo, 0, len(names))
+	for _, name := range names {
+		roots = append(roots, unique[name])
+	}
+	return roots
+}
+
+func candidateForestRootNames(roots []*api.HyperNodeInfo) []string {
+	names := make([]string, 0, len(roots))
+	for _, root := range roots {
+		if root != nil {
+			names = append(names, root.Name)
+		}
+	}
+	return names
+}
+
+func candidateForestEnvelope(hyperNodes api.HyperNodeInfoMap, roots []*api.HyperNodeInfo) *api.HyperNodeInfo {
+	if len(roots) == 0 {
+		return nil
+	}
+	envelope := roots[0].Name
+	for _, root := range roots[1:] {
+		envelope = hyperNodes.GetLCAHyperNode(envelope, root.Name)
+		if envelope == "" {
+			return nil
+		}
+	}
+	return hyperNodes[envelope]
+}
+
+func filterGradientsByCandidateForest(
+	hyperNodes api.HyperNodeInfoMap,
+	gradients [][]*api.HyperNodeInfo,
+	roots []*api.HyperNodeInfo,
+	stats *api.HyperNodeGradientStats,
+) [][]*api.HyperNodeInfo {
+	if len(gradients) == 0 || len(roots) == 0 {
+		return gradients
+	}
+	rootNames := sets.New[string]()
+	for _, root := range roots {
+		if root != nil {
+			rootNames.Insert(root.Name)
+		}
+	}
+
+	result := make([][]*api.HyperNodeInfo, 0, len(gradients))
+	finalByTier := make(map[int]int)
+	for _, layer := range gradients {
+		filtered := make([]*api.HyperNodeInfo, 0, len(layer))
+		for _, candidate := range layer {
+			if candidate == nil {
+				continue
+			}
+			allowed := rootNames.Has(candidate.Name)
+			if !allowed {
+				for _, ancestor := range hyperNodes.GetAncestors(candidate.Name) {
+					if rootNames.Has(ancestor) {
+						allowed = true
+						break
+					}
+				}
+			}
+			if allowed {
+				filtered = append(filtered, candidate)
+				finalByTier[candidate.Tier()]++
+				continue
+			}
+			if stats != nil {
+				if stats.ExcludedByReason == nil {
+					stats.ExcludedByReason = make(map[string]string)
+				}
+				stats.ExcludedByReason[candidate.Name] = "podGroupAntiAffinityCandidateForest"
+			}
+		}
+		if len(filtered) > 0 {
+			result = append(result, filtered)
+		}
+	}
+	if stats != nil {
+		stats.IntersectedByTier = finalByTier
+	}
+	return result
+}
+
 func (alloc *Action) allocateForSubJob(
 	subJob *api.SubJobInfo,
 	subJobWorksheet *SubJobWorksheet,
 	hyperNodeForJob *api.HyperNodeInfo,
+	jobHyperNodeBaseline string,
+) (*framework.Statement, float64) {
+	return alloc.allocateForSubJobInCandidateForest(
+		subJob, subJobWorksheet, hyperNodeForJob, nil, jobHyperNodeBaseline,
+	)
+}
+
+func (alloc *Action) allocateForSubJobInCandidateForest(
+	subJob *api.SubJobInfo,
+	subJobWorksheet *SubJobWorksheet,
+	hyperNodeForJob *api.HyperNodeInfo,
+	allowedRoots []*api.HyperNodeInfo,
 	jobHyperNodeBaseline string,
 ) (*framework.Statement, float64) {
 	ssn := alloc.session
@@ -492,6 +650,11 @@ func (alloc *Action) allocateForSubJob(
 		subJob.Job, subJob.UID, subJob.AllocatedHyperNode, subJobWorksheet.tasks.Len())
 
 	hyperNodeGradients, gradientStats := ssn.HyperNodeGradientForSubJobFn(subJob, hyperNodeForJob)
+	if len(allowedRoots) > 0 {
+		hyperNodeGradients = filterGradientsByCandidateForest(
+			ssn.HyperNodes, hyperNodeGradients, allowedRoots, gradientStats,
+		)
+	}
 	hyperNodeGradients, resourceStats := FilterGradientsByMinResource(
 		ssn, hyperNodeGradients, subJob.GetMinResources(), subJob.AllocatedHyperNode,
 	)
@@ -572,7 +735,9 @@ func (alloc *Action) allocateForSubJob(
 		// inherit the remains worksheet after allocate to the best hyperNode
 		subJobWorksheet.ShallowCopyFrom(subJobWorksheetsBackup[bestHyperNode])
 
-		alloc.recorder.SaveSubJobDecision(subJob.Job, hyperNodeForJob.Name, subJob.UID, newAllocatedHyperNode)
+		if len(allowedRoots) == 0 {
+			alloc.recorder.SaveSubJobDecision(subJob.Job, hyperNodeForJob.Name, subJob.UID, newAllocatedHyperNode)
+		}
 		klog.V(3).Infof("Allocate subJob to hyperNode success, subJob=%s, hyperNode=%s, score=%v, newAllocatedHyperNode=%s",
 			subJob.UID, bestHyperNode, bestScore, newAllocatedHyperNode)
 
@@ -846,10 +1011,46 @@ type hyperNodePlacement struct {
 	subJobAllocatedHyperNode string
 }
 
+type candidateForestPlacement struct {
+	jobAllocatedHyperNode     string
+	subJobAllocatedHyperNodes map[api.SubJobID]string
+}
+
 func captureHyperNodePlacement(job *api.JobInfo, subJob *api.SubJobInfo) hyperNodePlacement {
 	return hyperNodePlacement{
 		jobAllocatedHyperNode:    job.AllocatedHyperNode,
 		subJobAllocatedHyperNode: subJob.AllocatedHyperNode,
+	}
+}
+
+func captureCandidateForestPlacement(job *api.JobInfo) candidateForestPlacement {
+	placement := candidateForestPlacement{
+		jobAllocatedHyperNode:     job.AllocatedHyperNode,
+		subJobAllocatedHyperNodes: make(map[api.SubJobID]string),
+	}
+	for subJobID, subJob := range job.SubJobs {
+		if subJob != nil && subJob.AllocatedHyperNode != "" {
+			placement.subJobAllocatedHyperNodes[subJobID] = subJob.AllocatedHyperNode
+		}
+	}
+	return placement
+}
+
+func saveCandidateForestDecision(
+	recorder *Recorder,
+	job *api.JobInfo,
+	placement candidateForestPlacement,
+	envelope string,
+) {
+	jobPlacement := placement.jobAllocatedHyperNode
+	if jobPlacement == "" {
+		// HyperNode-ready sessions normally track the exact dry-run placement.
+		// Keep a real HyperNode fallback so recorder keys never become synthetic.
+		jobPlacement = envelope
+	}
+	recorder.SaveJobDecision(job.UID, jobPlacement)
+	for subJobID, subJobPlacement := range placement.subJobAllocatedHyperNodes {
+		recorder.SaveSubJobDecision(job.UID, jobPlacement, subJobID, subJobPlacement)
 	}
 }
 
@@ -1009,6 +1210,79 @@ func logHyperNodeTiers(ssn *framework.Session) {
 		ssn.HyperNodesTiers, ssn.HyperNodesSetByTier, ssn.HyperNodeTierNameMap, ssn.HyperNodes,
 	)
 	klog.V(3).Infof("HyperNode tiers in session %v: tierCount=%d total=%d; %s", ssn.UID, tierCount, total, listing)
+}
+
+// FilterCandidateForestGradientsByMinResource checks each gradient layer as an
+// exact union of its roots. It must not use the roots' LCA because that subtree
+// may contain branches excluded by required PodGroup anti-affinity.
+func FilterCandidateForestGradientsByMinResource(
+	ssn *framework.Session,
+	gradients [][]*api.HyperNodeInfo,
+	minResource *api.Resource,
+	allocatedHyperNode string,
+) ([][]*api.HyperNodeInfo, *api.HyperNodeMinResourceFilterStats) {
+	if allocatedHyperNode != "" || minResource == nil || len(gradients) == 0 {
+		return gradients, nil
+	}
+
+	stats := &api.HyperNodeMinResourceFilterStats{
+		FinalByTier:      make(map[int]int),
+		ExcludedByTier:   make(map[int]int),
+		ExcludedByReason: make(map[string]string),
+	}
+	filtered := make([][]*api.HyperNodeInfo, 0, len(gradients))
+	for _, layer := range gradients {
+		roots := normalizeCandidateForestRoots(layer)
+		if candidateForestSatisfiesMinResource(ssn, roots, minResource) {
+			filtered = append(filtered, roots)
+			for _, root := range roots {
+				stats.FinalByTier[root.Tier()]++
+			}
+			continue
+		}
+		for _, root := range roots {
+			stats.ExcludedByTier[root.Tier()]++
+			stats.ExcludedByReason[root.Name] = fmt.Sprintf(
+				"minResource (%s) in candidateForest %v",
+				minResource.String(), candidateForestRootNames(roots),
+			)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil, stats
+	}
+	return filtered, stats
+}
+
+func candidateForestSatisfiesMinResource(
+	ssn *framework.Session,
+	roots []*api.HyperNodeInfo,
+	minResource *api.Resource,
+) bool {
+	nodeNames := sets.New[string]()
+	for _, root := range roots {
+		if root == nil {
+			continue
+		}
+		if nodes, found := ssn.RealNodesSet[root.Name]; found {
+			nodeNames = nodeNames.Union(nodes)
+		}
+	}
+	if nodeNames.Len() == 0 {
+		return true
+	}
+
+	idle := api.EmptyResource()
+	futureIdle := api.EmptyResource()
+	for nodeName := range nodeNames {
+		node, found := ssn.Nodes[nodeName]
+		if !found {
+			continue
+		}
+		idle.Add(node.Idle)
+		futureIdle.Add(node.FutureIdle())
+	}
+	return minResource.LessEqual(idle, api.Zero) || minResource.LessEqual(futureIdle, api.Zero)
 }
 
 // FilterGradientsByMinResource drops HyperNodes that cannot satisfy minResource by aggregating
