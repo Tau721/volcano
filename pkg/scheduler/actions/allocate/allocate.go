@@ -389,13 +389,13 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 			allowedRoots = normalizeCandidateForestRoots(hyperNodes)
 			envelope := candidateForestEnvelope(ssn.HyperNodes, allowedRoots)
 			if envelope == nil {
-				klog.V(3).Infof("Skip invalid PodGroup anti-affinity candidate forest, job=%s, allowedRoots=%v, tierLayer=%d",
-					job.UID, candidateForestRootNames(allowedRoots), gradient)
+				klog.V(3).Infof("Skip invalid PodGroup anti-affinity candidate forest, job=%s, allowedRootCount=%d, allowedRootSample=%v, tierLayer=%d",
+					job.UID, len(allowedRoots), candidateForestRootLogSample(allowedRoots), gradient)
 				continue
 			}
 			hyperNodes = []*api.HyperNodeInfo{envelope}
-			klog.V(3).Infof("Build PodGroup anti-affinity candidate forest, job=%s, allowedRoots=%v, envelope=%s, tierLayer=%d",
-				job.UID, candidateForestRootNames(allowedRoots), envelope.Name, gradient)
+			klog.V(3).Infof("Build PodGroup anti-affinity candidate forest, job=%s, allowedRootCount=%d, allowedRootSample=%v, envelope=%s, tierLayer=%d",
+				job.UID, len(allowedRoots), candidateForestRootLogSample(allowedRoots), envelope.Name, gradient)
 		}
 		stmtBackup := make(map[string]*framework.Statement)   // backup the statement after the job is allocated to a hyperNode
 		jobWorksheetsBackup := make(map[string]*JobWorksheet) // backup the job worksheet after the job is allocated to a hyperNode
@@ -541,11 +541,17 @@ func normalizeCandidateForestRoots(layer []*api.HyperNodeInfo) []*api.HyperNodeI
 	return roots
 }
 
-func candidateForestRootNames(roots []*api.HyperNodeInfo) []string {
-	names := make([]string, 0, len(roots))
+const candidateForestRootLogSampleLimit = 8
+
+func candidateForestRootLogSample(roots []*api.HyperNodeInfo) []string {
+	names := make([]string, 0, min(len(roots), candidateForestRootLogSampleLimit))
 	for _, root := range roots {
-		if root != nil {
-			names = append(names, root.Name)
+		if root == nil {
+			continue
+		}
+		names = append(names, root.Name)
+		if len(names) == candidateForestRootLogSampleLimit {
+			break
 		}
 	}
 	return names
@@ -1221,7 +1227,7 @@ func FilterCandidateForestGradientsByMinResource(
 	minResource *api.Resource,
 	allocatedHyperNode string,
 ) ([][]*api.HyperNodeInfo, *api.HyperNodeMinResourceFilterStats) {
-	if allocatedHyperNode != "" || minResource == nil || len(gradients) == 0 {
+	if allocatedHyperNode != "" || len(gradients) == 0 {
 		return gradients, nil
 	}
 
@@ -1231,21 +1237,22 @@ func FilterCandidateForestGradientsByMinResource(
 		ExcludedByReason: make(map[string]string),
 	}
 	filtered := make([][]*api.HyperNodeInfo, 0, len(gradients))
+	skipResourceCheck := minResource == nil || minResource.IsEmpty()
 	for _, layer := range gradients {
 		roots := normalizeCandidateForestRoots(layer)
-		if candidateForestSatisfiesMinResource(ssn, roots, minResource) {
+		if skipResourceCheck || candidateForestSatisfiesMinResource(ssn, roots, minResource) {
 			filtered = append(filtered, roots)
 			for _, root := range roots {
 				stats.FinalByTier[root.Tier()]++
 			}
 			continue
 		}
+		reason := fmt.Sprintf(
+			"minResource (%s) in candidateForest (roots=%d)", minResource.String(), len(roots),
+		)
 		for _, root := range roots {
 			stats.ExcludedByTier[root.Tier()]++
-			stats.ExcludedByReason[root.Name] = fmt.Sprintf(
-				"minResource (%s) in candidateForest %v",
-				minResource.String(), candidateForestRootNames(roots),
-			)
+			stats.ExcludedByReason[root.Name] = reason
 		}
 	}
 	if len(filtered) == 0 {
@@ -1264,8 +1271,8 @@ func candidateForestSatisfiesMinResource(
 		if root == nil {
 			continue
 		}
-		if nodes, found := ssn.RealNodesSet[root.Name]; found {
-			nodeNames = nodeNames.Union(nodes)
+		for nodeName := range ssn.RealNodesSet[root.Name] {
+			nodeNames.Insert(nodeName)
 		}
 	}
 	if nodeNames.Len() == 0 {
