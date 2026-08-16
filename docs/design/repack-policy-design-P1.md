@@ -148,18 +148,20 @@ spec:
 
 status:
   conditions:
-    - type: Progressing
+    - type: Healthy
       status: "True"
-      reason: RunCreated
-      message: "Created RepackRun a100-auto-20260815120000"
-      lastTransitionTime: "2026-08-15T12:00:00Z"
+      reason: Normal
+      message: "Frag rate 28% below threshold 35%, next cron at 2026-08-17T06:00:00Z, last trigger 2026-08-16T12:00:00Z"
+      lastTransitionTime: "2026-08-16T14:00:00Z"
+      observedGeneration: 3
   inProgress:
     - kind: RepackRun
       apiVersion: repack.volcano.sh/v1alpha1
-      name: "a100-auto-20260815120000"
+      name: "a100-auto-20260816120000"
       namespace: ""
-  lastTriggerTime: "2026-08-15T12:00:00Z"
-  lastEvaluationTime: "2026-08-15T12:00:00Z"
+  lastTriggerTime: "2026-08-16T12:00:00Z"
+  lastSuccessfulTime: "2026-08-15T12:30:00Z"
+  lastEvaluationTime: "2026-08-16T14:00:00Z"
 ```
 
 ### 3.3 Go 类型定义
@@ -177,7 +179,7 @@ status:
 // +kubebuilder:resource:path=repackpolicies,scope=Cluster,shortName=rpp;repackpolicy
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="SUSPEND",type=boolean,JSONPath=`.spec.suspend`
-// +kubebuilder:printcolumn:name="IN-PROGRESS",type=integer,JSONPath=`.status.inProgress`,description="RepackRuns in progress"
+// +kubebuilder:printcolumn:name="STATUS",type=string,JSONPath=`.status.conditions[?(@.type=="Healthy")].reason`,description="Healthy condition reason"
 // +kubebuilder:printcolumn:name="LAST-TRIGGER",type=date,JSONPath=`.status.lastTriggerTime`
 // +kubebuilder:printcolumn:name="LAST-EVAL",type=date,JSONPath=`.status.lastEvaluationTime`
 // +kubebuilder:printcolumn:name="AGE",type=date,JSONPath=`.metadata.creationTimestamp`
@@ -269,6 +271,8 @@ type RepackRunTemplateSpec struct {
 }
 
 // RepackPolicyStatus 对齐 CronJob 的 status 结构。
+// 与 CronJob 不同：新增 conditions 表达 Policy 自身的健康状态（CronJob 纯
+// 靠 active[] + lastScheduleTime），以及 lastEvaluationTime 记录反应式触发评估。
 type RepackPolicyStatus struct {
     // InProgress 尚未终态的派生 Run（Pending 或 Running）。
     // 一旦终态（Succeeded/Failed）即从此列表移除。
@@ -279,11 +283,21 @@ type RepackPolicyStatus struct {
     // +optional
     LastTriggerTime *metav1.Time `json:"lastTriggerTime,omitempty"`
 
-    // LastEvaluationTime 最近一次反应式条件评估时间。
+    // LastSuccessfulTime 最近一次派生 Run 成功完成的时间（Succeeded）。
+    // +optional
+    LastSuccessfulTime *metav1.Time `json:"lastSuccessfulTime,omitempty"`
+
+    // LastEvaluationTime 最近一次反应式条件评估时间（onFragAbovePercent）。
     // +optional
     LastEvaluationTime *metav1.Time `json:"lastEvaluationTime,omitempty"`
 
-    // Conditions are standard Kubernetes conditions.
+    // Conditions are standard Kubernetes conditions. RepackPolicy uses a single
+    // condition type "Healthy" to express whether the policy is operating as expected.
+    //
+    // Healthy=True, Reason=Normal    — normal operation (trigger hit or not)
+    // Healthy=True, Reason=Suspended — suspended by user (this is also healthy)
+    // Healthy=False, Reason=Warning  — trigger matched but Run creation failed
+    //
     // +optional
     // +patchMergeKey=type
     // +patchStrategy=merge
@@ -299,6 +313,24 @@ const (
     // RepackTriggerLabel 记录触发方式：cronSchedule 或 onFragAbovePercent，
     // 便于事后统计和排查。
     RepackTriggerLabel = "repack.volcano.sh/repack-trigger"
+)
+
+// Condition type for RepackPolicy.
+const (
+    // CondHealthy expresses whether the policy is operating as expected.
+    // Healthy=True means the policy is fine (either running or suspended).
+    // Healthy=False means the policy tried to act but failed (e.g. Run creation API error).
+    CondHealthy = "Healthy"
+)
+
+// Healthy condition reasons.
+const (
+    // ReasonNormal is the default state: policy is active, triggers are evaluated normally.
+    ReasonNormal = "Normal"
+    // ReasonSuspended means spec.suspend=true and the policy is correctly not triggering.
+    ReasonSuspended = "Suspended"
+    // ReasonWarning means a trigger matched but Run creation failed. Operator attention needed.
+    ReasonWarning = "Warning"
 )
 ```
 
@@ -420,7 +452,8 @@ make manifests
 | `policy_controller.go` | 主控制器：Reconcile 循环 + 触发评估 + Run 生成 |
 | `policy_run.go` | `constructRunFromTemplate()` — 从模板构建 RepackRun |
 | `policy_gc.go` | `gcHistory()` — 按 historyLimit 清理旧 Run |
-| `policy_state.go` | 纯函数：`hasInProgressRun()`、`nextCronFire()`、`computeFragRate()` 等 |
+| `policy_state.go` | 纯函数：`hasInProgressRun()`、`nextCronFire()` 等 |
+| `policy_frag.go` | 碎片率实时计算：从 Node + Pod informer 数据计算 `FragRate(R)`（复用与引擎一致的算法） |
 | `policy_controller_test.go` | 单元测试 |
 
 **Controller 结构**：
@@ -445,12 +478,26 @@ type Controller struct {
 }
 ```
 
+**工作队列事件源**：Policy 控制器只 reconcile 自己的 RepackPolicy 对象，不对单个 Run 的变化做 reconcile（与 CronJob controller 设计一致——CronJob controller 不对 Job 事件做 queue.Add）。Run informer 仅用于 GC 和 inProgress 清理的只读查询（通过 lister），不注册 event handler。
+
+触发时机：
+
+1. **RepackPolicy Add/Update**：每次 Policy 变化时入队 reconcile
+2. **Cron 到期**：由 controller 内的 `workQueue.AddAfter` 精确调度（在 reconcile 中根据 cron 表达式计算 nextFire，对每个 Policy 独立 requeue）
+3. **反应式评估周期**：由 controller 内的独立定时器（`time.Ticker`）驱动，每隔 `evalCycle` 遍历全部 Policy 的 lister，对每个配置了 `onFragAbovePercent` 的 Policy 入队 reconcile。避免在单个 Policy 的 reconcile 中等待 ticker——因为 reconcile 只在 Policy 事件或 cron 到期时触发，无法覆盖碎片率评估这个周期性需求。
+
+**Cron requeue 策略**：
+
+- 每次 reconcile 结束时计算该 Policy 的下次 cron fire 时间，用 `workQueue.AddAfter(key, nextFire.Sub(now))` 精确调度
+- 若 Policy 被删除，`AddAfter` 的到期触发会被 NotFound 处理掉（无需 cancel）
+- 若 Policy 被更新（如修改 cronSchedule），新的 reconcile 会重新计算 nextFire 并 `AddAfter`，旧的到期触发同样被 NotFound 处理
+
 **Reconcile 核心逻辑**：
 
 1. 从 lister 获取 Policy（NotFound → 结束）
-2. 若 `spec.suspend == true`，更新 conditions 标记 suspended，跳过触发（但仍执行历史 GC）
+2. 若 `spec.suspend == true`：跳过触发评估，更新 condition 为 `Healthy=True, reason=Suspended`，仍然执行历史 GC
 3. 评估两种触发条件：
-   - **cronSchedule**：解析 cron 表达式，若当前时间 ≥ nextFire 则触发；更新 `status.lastTriggerTime`，计算下次 fire 并精确 requeue
+   - **cronSchedule**：解析 cron 表达式，若当前时间 ≥ nextFire 则触发；计算下次 fire 并精确 requeue
    - **onFragAbovePercent**：每 `evalCycle` 计算一次——通过 Node + Pod informer 实时计算当前碎片率（详见 §3.5），超过 `onFragAbovePercent` 则触发
    - 反应式触发每次评估后更新 `status.lastEvaluationTime`
 4. **并发门控**：若 `status.inProgress[]` 中有任一 Run 尚处非终态，跳过创建
@@ -463,15 +510,24 @@ type Controller struct {
      - `repack.volcano.sh/repack-policy: {policyName}`（必加，用于历史 GC）
      - `repack.volcano.sh/repack-trigger: {cronSchedule|onFragAbovePercent}`（必加，记录触发来源）
    - CREATE 到 API
-6. **更新 Policy status**：
-   - `inProgress[]` append 新 Run 的 ObjectReference
-   - `lastTriggerTime` = now（任何触发源命中时均更新）
-   - conditions 更新为 `RunCreated`
-7. **历史 GC**（每次 reconcile 都执行）：
+6. **更新 Policy status 和 condition**：
+   - 若 Run 成功创建：
+     - `inProgress[]` append 新 Run 的 ObjectReference
+     - `lastTriggerTime` = now
+     - condition 更新为 `Healthy=True, reason=Normal`，message 包含触发摘要
+   - 若 Run 创建失败：
+     - condition 更新为 `Healthy=False, reason=Warning`，message 包含错误详情
+   - 若无触发命中：
+     - condition 更新为 `Healthy=True, reason=Normal`，message 包含当前碎片率/下次 cron 时间等评估结果
+   - 若 suspend：
+     - condition 更新为 `Healthy=True, reason=Suspended`
+7. **清理 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态：
+   - 若 Run 已 Succeeded → 更新 `status.lastSuccessfulTime`（取最新），从 `inProgress[]` 移除
+   - 若 Run 已 Failed → 从 `inProgress[]` 移除
+8. **历史 GC**（每次 reconcile 都执行）：
    - 按 label 列出 Policy 下所有 Run
    - 对 Succeeded/Failed Run 分别按 `creationTimestamp` 降序排列
    - 超出 `historyLimit` 的最旧 Run DELETE
-   - 清理 `status.inProgress[]` 中已终态的 Run 引用
 
 **3.2 集成到 controller-manager**
 
@@ -573,7 +629,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 
 - 新增 `custom.repack_policy_enable` flag（默认 `false`）
 - 开启时：
-  - 部署 RepackPolicy ClusterRole（CREATE/GET/LIST/WATCH/UPDATE/PATCH/DELETE on `repackpolicies`；LIST/WATCH on `nodes` 和 `pods`，用于 onFragAbovePercent 碎片率实时计算）
+  - 部署 RepackPolicy ClusterRole（CREATE/GET/LIST/WATCH/UPDATE/PATCH/DELETE on `repackpolicies` + `repackruns`；LIST/WATCH on `nodes` 和 `pods`，用于 onFragAbovePercent 碎片率实时计算和 Run 历史 GC）
   - controller-manager 启动参数添加 `--repack-policy-eval-period=5m`
 
 ### 阶段 7：测试
@@ -585,7 +641,8 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 | `repackpolicy_types_test.go` | DeepCopy 正确性、YAML round-trip |
 | `policy_controller_test.go` | suspend 不生成 Run、cron 触发时机、并发门控、inProgress 列表管理、Run 元数据验证 |
 | `policy_gc_test.go` | 历史限制裁剪逻辑（Succeeded=3, Failed=3 默认值） |
-| `policy_state_test.go` | `hasInProgressRun()`、`nextCronFire()`、`computeFragRate()` 等纯函数 |
+| `policy_state_test.go` | `hasInProgressRun()`、`nextCronFire()` 等纯函数 |
+| `policy_frag_test.go` | 碎片率计算正确性（同构/异构集群场景） |
 
 #### 7.2 E2E 测试
 
@@ -613,7 +670,10 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_run.go` | **新建** | 从模板构造 Run 的辅助函数 |
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_gc.go` | **新建** | 历史限制裁剪 |
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_state.go` | **新建** | 纯函数：终端态判断、cron 时间计算 |
+| `staging/src/volcano.sh/repack-controller/pkg/policy/policy_frag.go` | **新建** | 碎片率实时计算（Node+Pod informer 数据→FragRate） |
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_controller_test.go` | **新建** | 控制器单元测试 |
+| `staging/src/volcano.sh/repack-controller/pkg/policy/policy_state_test.go` | **新建** | 纯函数单元测试 |
+| `staging/src/volcano.sh/repack-controller/pkg/policy/policy_frag_test.go` | **新建** | 碎片率计算单元测试 |
 | `pkg/controllers/repack/repack.go` | 修改 | 集成 Policy 控制器 + FlagProvider |
 | `pkg/cli/repack/policy.go` | **新建** | vcctl Policy 子命令 |
 | `cmd/cli/vcctl.go` | 修改 | 注册 repack 命令组 |
