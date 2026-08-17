@@ -81,6 +81,9 @@ rules:
   - apiGroups: ["scheduling.incubator.k8s.io", "scheduling.volcano.sh"]
     resources: ["podgroups"]
     verbs: ["get", "list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackruns"]
+    verbs: ["get", "list"] # Pod and PodGroup mutators validate active placement leases
 ---
 # Source: volcano/templates/admission.yaml
 kind: ClusterRoleBinding
@@ -142,7 +145,7 @@ spec:
       priorityClassName: system-cluster-critical
       containers:
         - args:
-            - --enabled-admission=/jobs/mutate,/jobs/validate,/podgroups/validate,/queues/mutate,/queues/validate,/hypernodes/validate,/cronjobs/validate
+            - --enabled-admission=/pods/mutate,/jobs/mutate,/jobs/validate,/podgroups/validate,/queues/mutate,/queues/validate,/hypernodes/validate,/cronjobs/validate
             - --tls-cert-file=/admission.local.config/certificates/tls.crt
             - --tls-private-key-file=/admission.local.config/certificates/tls.key
             - --ca-cert-file=/admission.local.config/certificates/ca.crt
@@ -9085,6 +9088,7 @@ spec:
             - --worker-threads-for-podgroup=5
             - --sharding-configmap=volcano-sharding-configmap
             - --sharding-configmap-namespace=volcano-system
+            - --controllers=*,-sharding-controller,-repack-controller
             - -v=4
             - 2>&1
           imagePullPolicy: Always
@@ -10512,6 +10516,45 @@ spec:
     storage: true
     subresources:
       status: {}
+---
+# Source: volcano/templates/webhooks.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: volcano-admission-service-pods-mutate
+webhooks:
+  - admissionReviewVersions:
+      - v1
+    clientConfig:
+      service:
+        name: volcano-admission-service
+        namespace: volcano-system
+        path: /pods/mutate
+        port: 443
+    failurePolicy: Fail
+    matchPolicy: Equivalent
+    name: mutatepod.volcano.sh
+    namespaceSelector:
+      matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+            - volcano-system
+            - kube-system
+    objectSelector: {}
+    reinvocationPolicy: Never
+    rules:
+      - apiGroups:
+          - ""
+        apiVersions:
+          - v1
+        operations:
+          - CREATE
+        resources:
+          - pods
+        scope: '*'
+    sideEffects: NoneOnDryRun
+    timeoutSeconds: 10
 ---
 # Source: volcano/templates/webhooks.yaml
 apiVersion: admissionregistration.k8s.io/v1
