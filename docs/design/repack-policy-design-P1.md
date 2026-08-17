@@ -356,7 +356,7 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 | 触发类型 | 评估方式 | 默认评估周期 |
 |---------|---------|------------|
 | `cronSchedule` | 解析 cron 表达式，计算 `Next()` 时间，`workQueue.AddAfter` 精确调度 | 由 cron 表达式决定 |
-| `onFragAbovePercent` | 实时计算集群碎片率，超过 `onFragAbovePercent` 则触发 | 控制器 flag `--repack-policy-eval-period`（默认 5min） |
+| `onFragAbovePercent` | 实时计算集群碎片率，超过 `onFragAbovePercent` 则触发 | 控制器 flag `--repack-policy-eval-period`（默认 10min，对齐 Execute 冷静期） |
 
 **碎片率计算**（与引擎一致）：
 
@@ -377,6 +377,8 @@ FragRate(R) = (occupiedNodes - minPossibleNodes) / totalNodes × 100%
 > **为什么两个 informer 缺一不可**：碎片率公式的三个变量中，Node 只能提供 `ProvidingNodeCount`；`OccupiedNodeCount`（哪些节点有 Pod 占用该资源）和 `OptimalOccupiedNodeCount`（紧凑装箱最少需要多少节点）都必须从 Pod requests 聚合得到。只靠 Node informer 算不出碎片率。
 >
 > Policy 控制器通过 `NodeInformer` + `PodInformer` 获取这些数据，无需依赖 scheduler cache。`OptimalOccupiedNodeCount` 的计算逻辑与引擎的 `MeasureResourceFragmentation` 等价（同构集群使用闭式公式精确计算，异构集群按节点容量降序贪心求下界）。参见 `pkg/repackengine/api/fragmentation.go`。
+
+> **eval-period 与 Execute 冷静期的关系**：`--repack-policy-eval-period` 默认 10min，对齐 Execute 模式的冷静期（`--repack-execute-cooldown`，默认 10min）。若 eval period < cooldown，会在冷静期窗口内生成引擎暂时无法执行的 Run（卡在 Pending 状态等待冷静期结束），造成无意义的排队。保持两者默认值一致可避免此问题。运维调整时应确保 eval period ≥ cooldown。
 
 ---
 
@@ -545,8 +547,8 @@ type repackController struct {
 // 实现 FlagProvider 接口，注册控制器专属启动参数
 func (c *repackController) AddFlags(fs *pflag.FlagSet) {
     fs.DurationVar(&c.policyEvalCycle, "repack-policy-eval-period",
-        5*time.Minute,
-        "onFragAbovePercent 碎片率触发条件的重新评估周期")
+        10*time.Minute,
+        "onFragAbovePercent 碎片率触发条件的重新评估周期（应 ≥ Execute 冷静期，避免在冷静期窗口内生成无法立即执行的 Run）")
 }
 
 func (c *repackController) Initialize(opt *framework.ControllerOption) error {
@@ -630,7 +632,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 - 新增 `custom.repack_policy_enable` flag（默认 `false`）
 - 开启时：
   - 部署 RepackPolicy ClusterRole（CREATE/GET/LIST/WATCH/UPDATE/PATCH/DELETE on `repackpolicies` + `repackruns`；LIST/WATCH on `nodes` 和 `pods`，用于 onFragAbovePercent 碎片率实时计算和 Run 历史 GC）
-  - controller-manager 启动参数添加 `--repack-policy-eval-period=5m`
+  - controller-manager 启动参数添加 `--repack-policy-eval-period=10m`
 
 ### 阶段 7：测试
 
