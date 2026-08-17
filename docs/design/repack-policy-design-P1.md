@@ -150,7 +150,7 @@ status:
   conditions:
     - type: Healthy
       status: "True"
-      reason: Normal
+      reason: ReconcileSucceeded
       message: "Frag rate 28% below threshold 35%, next cron at 2026-08-17T06:00:00Z, last trigger 2026-08-16T12:00:00Z"
       lastTransitionTime: "2026-08-16T14:00:00Z"
       observedGeneration: 3
@@ -292,11 +292,12 @@ type RepackPolicyStatus struct {
     LastEvaluationTime *metav1.Time `json:"lastEvaluationTime,omitempty"`
 
     // Conditions are standard Kubernetes conditions. RepackPolicy uses a single
-    // condition type "Healthy" to express whether the policy is operating as expected.
+    // condition type "Healthy" to express whether the last reconcile succeeded.
     //
-    // Healthy=True, Reason=Normal    — normal operation (trigger hit or not)
-    // Healthy=True, Reason=Suspended — suspended by user (this is also healthy)
-    // Healthy=False, Reason=Warning  — trigger matched but Run creation failed
+    // Healthy=True, Reason=ReconcileSucceeded — reconcile completed as expected
+    //     (suspend, no trigger, or trigger+Run creation all count as success)
+    // Healthy=False, Reason=ReconcileFailed — reconcile encountered an error
+    //     (e.g. Run creation API error); operator attention needed
     //
     // +optional
     // +patchMergeKey=type
@@ -317,20 +318,20 @@ const (
 
 // Condition type for RepackPolicy.
 const (
-    // CondHealthy expresses whether the policy is operating as expected.
-    // Healthy=True means the policy is fine (either running or suspended).
-    // Healthy=False means the policy tried to act but failed (e.g. Run creation API error).
+    // CondHealthy expresses whether the last reconcile succeeded.
+    // Healthy=True means the reconcile completed as expected.
+    // Healthy=False means the reconcile encountered an error; see reason and message.
     CondHealthy = "Healthy"
 )
 
-// Healthy condition reasons.
+// Healthy condition reasons — binary: reconcile succeeded or failed.
 const (
-    // ReasonNormal is the default state: policy is active, triggers are evaluated normally.
-    ReasonNormal = "Normal"
-    // ReasonSuspended means spec.suspend=true and the policy is correctly not triggering.
-    ReasonSuspended = "Suspended"
-    // ReasonWarning means a trigger matched but Run creation failed. Operator attention needed.
-    ReasonWarning = "Warning"
+    // ReasonReconcileSucceeded means the reconcile completed as expected.
+    // Covers all expected outcomes: suspend, no trigger hit, or trigger+Run creation.
+    ReasonReconcileSucceeded = "ReconcileSucceeded"
+    // ReasonReconcileFailed means the reconcile encountered an error that needs attention.
+    // Example: trigger matched but Run creation API call failed.
+    ReasonReconcileFailed = "ReconcileFailed"
 )
 ```
 
@@ -497,7 +498,7 @@ type Controller struct {
 **Reconcile 核心逻辑**：
 
 1. 从 lister 获取 Policy（NotFound → 结束）
-2. 若 `spec.suspend == true`：跳过触发评估，更新 condition 为 `Healthy=True, reason=Suspended`，仍然执行历史 GC
+2. 若 `spec.suspend == true`：跳过触发评估，更新 condition 为 `Healthy=True, reason=ReconcileSucceeded`，仍然执行历史 GC
 3. 评估两种触发条件：
    - **cronSchedule**：解析 cron 表达式，若当前时间 ≥ nextFire 则触发；计算下次 fire 并精确 requeue
    - **onFragAbovePercent**：每 `evalCycle` 计算一次——通过 Node + Pod informer 实时计算当前碎片率（详见 §3.5），超过 `onFragAbovePercent` 则触发
@@ -513,16 +514,11 @@ type Controller struct {
      - `repack.volcano.sh/repack-trigger: {cronSchedule|onFragAbovePercent}`（必加，记录触发来源）
    - CREATE 到 API
 6. **更新 Policy status 和 condition**：
-   - 若 Run 成功创建：
-     - `inProgress[]` append 新 Run 的 ObjectReference
-     - `lastTriggerTime` = now
-     - condition 更新为 `Healthy=True, reason=Normal`，message 包含触发摘要
-   - 若 Run 创建失败：
-     - condition 更新为 `Healthy=False, reason=Warning`，message 包含错误详情
-   - 若无触发命中：
-     - condition 更新为 `Healthy=True, reason=Normal`，message 包含当前碎片率/下次 cron 时间等评估结果
-   - 若 suspend：
-     - condition 更新为 `Healthy=True, reason=Suspended`
+   - 若 Run 成功创建、无触发命中、或 suspend：
+     - condition 更新为 `Healthy=True, reason=ReconcileSucceeded`，message 包含上下文（触发摘要/碎片率+cron 评估/suspended）
+     - 若触发了创建：`inProgress[]` append 新 Run 的 ObjectReference，`lastTriggerTime` = now
+   - 若 Run 创建失败（API error）：
+     - condition 更新为 `Healthy=False, reason=ReconcileFailed`，message 包含错误详情
 7. **清理 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态：
    - 若 Run 已 Succeeded → 更新 `status.lastSuccessfulTime`（取最新），从 `inProgress[]` 移除
    - 若 Run 已 Failed → 从 `inProgress[]` 移除
