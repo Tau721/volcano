@@ -211,6 +211,9 @@ spec:
               {{- else }}
             - --controllers=*,-sharding-controller,-repack-controller
               {{- end }}
+              {{- if .Values.custom.repack_enable }}
+            - --repack-policy-eval-period={{.Values.custom.repack_policy_eval_period | default "10m" }}
+              {{- end }}
             - -v={{.Values.custom.controller_log_level}}
             - 2>&1
           imagePullPolicy: {{ .Values.basic.image_pull_policy }}

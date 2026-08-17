@@ -181,6 +181,12 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationrepackv1alpha1.RepackMoveApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackPlan"):
 		return &applyconfigurationrepackv1alpha1.RepackPlanApplyConfiguration{}
+	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackPolicy"):
+		return &applyconfigurationrepackv1alpha1.RepackPolicyApplyConfiguration{}
+	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackPolicySpec"):
+		return &applyconfigurationrepackv1alpha1.RepackPolicySpecApplyConfiguration{}
+	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackPolicyStatus"):
+		return &applyconfigurationrepackv1alpha1.RepackPolicyStatusApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackResult"):
 		return &applyconfigurationrepackv1alpha1.RepackResultApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackRun"):
@@ -189,6 +195,10 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationrepackv1alpha1.RepackRunSpecApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackRunStatus"):
 		return &applyconfigurationrepackv1alpha1.RepackRunStatusApplyConfiguration{}
+	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackRunTemplateSpec"):
+		return &applyconfigurationrepackv1alpha1.RepackRunTemplateSpecApplyConfiguration{}
+	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackRunTrigger"):
+		return &applyconfigurationrepackv1alpha1.RepackRunTriggerApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackScope"):
 		return &applyconfigurationrepackv1alpha1.RepackScopeApplyConfiguration{}
 	case repackv1alpha1.SchemeGroupVersion.WithKind("RepackSelector"):

@@ -92,6 +92,8 @@ func (f *sharedInformerFactory) ForResource(resource schema.GroupVersionResource
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Nodeinfo().V1alpha1().Numatopologies().Informer()}, nil
 
 		// Group=repack.volcano.sh, Version=v1alpha1
+	case repackv1alpha1.SchemeGroupVersion.WithResource("repackpolicies"):
+		return &genericInformer{resource: resource.GroupResource(), informer: f.Repack().V1alpha1().RepackPolicies().Informer()}, nil
 	case repackv1alpha1.SchemeGroupVersion.WithResource("repackruns"):
 		return &genericInformer{resource: resource.GroupResource(), informer: f.Repack().V1alpha1().RepackRuns().Informer()}, nil
 

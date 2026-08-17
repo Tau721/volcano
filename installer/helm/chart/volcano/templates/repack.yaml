@@ -208,6 +208,15 @@ metadata:
   {{- end }}
 rules:
   - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies"]
+    verbs: ["create", "get", "list", "watch", "update", "patch", "delete"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies/status"]
+    verbs: ["update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns"]
     verbs: ["get", "list", "watch", "update", "delete"] # delete = TTL GC
   - apiGroups: ["repack.volcano.sh"]

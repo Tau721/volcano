@@ -45,6 +45,9 @@ custom:
   repack_default_resource: "nvidia.com/gpu" # used when a RepackRun's spec.goals is empty
   repack_core: "drain"
   repack_log_level: 3
+  # repack_policy_eval_period is the onFragAbovePercent evaluation cycle for
+  # RepackPolicy. Should be >= repack_execute_cooldown. Default 10min.
+  repack_policy_eval_period: "10m"
   scheduler_metrics_enable: true
   scheduler_pprof_enable: false
   scheduler_plugins_dir: ""

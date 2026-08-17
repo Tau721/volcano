@@ -1,3 +1,627 @@
-# RepackPolicy CRD is deferred to a later iteration; the first stage ships only
-# RepackRun. This file is intentionally emptied — delete it with `git rm` and
-# regenerate via `make manifests` (the build sandbox cannot remove files).
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: repackpolicies.repack.volcano.sh
+spec:
+  group: repack.volcano.sh
+  names:
+    kind: RepackPolicy
+    listKind: RepackPolicyList
+    plural: repackpolicies
+    shortNames:
+    - rpp
+    - repackpolicy
+    singular: repackpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.suspend
+      name: SUSPEND
+      type: boolean
+    - description: Healthy condition reason
+      jsonPath: .status.conditions[?(@.type=="Healthy")].reason
+      name: STATUS
+      type: string
+    - jsonPath: .status.lastTriggerTime
+      name: LAST-TRIGGER
+      type: date
+    - jsonPath: .status.lastEvaluationTime
+      name: LAST-EVAL
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RepackPolicy is a template-based RepackRun generator (P1, CronJob→Job pattern).
+          It is cluster-scoped and user-mutable.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: RepackPolicySpec defines the desired state of a RepackPolicy.
+            properties:
+              failedRunsHistoryLimit:
+                default: 3
+                description: FailedRunsHistoryLimit is how many failed Runs to keep
+                  (0 = none). Defaults to 3.
+                format: int32
+                minimum: 0
+                type: integer
+              runTemplate:
+                description: RunTemplate is the template from which RepackRuns are
+                  created.
+                properties:
+                  metadata:
+                    description: ObjectMeta carries labels and annotations to propagate
+                      to generated Runs.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      finalizers:
+                        items:
+                          type: string
+                        type: array
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    type: object
+                  spec:
+                    description: Spec is the RepackRunSpec to deep-copy into each
+                      generated Run.
+                    properties:
+                      eviction:
+                        description: |-
+                          Eviction configures how Execute issues Kubernetes Eviction requests. It is
+                          ignored by DryRun because no Pod is evicted in that mode.
+                        properties:
+                          gracePeriodSeconds:
+                            description: |-
+                              GracePeriodSeconds overrides the graceful-termination period requested for
+                              every Pod eviction in this Run. Unset preserves each Pod's
+                              spec.terminationGracePeriodSeconds; 0 requests immediate termination.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                        type: object
+                      goals:
+                        description: |-
+                          Goals is the per-resource fragmentation target: exactly one entry
+                          (a run defragments a single accelerator resource); multi-resource is reserved.
+                        items:
+                          description: RepackGoal is one resource's fragmentation
+                            target.
+                          properties:
+                            minFragImprovementPercent:
+                              description: |-
+                                MinFragImprovementPercent is the required minimum drop in this resource's
+                                fragmentation, in percentage points (0-100). 0 = any benefit counts.
+                              format: int32
+                              maximum: 100
+                              minimum: 0
+                              type: integer
+                            resource:
+                              description: |-
+                                Resource is the accelerator to defragment (e.g. nvidia.com/gpu). Only
+                                fully-qualified extended resources (a name containing "/") are supported;
+                                core compute resources such as cpu, memory, ephemeral-storage and pods are
+                                rejected, because repack only consolidates scalar accelerator capacity.
+                              type: string
+                              x-kubernetes-validations:
+                              - message: goals.resource must be a fully-qualified
+                                  accelerator/extended resource (e.g. nvidia.com/gpu);
+                                  core resources like cpu, memory and ephemeral-storage
+                                  are not supported
+                                rule: self.contains('/')
+                          required:
+                          - resource
+                          type: object
+                        maxItems: 1
+                        type: array
+                      maxPerRun:
+                        description: MaxPerRun caps the blast radius of a single run.
+                        properties:
+                          podGroups:
+                            description: PodGroups caps distinct PodGroups moved (cross-resource
+                              count).
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          resources:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: Resources caps accelerator cards moved per
+                              resource.
+                            type: object
+                        type: object
+                      mode:
+                        description: Mode selects DryRun (simulate + report) or Execute
+                          (act).
+                        enum:
+                        - DryRun
+                        - Execute
+                        type: string
+                      scope:
+                        description: Scope bounds which PodGroups may move and which
+                          nodes participate.
+                        properties:
+                          nodes:
+                            description: RepackSelectorTerm is an include/exclude
+                              pair (exclude wins).
+                            properties:
+                              exclude:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                              include:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            type: object
+                          podGroups:
+                            description: RepackSelectorTerm is an include/exclude
+                              pair (exclude wins).
+                            properties:
+                              exclude:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                              include:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            type: object
+                        type: object
+                      ttlSecondsAfterFinished:
+                        description: |-
+                          TTLSecondsAfterFinished: auto-DELETE this Run that long after it finishes
+                          (like Job). Unset = not auto-deleted.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - mode
+                    type: object
+                required:
+                - spec
+                type: object
+              successfulRunsHistoryLimit:
+                default: 3
+                description: SuccessfulRunsHistoryLimit is how many successful Runs
+                  to keep (0 = none). Defaults to 3.
+                format: int32
+                minimum: 0
+                type: integer
+              suspend:
+                default: false
+                description: Suspend suspends trigger evaluation (existing Runs unaffected).
+                  Defaults to false.
+                type: boolean
+              trigger:
+                description: Trigger specifies when to generate a RepackRun (at least
+                  one source required).
+                properties:
+                  cronSchedule:
+                    description: |-
+                      CronSchedule is a standard 5-field cron expression (e.g. "0 */6 * * *").
+                      Omitted or empty string means cron triggering is disabled.
+                    type: string
+                  onFragAbovePercent:
+                    description: |-
+                      OnFragAbovePercent triggers when cluster fragmentation exceeds this
+                      percentage (0–100). 0 or nil means reactive triggering is disabled.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: trigger must set at least one of cronSchedule/onFragAbovePercent
+                  rule: has(self.cronSchedule) || has(self.onFragAbovePercent)
+            required:
+            - runTemplate
+            - trigger
+            type: object
+          status:
+            description: |-
+              RepackPolicyStatus communicates the observed state of a RepackPolicy.
+              Inspired by CronJobStatus but uses conditions instead of Active list solely,
+              and adds lastEvaluationTime for reactive-trigger tracking.
+            properties:
+              conditions:
+                description: |-
+                  Conditions expresses the policy's health. The only condition type is
+                  "Healthy": True=ReconcileSucceeded, False=ReconcileFailed.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              inProgress:
+                description: |-
+                  InProgress lists generated Runs that have not yet reached a terminal phase.
+                  Terminal (Succeeded/Failed) runs are removed.
+                items:
+                  description: ObjectReference contains enough information to let
+                    you inspect or modify the referred object.
+                  properties:
+                    apiVersion:
+                      description: API version of the referent.
+                      type: string
+                    fieldPath:
+                      description: |-
+                        If referring to a piece of an object instead of an entire object, this string
+                        should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                        For example, if the object reference is to a container within a pod, this would take on a value like:
+                        "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                        the event) or if no container name is specified "spec.containers[2]" (container with
+                        index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                        referencing a part of an object.
+                      type: string
+                    kind:
+                      description: |-
+                        Kind of the referent.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                      type: string
+                    name:
+                      description: |-
+                        Name of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                      type: string
+                    resourceVersion:
+                      description: |-
+                        Specific resourceVersion to which this reference is made, if any.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                      type: string
+                    uid:
+                      description: |-
+                        UID of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              lastEvaluationTime:
+                description: LastEvaluationTime is the most recent reactive-trigger
+                  evaluation time.
+                format: date-time
+                type: string
+              lastSuccessfulTime:
+                description: LastSuccessfulTime is the completion time of the most
+                  recent successful Run.
+                format: date-time
+                type: string
+              lastTriggerTime:
+                description: LastTriggerTime is the most recent time a Run was generated
+                  (any trigger source).
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

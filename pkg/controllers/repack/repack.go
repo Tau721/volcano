@@ -28,10 +28,13 @@ package repack
 
 import (
 	"context"
+	"time"
 
+	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
 
 	rc "volcano.sh/repack-controller/pkg"
+	rcpolicy "volcano.sh/repack-controller/pkg/policy"
 	"volcano.sh/volcano/pkg/controllers/framework"
 )
 
@@ -41,20 +44,24 @@ func init() {
 
 // repackController adapts the standalone repack-controller to framework.Controller.
 type repackController struct {
-	runCtrl   *rc.Controller
-	nominator *rc.Nominator
-	workers   int
+	runCtrl         *rc.Controller
+	nominator       *rc.Nominator
+	policyCtrl      *rcpolicy.Controller
+	workers         int
+	policyEvalCycle time.Duration
 }
 
 func (c *repackController) Name() string { return "repack-controller" }
 
-// Initialize wires the lifecycle controller and the nomination reconciler onto
-// the shared informer factories (no factory Start here — that happens in Run).
-// Execute serialization/cooldown is the engine's concern; the controller only
-// needs the cooldown as a GC retention floor (so it never deletes a finished
-// Execute run that is still the engine's cooldown anchor). Left unset here, it
-// defaults to state.DefaultExecuteCooldown, which matches the engine's flag
-// default; override the engine flag and this stays safe as long as it is >= it.
+// AddFlags implements framework.FlagProvider.
+func (c *repackController) AddFlags(fs *pflag.FlagSet) {
+	fs.DurationVar(&c.policyEvalCycle, "repack-policy-eval-period", 10*time.Minute,
+		"onFragAbovePercent evaluation cycle; should >= Execute cooldown")
+}
+
+// Initialize wires the lifecycle controller, policy controller, and the
+// nomination reconciler onto the shared informer factories (no factory Start
+// here — that happens in Run).
 func (c *repackController) Initialize(opt *framework.ControllerOption) error {
 	c.workers = int(opt.WorkerNum)
 
@@ -66,13 +73,23 @@ func (c *repackController) Initialize(opt *framework.ControllerOption) error {
 	repackInformer := opt.VCSharedInformerFactory.Repack().V1alpha1().RepackRuns()
 	c.nominator = rc.NewNominator(opt.KubeClient, opt.VolcanoClient, podInformer, repackInformer)
 	c.nominator.SetEventRecorder(rc.NewEventRecorder(opt.KubeClient, "vc-controller-manager"))
+
+	c.policyCtrl = rcpolicy.New(opt.VolcanoClient,
+		opt.VCSharedInformerFactory,
+		opt.SharedInformerFactory,
+		rcpolicy.Options{
+			Workers:                   c.workers,
+			EvalCycle:                 c.policyEvalCycle,
+			DefaultSuccessHistoryLimit: 3,
+			DefaultFailedHistoryLimit:  3,
+		})
 	return nil
 }
 
-// Run launches both loops in the background, cancelling on stopCh. It returns
-// immediately (controller-manager keeps the process alive), matching the other
-// controllers. The shared factories are started centrally and again (idempotently)
-// by the wrapped controllers' own Run.
+// Run launches all sub-controllers in the background, cancelling on stopCh. It
+// returns immediately (controller-manager keeps the process alive), matching
+// the other controllers. The shared factories are started centrally and again
+// (idempotently) by the wrapped controllers' own Run.
 func (c *repackController) Run(stopCh <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {

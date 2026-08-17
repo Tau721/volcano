@@ -17,6 +17,10 @@ limitations under the License.
 
 package v1alpha1
 
+// RepackPolicyListerExpansion allows custom methods to be added to
+// RepackPolicyLister.
+type RepackPolicyListerExpansion interface{}
+
 // RepackRunListerExpansion allows custom methods to be added to
 // RepackRunLister.
 type RepackRunListerExpansion interface{}

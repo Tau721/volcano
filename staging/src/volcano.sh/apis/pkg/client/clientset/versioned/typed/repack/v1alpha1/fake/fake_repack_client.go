@@ -27,6 +27,10 @@ type FakeRepackV1alpha1 struct {
 	*testing.Fake
 }
 
+func (c *FakeRepackV1alpha1) RepackPolicies() v1alpha1.RepackPolicyInterface {
+	return newFakeRepackPolicies(c)
+}
+
 func (c *FakeRepackV1alpha1) RepackRuns() v1alpha1.RepackRunInterface {
 	return newFakeRepackRuns(c)
 }
