@@ -27,12 +27,17 @@ import (
 
 type RepackV1alpha1Interface interface {
 	RESTClient() rest.Interface
+	RepackPoliciesGetter
 	RepackRunsGetter
 }
 
 // RepackV1alpha1Client is used to interact with features provided by the repack.volcano.sh group.
 type RepackV1alpha1Client struct {
 	restClient rest.Interface
+}
+
+func (c *RepackV1alpha1Client) RepackPolicies() RepackPolicyInterface {
+	return newRepackPolicies(c)
 }
 
 func (c *RepackV1alpha1Client) RepackRuns() RepackRunInterface {

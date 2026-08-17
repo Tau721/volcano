@@ -50,6 +50,8 @@ func addKnownTypes(scheme *runtime.Scheme) error {
 	scheme.AddKnownTypes(SchemeGroupVersion,
 		&RepackRun{},
 		&RepackRunList{},
+		&RepackPolicy{},
+		&RepackPolicyList{},
 	)
 
 	metav1.AddToGroupVersion(scheme, SchemeGroupVersion)
