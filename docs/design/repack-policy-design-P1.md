@@ -487,43 +487,41 @@ type Controller struct {
 
 1. **RepackPolicy Add/Update**：每次 Policy 变化时入队 reconcile
 2. **Cron 到期**：由 controller 内的 `workQueue.AddAfter` 精确调度（在 reconcile 中根据 cron 表达式计算 nextFire，对每个 Policy 独立 requeue）
-3. **反应式评估周期**：由 controller 内的独立定时器（`time.Ticker`）驱动，每隔 `evalCycle` 遍历全部 Policy 的 lister，对每个配置了 `onFragAbovePercent` 的 Policy 入队 reconcile。避免在单个 Policy 的 reconcile 中等待 ticker——因为 reconcile 只在 Policy 事件或 cron 到期时触发，无法覆盖碎片率评估这个周期性需求。
+3. **反应式评估周期**：由 controller 内的独立定时器（`time.Ticker`）驱动，每隔 `evalCycle` 遍历全部 Policy 的 lister，对每个配置了 `onFragAbovePercent` 的 Policy 入队 reconcile。定时器不预判碎片率——它是纯唤醒机制，确保仅配了反应式触发（无 cron）的 Policy 也能被周期性评估。碎片率判断统一在 reconcile 中完成。
 
 **Cron requeue 策略**：
 
 - 每次 reconcile 结束时计算该 Policy 的下次 cron fire 时间，用 `workQueue.AddAfter(key, nextFire.Sub(now))` 精确调度
-- 若 Policy 被删除，`AddAfter` 的到期触发会被 NotFound 处理掉（无需 cancel）
-- 若 Policy 被更新（如修改 cronSchedule），新的 reconcile 会重新计算 nextFire 并 `AddAfter`，旧的到期触发同样被 NotFound 处理
+- 若 Policy 被删除，`AddAfter` 的到期触发会因 lister.Get 返回 NotFound 而安全结束
+- 若 Policy 的 cronSchedule 被更新，新 reconcile 会重新计算 nextFire 并 `AddAfter`，但 K8s workqueue **不去重**——旧的 `AddAfter` 到期时仍会触发一次多余的 reconcile。这无法避免，与 CronJob controller 行为一致。多余的 reconcile 靠以下方式无害化：
+  - **确定性 Run 命名**：`{policy-name}-{YYYYMMDDHHmmss}`，同一时刻只会生成同名 Run，API 层 AlreadyExists 自动拦截
+  - **`lastTriggerTime` 去重**：若当前 cron 时间点已在 `lastTriggerTime` 记录过，跳过创建
 
 **Reconcile 核心逻辑**：
 
 1. 从 lister 获取 Policy（NotFound → 结束）
-2. 若 `spec.suspend == true`：跳过触发评估，更新 condition 为 `Healthy=True, reason=ReconcileSucceeded`，仍然执行历史 GC
-3. 评估两种触发条件：
-   - **cronSchedule**：解析 cron 表达式，若当前时间 ≥ nextFire 则触发；计算下次 fire 并精确 requeue
-   - **onFragAbovePercent**：每 `evalCycle` 计算一次——通过 Node + Pod informer 实时计算当前碎片率（详见 §3.5），超过 `onFragAbovePercent` 则触发
-   - 反应式触发每次评估后更新 `status.lastEvaluationTime`
-4. **并发门控**：若 `status.inProgress[]` 中有任一 Run 尚处非终态，跳过创建
-5. **创建 RepackRun**：
+2. **清理 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态——若 Run 已 Succeeded 则更新 `lastSuccessfulTime`（取最新值），将已终态（Succeeded/Failed）的 Run 从列表中移除。先清理状态再做后续判断，保证并发门控看到的是最新状态
+3. 若 `spec.suspend == true`：更新 condition 为 `Healthy=True, reason=ReconcileSucceeded, message="Suspended"`，跳到步骤 8（历史 GC）
+4. **全局 Execute 门控**（仅 `runTemplate.spec.mode == Execute` 时生效）：通过 `runLister` 扫描全部 RepackRun，若存在任一非终态的 Execute 模式 Run，更新 condition message 为 "Skipped: another Execute Run active or in cooldown"，跳到步骤 8。DryRun 模式不受此限制
+5. 评估两种触发条件（reconcile 无法区分入队来源，必须独立评估全部条件）：
+   - **cronSchedule**：以 `max(lastTriggerTime, creationTimestamp)` 为基准，用 cron 库计算 `Next()` 时间。若当前 ≥ nextFire 则命中；若已命中则检查 `lastTriggerTime` 是否已记录该时间点（幂等去重）
+   - **onFragAbovePercent**：通过 Node + Pod informer 实时计算碎片率（详见 §3.5），≥ 阈值则命中
+   - 更新 `status.lastEvaluationTime`。若两种触发均未命中，更新 condition message 为当前碎片率/下次 cron 等评估结果，跳到步骤 8
+6. **本 Policy 并发门控**：若 `status.inProgress[]` 仍非空（上一个 Run 尚未终态），跳过创建，跳到步骤 8
+   - **注**：对 Execute 模式，此步冗余于第四步的全局门控；但对 **DryRun 模式，这是唯一门控**——全局门控豁免 DryRun，若无此步，DryRun 会在每个 eval period 无节制地创建新 Run（即使碎片率未变化、上一个 DryRun 刚结束）
+7. **创建 RepackRun**：
    - 命名：`{policy-name}-{YYYYMMDDHHmmss}`
-   - DeepCopy `runTemplate.spec` 到新 Run
+   - DeepCopy `runTemplate.spec` 到新 Run（含 mode、scope、goals 等全部字段）
    - 合入 `runTemplate.metadata.labels/annotations`
    - 设置 `metadata.ownerReferences` → Policy（`controller=true, blockOwnerDeletion=false`）
    - 设置 labels：
-     - `repack.volcano.sh/repack-policy: {policyName}`（必加，用于历史 GC）
-     - `repack.volcano.sh/repack-trigger: {cronSchedule|onFragAbovePercent}`（必加，记录触发来源）
+     - `repack.volcano.sh/repack-policy: {policyName}`（用于历史 GC）
+     - `repack.volcano.sh/repack-trigger: {cronSchedule|onFragAbovePercent}`（记录触发来源）
    - CREATE 到 API
-6. **更新 Policy status 和 condition**：
-   - 若 Run 成功创建、无触发命中、或 suspend：
-     - condition 更新为 `Healthy=True, reason=ReconcileSucceeded`，message 包含上下文（触发摘要/碎片率+cron 评估/suspended）
-     - 若触发了创建：`inProgress[]` append 新 Run 的 ObjectReference，`lastTriggerTime` = now
-   - 若 Run 创建失败（API error）：
-     - condition 更新为 `Healthy=False, reason=ReconcileFailed`，message 包含错误详情
-7. **清理 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态：
-   - 若 Run 已 Succeeded → 更新 `status.lastSuccessfulTime`（取最新），从 `inProgress[]` 移除
-   - 若 Run 已 Failed → 从 `inProgress[]` 移除
-8. **历史 GC**（每次 reconcile 都执行）：
-   - 按 label 列出 Policy 下所有 Run
+   - 成功：`inProgress[]` append 新 Run 的 ObjectReference，`lastTriggerTime` = now，condition 更新为 `Healthy=True, reason=ReconcileSucceeded`，message 包含触发摘要
+   - 失败：condition 更新为 `Healthy=False, reason=ReconcileFailed`，message 包含 API 错误详情
+8. **历史 GC**：
+   - 按 label `repack.volcano.sh/repack-policy={policyName}` 列出所有派生 Run
    - 对 Succeeded/Failed Run 分别按 `creationTimestamp` 降序排列
    - 超出 `historyLimit` 的最旧 Run DELETE
 
@@ -588,25 +586,7 @@ Policy 控制器需要以下 informer：
 
 这些 informer 在 controller-manager 中已全部可用。
 
-### 阶段 4：CLI 支持
-
-**新建文件**：`pkg/cli/repack/policy.go`
-
-子命令：
-
-```
-vcctl repack policy create   # 从 YAML 文件创建 Policy
-vcctl repack policy get      # 查看单个 Policy
-vcctl repack policy list     # 列出全部 Policy（按 label 过滤）
-vcctl repack policy update   # 更新 Policy（patch spec）
-vcctl repack policy delete   # 删除 Policy（级联删除 Run）
-vcctl repack policy suspend  # 暂停（set suspend=true）
-vcctl repack policy resume   # 恢复（set suspend=false）
-```
-
-**修改文件**：`cmd/cli/vcctl.go` — 注册 repack 命令组
-
-### 阶段 5：RunGC 增强
+### 阶段 4：RunGC 增强
 
 **设计选择**：Policy 历史限制由 Policy 控制器自行处理，**不修改现有 RunGC**。
 
@@ -621,7 +601,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 3. 超出 limit 的最旧 Run DELETE
 4. 清理 `status.inProgress[]` 中已终态的 Run 引用
 
-### 阶段 6：Helm Chart 与部署
+### 阶段 5：Helm Chart 与部署
 
 **修改文件**：`installer/helm/chart/volcano/`
 
@@ -630,9 +610,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
   - 部署 RepackPolicy ClusterRole（CREATE/GET/LIST/WATCH/UPDATE/PATCH/DELETE on `repackpolicies` + `repackruns`；LIST/WATCH on `nodes` 和 `pods`，用于 onFragAbovePercent 碎片率实时计算和 Run 历史 GC）
   - controller-manager 启动参数添加 `--repack-policy-eval-period=10m`
 
-### 阶段 7：测试
-
-#### 7.1 单元测试
+### 阶段 6：单元测试
 
 | 测试文件 | 覆盖内容 |
 |---------|---------|
@@ -642,16 +620,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 | `policy_state_test.go` | `hasInProgressRun()`、`nextCronFire()` 等纯函数 |
 | `policy_frag_test.go` | 碎片率计算正确性（同构/异构集群场景） |
 
-#### 7.2 E2E 测试
-
-在 `test/e2e/repack/` 下新增：
-
-1. **Policy CRUD**：创建 → 读取 → 更新 → 删除 → 验证级联清理
-2. **Cron 触发**：创建 Policy（cronSchedule `*/1 * * * *`）→ 等待 → 验证 Run 按期望生成，ownerReferences 正确
-3. **suspend 控制**：Policy 创建时 suspend=true → 验证无 Run → 修改为 suspend=false → 验证 Run 生成
-4. **历史限制**：successfulRunsHistoryLimit=2 → 手动创建 5 个 Succeeded Run → 验证旧 3 个被 DELETE
-5. **并发门控**：创建 Execute 模板的 Policy → 生成的 Run 保持 Running → 验证 Policy 不创建第二个 Run
-6. **onFragAbovePercent**：部署少量 GPU 节点 + 故意分散调度 PodGroup 到不同节点制造碎片化（Pod 请求量不填满单节点，但跨节点分布）→ 创建 Policy 设置 `onFragAbovePercent` 低于当前碎片率 → 等待 evalCycle → 验证 Policy 触发生成 Run
+> E2E 测试推迟至实现完成后补充。
 
 ---
 
@@ -673,10 +642,7 @@ Policy 控制器的 reconcile 循环中执行历史 GC：
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_state_test.go` | **新建** | 纯函数单元测试 |
 | `staging/src/volcano.sh/repack-controller/pkg/policy/policy_frag_test.go` | **新建** | 碎片率计算单元测试 |
 | `pkg/controllers/repack/repack.go` | 修改 | 集成 Policy 控制器 + FlagProvider |
-| `pkg/cli/repack/policy.go` | **新建** | vcctl Policy 子命令 |
-| `cmd/cli/vcctl.go` | 修改 | 注册 repack 命令组 |
 | `installer/helm/chart/volcano/` | 修改 | Helm flag + RBAC |
-| `test/e2e/repack/` | 修改/新建 | Policy E2E 测试 |
 
 ---
 
@@ -705,9 +671,4 @@ make images                     # 所有镜像
 
 # 单元测试
 make unit-test                  # 全量单测
-
-# E2E 测试
-make e2e-test-repack            # 现有 repack e2e 不变
-# 新增 Policy e2e（需定义新 E2E_TYPE）
-make e2e-test-repack-policy
 ```
