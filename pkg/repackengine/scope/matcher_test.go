@@ -14,11 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package framework
+package scope
 
 import (
 	"testing"
 
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 
@@ -31,7 +32,7 @@ type gangFixture struct {
 	gangLabels   map[string]string
 }
 
-func gangScopeLookupFrom(m map[schedapi.JobID]gangFixture) GangScopeLookup {
+func gangScopeLookupFrom(m map[schedapi.JobID]gangFixture) GangLookup {
 	return func(id schedapi.JobID) (string, labels.Labels, bool) {
 		g, ok := m[id]
 		if !ok {
@@ -45,10 +46,14 @@ func sel(ml map[string]string) *metav1.LabelSelector {
 	return &metav1.LabelSelector{MatchLabels: ml}
 }
 
+func node(name string, nodeLabels map[string]string) *schedapi.NodeInfo {
+	return &schedapi.NodeInfo{Name: name, Node: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: nodeLabels}}}
+}
+
 // nil scope = whole domain: every known gang and every node is in scope.
-func TestScopeMatcher_NilIsAll(t *testing.T) {
+func TestMatcher_NilIsAll(t *testing.T) {
 	lookup := gangScopeLookupFrom(map[schedapi.JobID]gangFixture{"ns/a": {"ns/a", nil}})
-	matcher, err := NewScopeMatcher(nil, lookup)
+	matcher, err := NewMatcher(nil, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,14 +69,14 @@ func TestScopeMatcher_NilIsAll(t *testing.T) {
 }
 
 // Node include selector restricts to matching nodes; exclude-by-name wins.
-func TestScopeMatcher_NodeSelectorAndExclude(t *testing.T) {
+func TestMatcher_NodeSelectorAndExclude(t *testing.T) {
 	scope := &repackv1alpha1.RepackScope{
 		Nodes: &repackv1alpha1.RepackSelectorTerm{
 			Include: &repackv1alpha1.RepackSelector{Selector: sel(map[string]string{"pool": "a100"})},
 			Exclude: &repackv1alpha1.RepackSelector{Names: []string{"n-guard"}},
 		},
 	}
-	matcher, err := NewScopeMatcher(scope, nil)
+	matcher, err := NewMatcher(scope, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,7 +92,7 @@ func TestScopeMatcher_NodeSelectorAndExclude(t *testing.T) {
 }
 
 // PodGroup include by names restricts the gang set.
-func TestScopeMatcher_PodGroupNames(t *testing.T) {
+func TestMatcher_PodGroupNames(t *testing.T) {
 	lookup := gangScopeLookupFrom(map[schedapi.JobID]gangFixture{
 		"ns/keep": {"ns/keep", map[string]string{"team": "ml"}},
 		"ns/drop": {"ns/drop", map[string]string{"team": "ml"}},
@@ -97,7 +102,7 @@ func TestScopeMatcher_PodGroupNames(t *testing.T) {
 			Include: &repackv1alpha1.RepackSelector{Names: []string{"ns/keep"}},
 		},
 	}
-	matcher, err := NewScopeMatcher(scope, lookup)
+	matcher, err := NewMatcher(scope, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +118,7 @@ func TestScopeMatcher_PodGroupNames(t *testing.T) {
 // This is the "everything is a PodGroup" path: for Deployment/StatefulSet/custom
 // workloads the pg-controller inherits pod template labels onto the PodGroup
 // (§5.2.1), so a PG label selector addresses them uniformly.
-func TestScopeMatcher_PodGroupSelector(t *testing.T) {
+func TestMatcher_PodGroupSelector(t *testing.T) {
 	lookup := gangScopeLookupFrom(map[schedapi.JobID]gangFixture{
 		"ns/dep-x": {"ns/dep-x", map[string]string{"app": "recommender"}},
 		"ns/dep-y": {"ns/dep-y", map[string]string{"app": "ranking"}},
@@ -125,7 +130,7 @@ func TestScopeMatcher_PodGroupSelector(t *testing.T) {
 			Exclude: &repackv1alpha1.RepackSelector{Selector: sel(map[string]string{"repack.volcano.sh/protected": "true"})},
 		},
 	}
-	matcher, err := NewScopeMatcher(scope, lookup)
+	matcher, err := NewMatcher(scope, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +146,7 @@ func TestScopeMatcher_PodGroupSelector(t *testing.T) {
 }
 
 // A malformed selector is a resolve-time error.
-func TestScopeMatcher_BadSelectorErrors(t *testing.T) {
+func TestMatcher_BadSelectorErrors(t *testing.T) {
 	scope := &repackv1alpha1.RepackScope{
 		Nodes: &repackv1alpha1.RepackSelectorTerm{
 			Include: &repackv1alpha1.RepackSelector{
@@ -151,7 +156,7 @@ func TestScopeMatcher_BadSelectorErrors(t *testing.T) {
 			},
 		},
 	}
-	if _, err := NewScopeMatcher(scope, nil); err == nil {
+	if _, err := NewMatcher(scope, nil); err == nil {
 		t.Error("malformed label selector should be a resolve-time error")
 	}
 }

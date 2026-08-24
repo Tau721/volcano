@@ -31,6 +31,7 @@ import (
 
 	"volcano.sh/volcano/pkg/repackengine/api"
 	"volcano.sh/volcano/pkg/repackengine/framework"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
 // SessionSnapshot adapts a live scheduler Session to framework.Snapshot. The
@@ -40,14 +41,14 @@ import (
 type SessionSnapshot struct {
 	ssn      *schedframework.Session
 	resource v1.ResourceName
-	scope    *framework.ScopeMatcher // nil = all nodes in scope
+	scope    *enginescope.Matcher // nil = all nodes in scope
 }
 
 var _ framework.Snapshot = (*SessionSnapshot)(nil)
 
 // NewSessionSnapshot wraps a Session for the given target resource. scope gates
 // drain targets (nil = all in scope); it does NOT filter the receiver set.
-func NewSessionSnapshot(ssn *schedframework.Session, resource v1.ResourceName, scope *framework.ScopeMatcher) *SessionSnapshot {
+func NewSessionSnapshot(ssn *schedframework.Session, resource v1.ResourceName, scope *enginescope.Matcher) *SessionSnapshot {
 	return &SessionSnapshot{ssn: ssn, resource: resource, scope: scope}
 }
 

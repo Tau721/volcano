@@ -31,6 +31,7 @@ import (
 	engineconf "volcano.sh/volcano/pkg/repackengine/conf"
 	engineframework "volcano.sh/volcano/pkg/repackengine/framework"
 	"volcano.sh/volcano/pkg/repackengine/metrics"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 	enginestatus "volcano.sh/volcano/pkg/repackengine/status"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 )
@@ -102,7 +103,7 @@ func (e *Engine) planRun(ctx context.Context, run *repackv1alpha1.RepackRun) err
 	}
 	klog.V(4).InfoS("repack: run status persisted as Running", "run", run.Name, "reason", state.ReasonPlanning)
 
-	scope, err := engineframework.NewScopeMatcher(run.Spec.Scope, adapter.SessionGangScopeLookup(schedulerSession))
+	scope, err := enginescope.NewMatcher(run.Spec.Scope, adapter.SessionGangScopeLookup(schedulerSession))
 	if err != nil {
 		return e.fail(ctx, run, generation, state.ReasonScopeResolutionFailed, err)
 	}

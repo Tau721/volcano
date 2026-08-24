@@ -73,7 +73,7 @@ func (*repackAction) Execute(ssn *framework.Session) {
 		klog.V(3).InfoS("repack: no plan produced", "run", runName, "resource", resource, "reason", "NoFreeableUnit")
 	}
 	ssn.SetPlan(plan)
-	report := framework.RenderReport(plan)
+	report := api.RenderReport(plan)
 	if plan == nil {
 		// No plan: still record the cluster's current fragmentation so the Engine
 		// can tell NoFragmentation (clean) apart from BelowGoalThreshold (fragmented

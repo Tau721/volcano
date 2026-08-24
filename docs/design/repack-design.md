@@ -705,9 +705,15 @@ pkg/repackengine/
   actions/repack/                          # Action 主流程
   planner/drain/                           # Lazy Drain Planner 与性能基准
   plugins/                                 # 场景策略
-  framework/                               # Session、Action、Plugin、回调聚合
+  framework/                               # Session、Action、Plugin 及候选/受害者/接收节点扩展契约
+    session.go                             # 单轮规划上下文与插件生命周期
+    action.go / plugin.go                  # Action、Plugin 接口及注册表
+    candidate.go                           # 腾空候选过滤、受害 Pod 排序与中断评分扩展点
+    receiver.go                            # 接收节点集合与优先级扩展点
+    constraint.go                          # 最终计划约束扩展点
   adapter/                                 # Scheduler Session/Snapshot 适配
-  api/                                     # 纯模型、碎片度量、中断聚合
+  api/                                     # 纯模型、碎片度量、中断聚合与规划报告
+  scope/                                   # 节点和工作负载 Scope 的编译与匹配
   executor/eviction/                       # Eviction API 请求构造和错误归一化
   executor/placement/                      # replacement 落点判定、终态收益判定和 identity
   status/                                  # status 投影、用户消息、冲突合并与持久化

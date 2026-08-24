@@ -22,13 +22,13 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 
-	"volcano.sh/volcano/pkg/repackengine/framework"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
-// SessionGangScopeLookup adapts a live Session into a framework.GangScopeLookup:
+// SessionGangScopeLookup adapts a live Session into a scope.GangLookup:
 // it reads each gang's namespace/name and labels off the JobInfo's PodGroup.
-// Production source for framework.NewScopeMatcher; tests use a plain func.
-func SessionGangScopeLookup(ssn *schedframework.Session) framework.GangScopeLookup {
+// Production source for scope.NewMatcher; tests use a plain func.
+func SessionGangScopeLookup(ssn *schedframework.Session) enginescope.GangLookup {
 	// Tasks on nodes may reference Job IDs omitted from ssn.Jobs: the scheduler
 	// snapshot skips jobs whose PodGroup is not linked yet or whose queue is not
 	// in the cache, even though the pods are already running. Repack still needs

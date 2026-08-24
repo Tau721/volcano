@@ -38,7 +38,6 @@ import (
 
 	enginecache "volcano.sh/volcano/pkg/repackengine/cache"
 	engineconf "volcano.sh/volcano/pkg/repackengine/conf"
-	placementexecutor "volcano.sh/volcano/pkg/repackengine/executor/placement"
 	enginestatus "volcano.sh/volcano/pkg/repackengine/status"
 	"volcano.sh/volcano/pkg/scheduler/conf"
 )
@@ -81,7 +80,7 @@ type Engine struct {
 	// worker starts.
 	pendingTerminalStatuses map[string]*repackv1alpha1.RepackRunStatus
 
-	placementRepairLimiter placementexecutor.RepairLimiter
+	placementRepairLimiter placementRepairLimiter
 }
 
 // NewEngine builds the engine, wires the RepackRun informer, and applies defaults.

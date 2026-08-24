@@ -34,7 +34,7 @@ import (
 	"volcano.sh/volcano/pkg/repackengine/adapter"
 	engineapi "volcano.sh/volcano/pkg/repackengine/api"
 	engineconf "volcano.sh/volcano/pkg/repackengine/conf"
-	engineframework "volcano.sh/volcano/pkg/repackengine/framework"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 )
@@ -75,7 +75,7 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 	targetResource := engineconf.ResolveResource(run, e.config.DefaultResource)
 	schedulerSession := e.clusterCache.OpenSession(e.tiers, e.configurations)
 	defer schedframework.CloseSessionReadOnly(schedulerSession)
-	scope, err := engineframework.NewScopeMatcher(run.Spec.Scope, adapter.SessionGangScopeLookup(schedulerSession))
+	scope, err := enginescope.NewMatcher(run.Spec.Scope, adapter.SessionGangScopeLookup(schedulerSession))
 	if err != nil {
 		return err
 	}

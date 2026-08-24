@@ -14,7 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package framework
+// Package scope compiles RepackRun node and workload selectors into the
+// predicates used by planning. It is independent of the plugin framework.
+package scope
 
 import (
 	"fmt"
@@ -26,7 +28,7 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 )
 
-// GangScopeLookup returns the information needed to match a gang against a
+// GangLookup returns the information needed to match a gang against a
 // RepackScope: its PodGroup name in "namespace/name" form (for name selectors)
 // and its labels (for label selectors).
 // "Everything is a PodGroup": the labels are the PodGroup's own labels. The
@@ -35,7 +37,7 @@ import (
 // keeps scope matching independent of workload-specific pod or owner lookups.
 // found=false means the JobID is unknown to the snapshot (treated as out of scope).
 // The live-Session implementation is adapter.SessionGangScopeLookup; tests use a func.
-type GangScopeLookup func(schedapi.JobID) (podGroupName string, gangLabels labels.Labels, found bool)
+type GangLookup func(schedapi.JobID) (podGroupName string, gangLabels labels.Labels, found bool)
 
 type compiledTerm struct {
 	includeAll bool
@@ -96,14 +98,14 @@ func compileTerm(t *repackv1alpha1.RepackSelectorTerm) (*compiledTerm, error) {
 	return c, nil
 }
 
-// ScopeMatcher decides, for one repack pass, which gangs may move and which nodes
-// may be drain targets. It is the compiled form of a RepackScope: NewScopeMatcher
+// Matcher decides, for one repack pass, which gangs may move and which nodes
+// may be drain targets. It is the compiled form of a RepackScope: NewMatcher
 // parses the selectors once, and the two methods are called during planning.
 // Passing this one named value (instead of two loose predicate funcs) keeps the
 // scope logic readable and discoverable — a reader can jump straight to InScope /
 // NodeInScope to see exactly what "in scope" means.
-type ScopeMatcher struct {
-	lookupGang      GangScopeLookup
+type Matcher struct {
+	lookupGang      GangLookup
 	podGroupMatcher *compiledTerm // scope.podGroups (include − exclude)
 	nodeMatcher     *compiledTerm // scope.nodes (include − exclude)
 }
@@ -111,7 +113,7 @@ type ScopeMatcher struct {
 // InScope reports whether the gang (PodGroup) with this JobID is in scope: it is
 // looked up to its "namespace/name" and labels, then matched against
 // scope.podGroups. An unknown gang is out of scope.
-func (m *ScopeMatcher) InScope(id schedapi.JobID) bool {
+func (m *Matcher) InScope(id schedapi.JobID) bool {
 	podGroupName, gangLabels, found := m.lookupGang(id)
 	if !found {
 		return false
@@ -124,17 +126,17 @@ func (m *ScopeMatcher) InScope(id schedapi.JobID) bool {
 
 // NodeInScope reports whether a node may be a drain target, matching its name and
 // labels against scope.nodes. A nil node is never in scope.
-func (m *ScopeMatcher) NodeInScope(n *schedapi.NodeInfo) bool {
+func (m *Matcher) NodeInScope(n *schedapi.NodeInfo) bool {
 	if n == nil {
 		return false
 	}
 	return m.nodeMatcher.matches(n.Name, nodeLabels(n))
 }
 
-// NewScopeMatcher compiles a RepackScope into a ScopeMatcher. Selectors are parsed
+// NewMatcher compiles a RepackScope into a Matcher. Selectors are parsed
 // once; a malformed selector is a compile-time error. A nil scope/axis means
 // "whole domain" for that axis; exclude wins.
-func NewScopeMatcher(scope *repackv1alpha1.RepackScope, lookupGang GangScopeLookup) (*ScopeMatcher, error) {
+func NewMatcher(scope *repackv1alpha1.RepackScope, lookupGang GangLookup) (*Matcher, error) {
 	var podGroupTerm, nodeTerm *repackv1alpha1.RepackSelectorTerm
 	if scope != nil {
 		podGroupTerm, nodeTerm = scope.PodGroups, scope.Nodes
@@ -147,7 +149,7 @@ func NewScopeMatcher(scope *repackv1alpha1.RepackScope, lookupGang GangScopeLook
 	if err != nil {
 		return nil, fmt.Errorf("scope.nodes: %w", err)
 	}
-	return &ScopeMatcher{
+	return &Matcher{
 		lookupGang:      lookupGang,
 		podGroupMatcher: podGroupMatcher,
 		nodeMatcher:     nodeMatcher,

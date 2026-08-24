@@ -26,9 +26,10 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
-// Callback contracts plugins register into a Session.
+// Core callback contracts plugins register into a Session.
 type (
 	// MovableFn reports whether a task may be moved. Aggregated with AND — any
 	// plugin may veto a move (gang breach, PDB, frozen scope).
@@ -37,52 +38,6 @@ type (
 	// hypernode units, ...). Aggregated by union; the planner optimizes their combined
 	// weighted benefit.
 	DomainFn func(snapshot Snapshot) []api.FreeableUnit
-	// DisruptionScoreFn measures a candidate plan's disruption cost on one
-	// dimension (higher raw value = more disruptive). The Session converts the
-	// raw values into an integer preference score in [0, 100], where higher is
-	// better, before applying the configured integer weight.
-	// This is SOFT ranking: drain uses it to order active candidates before lazy
-	// scheduler-feasibility simulation. A score must therefore depend on the moved
-	// tasks and cumulative plan impact, not on a final receiver node: prospective
-	// moves are scored before FeasibleRelocation assigns their destinations.
-	DisruptionScoreFn func(ctx *api.PlanContext, p *api.CandidatePlan) int64
-	// PlanConstraintFn is a HARD admissibility gate on a finished plan: return
-	// false to reject it outright. Aggregated with AND — any constraint may veto.
-	// Distinct from DisruptionScoreFn (soft ranking): a failed constraint discards
-	// the plan. The benefit gates (MinNodesFreed, MinFragImprovementPercent) are
-	// registered as built-in constraints; later features like disruptionPolicy's
-	// maxDisruptionScore add their own via AddConstraintFn.
-	PlanConstraintFn func(ctx *api.PlanContext, plan *api.RepackPlan) bool
-)
-
-type scoreTerm struct {
-	name   string
-	weight int64
-	fn     DisruptionScoreFn
-}
-
-// DisruptionScoreTerm explains one enabled scoring dimension for one candidate.
-// Raw is the disruption cost returned by the plugin. Score is its reverse
-// min-max normalized preference in [0, 100], and Contribution is Score*Weight.
-type DisruptionScoreTerm struct {
-	Name         string
-	Weight       int64
-	Raw          int64
-	Score        int64
-	Contribution int64
-}
-
-// CandidateDisruptionScore is the complete, operator-explainable score used to
-// rank one candidate. Higher Total is preferred, matching scheduler node score
-// semantics.
-type CandidateDisruptionScore struct {
-	Total int64
-	Terms []DisruptionScoreTerm
-}
-
-const (
-	MinCandidateScore int64 = 0
-	MaxCandidateScore int64 = 100
 )
 
 // SessionConfig is the per-run input the Engine supplies to OpenSession.
@@ -90,7 +45,7 @@ type SessionConfig struct {
 	Context       context.Context
 	Snapshot      Snapshot
 	Run           *repackv1alpha1.RepackRun
-	Scope         *ScopeMatcher
+	Scope         *enginescope.Matcher
 	Resource      v1.ResourceName
 	Mode          repackv1alpha1.RepackMode
 	MinNodesFreed int
@@ -124,7 +79,7 @@ type Session struct {
 
 	// results filled by the action, read by the Engine runtime
 	plan   *api.RepackPlan
-	report Report
+	report api.Report
 }
 
 // OpenSession builds a Session and runs each configured plugin's OnSessionOpen
@@ -154,33 +109,6 @@ func OpenSession(configuration SessionConfig, pluginOptions []PluginOption) *Ses
 		ssn.plugins = append(ssn.plugins, p)
 	}
 	return ssn
-}
-
-// registerBuiltinConstraints turns the run's benefit gates into first-class
-// plan constraints, so actions just ask PlanAdmissible instead of hardcoding
-// them. Additional plan-level policies (e.g. disruptionPolicy.maxDisruptionScore) join
-// the same seam via AddConstraintFn.
-func (s *Session) registerBuiltinConstraints() {
-	// MinNodesFreed: a plan must free at least this many nodes (default 1).
-	minFreed := s.configuration.MinNodesFreed
-	if minFreed < 1 {
-		minFreed = 1
-	}
-	s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) bool {
-		return plan != nil && plan.Benefit() >= float64(minFreed)
-	})
-	// MinFragImprovementPercent: fragmentation must drop by at least this many
-	// percentage points. FragmentationRateDelta is negative (fragmentation fell), so the
-	// improvement is round(-delta*100). 0 = no gate.
-	if minImprove := s.configuration.MinFragImprovementPercent; minImprove > 0 {
-		s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) bool {
-			if plan == nil {
-				return false
-			}
-			improvePct := int(-plan.FragmentationRateDelta()*100 + 0.5)
-			return improvePct >= minImprove
-		})
-	}
 }
 
 // CloseSession runs OnSessionClose on the plugins opened by OpenSession.
@@ -216,37 +144,13 @@ func (s *Session) AddDomainFn(fn DomainFn) {
 func (s *Session) ProvidesCapability(capability PluginCapability) bool {
 	return s != nil && s.capabilities[capability]
 }
-func (s *Session) AddDisruptionScoreFn(name string, weight int64, fn DisruptionScoreFn) {
-	if fn != nil {
-		s.scoreTerms = append(s.scoreTerms, scoreTerm{name: name, weight: weight, fn: fn})
-	}
-}
-func (s *Session) AddConstraintFn(fn PlanConstraintFn) {
-	if fn != nil {
-		s.constraintFns = append(s.constraintFns, fn)
-	}
-}
-
-// PlanAdmissible reports whether a finished plan passes every hard constraint
-// (built-in benefit gates + any plugin-registered PlanConstraintFns), AND-
-// aggregated: a single false rejects the plan. Soft candidate ordering and this
-// final hard veto are independent.
-func (s *Session) PlanAdmissible(plan *api.RepackPlan) bool {
-	ctx := s.PlanContext()
-	for _, fn := range s.constraintFns {
-		if !fn(ctx, plan) {
-			return false
-		}
-	}
-	return true
-}
 
 // ---- config accessors ----
 
 func (s *Session) Snapshot() Snapshot              { return s.configuration.Snapshot }
 func (s *Session) Context() context.Context        { return s.configuration.Context }
 func (s *Session) Run() *repackv1alpha1.RepackRun  { return s.configuration.Run }
-func (s *Session) Scope() *ScopeMatcher            { return s.configuration.Scope }
+func (s *Session) Scope() *enginescope.Matcher     { return s.configuration.Scope }
 func (s *Session) Resource() v1.ResourceName       { return s.configuration.Resource }
 func (s *Session) Mode() repackv1alpha1.RepackMode { return s.configuration.Mode }
 func (s *Session) MinNodesFreed() int              { return s.configuration.MinNodesFreed }
@@ -309,57 +213,9 @@ func (s *Session) PlanContext() *api.PlanContext {
 	return &api.PlanContext{TargetResource: s.configuration.Resource, PodGroupViews: s.configuration.Snapshot}
 }
 
-// DisruptionScores evaluates the registered disruption terms with reverse
-// min-max normalization across the candidate batch. Each term produces an
-// integer preference score in [0, 100], where higher is better, then applies its
-// integer weight. A term where all candidates tie gives every candidate the
-// maximum score, so it cannot change their relative order.
-func (s *Session) DisruptionScores(candidates []*api.CandidatePlan) []CandidateDisruptionScore {
-	scores := make([]CandidateDisruptionScore, len(candidates))
-	if len(candidates) == 0 {
-		return scores
-	}
-	ctx := s.PlanContext()
-	for _, term := range s.scoreTerms {
-		if term.weight <= 0 {
-			continue
-		}
-		rawValues := make([]int64, len(candidates))
-		var minimum, maximum int64
-		for index, candidate := range candidates {
-			rawValues[index] = term.fn(ctx, candidate)
-			if index == 0 || rawValues[index] < minimum {
-				minimum = rawValues[index]
-			}
-			if index == 0 || rawValues[index] > maximum {
-				maximum = rawValues[index]
-			}
-		}
-		span := maximum - minimum
-		for index := range candidates {
-			preferenceScore := MaxCandidateScore
-			if span > 0 {
-				normalizedCost := int64(float64(rawValues[index]-minimum) * float64(MaxCandidateScore) / float64(span))
-				preferenceScore = MaxCandidateScore - normalizedCost
-			}
-			preferenceScore = max(MinCandidateScore, min(MaxCandidateScore, preferenceScore))
-			contribution := term.weight * preferenceScore
-			scores[index].Total += contribution
-			scores[index].Terms = append(scores[index].Terms, DisruptionScoreTerm{
-				Name:         term.name,
-				Weight:       term.weight,
-				Raw:          rawValues[index],
-				Score:        preferenceScore,
-				Contribution: contribution,
-			})
-		}
-	}
-	return scores
-}
-
 // ---- result (set by the action, read by the Engine runtime) ----
 
 func (s *Session) SetPlan(p *api.RepackPlan) { s.plan = p }
 func (s *Session) Plan() *api.RepackPlan     { return s.plan }
-func (s *Session) SetReport(r Report)        { s.report = r }
-func (s *Session) Report() Report            { return s.report }
+func (s *Session) SetReport(r api.Report)    { s.report = r }
+func (s *Session) Report() api.Report        { return s.report }

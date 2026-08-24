@@ -44,6 +44,22 @@ type RepackPlan struct {
 	Cost       DisruptionCost        // disruption summary of Moves
 }
 
+// Report is the search outcome rendered from a RepackPlan — the engine-side,
+// CRD-independent shape projected into RepackRun.status.plan (§4.6).
+type Report struct {
+	NodesFreed             int   // realized node-level benefit (whole nodes freed)
+	MovedResource          int64 // target-resource units relocated
+	AffectedPodGroups      int64 // distinct gangs disrupted
+	FragmentationRateDelta float64
+	// FragmentationRateBefore/After are the cluster-wide fragmentation rate (0-1)
+	// for the target resource before/after the plan, feeding
+	// status.plan.summary.frag{Before,After}Percent. Scope limits eligible actions,
+	// not this cluster health metric. after = before + FragmentationRateDelta
+	// (freeing a node reduces the occupied-node count by one).
+	FragmentationRateBefore float64
+	FragmentationRateAfter  float64
+}
+
 // NodesFreed is the realized node-level benefit (whole nodes emptied).
 func (p *RepackPlan) NodesFreed() int { return len(p.FreedNodes) }
 
@@ -91,4 +107,19 @@ func (p *RepackPlan) AffectedPodGroups() []api.JobID {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
+}
+
+// RenderReport turns a plan into the report. Nil plan produces an empty report.
+func RenderReport(plan *RepackPlan) Report {
+	if plan == nil {
+		return Report{}
+	}
+	return Report{
+		NodesFreed:              plan.NodesFreed(),
+		MovedResource:           plan.Cost.MovedResource,
+		AffectedPodGroups:       plan.Cost.AffectedPodGroups,
+		FragmentationRateDelta:  plan.FragmentationRateDelta(),
+		FragmentationRateBefore: plan.Before.FragmentationRate(),
+		FragmentationRateAfter:  plan.Before.FragmentationRate() + plan.FragmentationRateDelta(),
+	}
 }

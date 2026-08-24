@@ -14,6 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package conf owns volcano-repack-engine configuration, defaults and
+// validation. It deliberately contains no informer, cache or execution state.
 package conf
 
 import (
@@ -24,6 +26,25 @@ import (
 
 	"volcano.sh/volcano/pkg/repackengine/framework"
 )
+
+// Config holds the engine's runtime parameters.
+type Config struct {
+	SchedulerConf   string
+	RepackConf      string
+	ResyncPeriod    time.Duration
+	Cooldown        time.Duration
+	Plugins         []framework.PluginOption
+	Actions         []string
+	MinNodesFreed   int
+	DefaultResource string
+	NominationTTL   time.Duration
+}
+
+// FileConfiguration is the strict YAML representation of repack-engine.conf.
+type FileConfiguration struct {
+	Actions string                   `yaml:"actions"`
+	Plugins []framework.PluginOption `yaml:"plugins"`
+}
 
 const DefaultNominationTTL = 10 * time.Minute
 

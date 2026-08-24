@@ -16,7 +16,10 @@ limitations under the License.
 
 package api
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
 // Benefit sums freed-unit weights (node=1, hypernode>1), capturing holistic gain.
 func TestBenefit_UnitsWeighted(t *testing.T) {
@@ -56,5 +59,29 @@ func TestAffectedPodGroups(t *testing.T) {
 	got := p.AffectedPodGroups()
 	if len(got) != 2 || string(got[0]) != "g1" || string(got[1]) != "g2" {
 		t.Errorf("affected=%v, want [g1 g2]", got)
+	}
+}
+
+// RenderReport reports absolute fragmentation before/after: after = before +
+// delta, where freeing a node reduces the occupied-node count by one.
+func TestRenderReport_FragBeforeAfter(t *testing.T) {
+	plan := &RepackPlan{
+		Before:     ResourceFragmentation{ProvidingNodeCount: 10, OccupiedNodeCount: 6, OptimalOccupiedNodeCount: 2}, // before = (6-2)/10 = 0.4
+		FreedNodes: []string{"n0", "n1"},                                                                             // delta = -2/10; after = 0.2
+	}
+	r := RenderReport(plan)
+	if math.Abs(r.FragmentationRateBefore-0.4) > 1e-9 {
+		t.Errorf("before=%v, want 0.4", r.FragmentationRateBefore)
+	}
+	if math.Abs(r.FragmentationRateAfter-0.2) > 1e-9 {
+		t.Errorf("after=%v, want 0.2", r.FragmentationRateAfter)
+	}
+	if r.NodesFreed != 2 {
+		t.Errorf("nodesFreed=%d, want 2", r.NodesFreed)
+	}
+
+	// Nil plan produces an empty report.
+	if r0 := RenderReport(nil); r0.FragmentationRateBefore != 0 || r0.FragmentationRateAfter != 0 {
+		t.Errorf("nil plan report=%+v, want zero", r0)
 	}
 }

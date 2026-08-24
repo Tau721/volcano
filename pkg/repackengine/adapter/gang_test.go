@@ -24,7 +24,7 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 
-	"volcano.sh/volcano/pkg/repackengine/framework"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
 // A running task may reference a Job ID that is not cloned into the scheduler
@@ -46,7 +46,7 @@ func TestSessionGangScopeLookup_FallsBackToTasksOnNodes(t *testing.T) {
 	ssn := &schedframework.Session{Nodes: map[string]*schedapi.NodeInfo{"n0": node}}
 
 	lookup := SessionGangScopeLookup(ssn)
-	matcher, err := framework.NewScopeMatcher(nil, lookup)
+	matcher, err := enginescope.NewMatcher(nil, lookup)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,10 +25,11 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/framework"
+	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
 func TestPluginRegistersScopeAsMovableBoundary(t *testing.T) {
-	matcher, err := framework.NewScopeMatcher(&repackv1alpha1.RepackScope{
+	matcher, err := enginescope.NewMatcher(&repackv1alpha1.RepackScope{
 		PodGroups: &repackv1alpha1.RepackSelectorTerm{
 			Include: &repackv1alpha1.RepackSelector{Names: []string{"ns/allowed"}},
 		},
@@ -51,7 +52,7 @@ func TestPluginRegistersScopeAsMovableBoundary(t *testing.T) {
 }
 
 func TestWorkloadScopeIsOptional(t *testing.T) {
-	matcher, err := framework.NewScopeMatcher(&repackv1alpha1.RepackScope{
+	matcher, err := enginescope.NewMatcher(&repackv1alpha1.RepackScope{
 		PodGroups: &repackv1alpha1.RepackSelectorTerm{
 			Include: &repackv1alpha1.RepackSelector{Names: []string{"ns/allowed"}},
 		},

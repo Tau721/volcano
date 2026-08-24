@@ -17,7 +17,6 @@ limitations under the License.
 package framework
 
 import (
-	"cmp"
 	"fmt"
 	"testing"
 
@@ -25,48 +24,6 @@ import (
 
 	"volcano.sh/volcano/pkg/repackengine/api"
 )
-
-func TestCandidateAdmissibleStopsAtFirstPluginVeto(t *testing.T) {
-	ssn := newSession(&fakeSnap{})
-	called := []string{}
-	ssn.AddCandidateFilterFn("allow", func(*api.PlanContext, *PlanningCandidate) *CandidateFilterResult {
-		called = append(called, "allow")
-		return nil
-	})
-	ssn.AddCandidateFilterFn("repackbudget", func(*api.PlanContext, *PlanningCandidate) *CandidateFilterResult {
-		called = append(called, "repackbudget")
-		return &CandidateFilterResult{Reason: "max_resource"}
-	})
-	ssn.AddCandidateFilterFn("must-not-run", func(*api.PlanContext, *PlanningCandidate) *CandidateFilterResult {
-		called = append(called, "must-not-run")
-		return nil
-	})
-
-	result := ssn.CandidateAdmissible(&PlanningCandidate{})
-	if result == nil || result.Reason != "max_resource" {
-		t.Fatalf("result=%+v, want max_resource veto", result)
-	}
-	if got := fmt.Sprint(called); got != "[allow repackbudget]" {
-		t.Fatalf("callbacks=%s, want configured order with first-veto stop", got)
-	}
-}
-
-func TestOrderVictimsComposesComparators(t *testing.T) {
-	ssn := newSession(&fakeSnap{})
-	ssn.AddVictimOrderFn("resource", func(left, right *schedapi.TaskInfo) int {
-		return cmp.Compare(api.Scalar(right.InitResreq, gpu), api.Scalar(left.InitResreq, gpu))
-	})
-	ssn.AddVictimOrderFn("name", func(left, right *schedapi.TaskInfo) int {
-		return cmp.Compare(left.Name, right.Name)
-	})
-
-	ordered := ssn.OrderVictims([]*schedapi.TaskInfo{
-		task("b", "g", 1), task("c", "g", 2), task("a", "g", 1),
-	})
-	if got := fmt.Sprint([]string{ordered[0].Name, ordered[1].Name, ordered[2].Name}); got != "[c a b]" {
-		t.Fatalf("victim order=%s, want [c a b]", got)
-	}
-}
 
 func TestOrderReceiversUsesPriorityAndEvaluatesEachRankOnce(t *testing.T) {
 	ssn := newSession(&fakeSnap{})
