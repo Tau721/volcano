@@ -1,185 +1,188 @@
-<svg viewBox="0 0 1090 600" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif" role="img">
-<title>Repack 碎片整理前后 · 节点占用对比</title>
-<desc>一个 L2 HyperNode 含 3 个 L1 HyperNode，每个 L1 HyperNode 含 8 个节点。整理前 A/B/C 分别是前 6/6/4 个节点占用；整理后 A 8/8、B 8/8、C 0/8，C 整层腾空。左为整理前，右为整理后。集群中有两个 Job 在等待调度（示意，不实际落位）：Job 1 含 1 组（6 个 Pod）；Job 2 含 3 组（每组 2 个 Pod）。</desc>
-<rect width="1090" height="600" fill="#ffffff"/>
+<svg viewBox="0 0 1400 690" xmlns="http://www.w3.org/2000/svg" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'PingFang SC', 'Microsoft YaHei', sans-serif" role="img">
+  <rect width="1400" height="620" fill="#ffffff"/>
 
-<text x="520" y="24" text-anchor="middle" font-size="16" font-weight="700" fill="#1f2328">Repack 碎片整理 · 节点占用对比</text>
-<text x="520" y="42" text-anchor="middle" font-size="12" fill="#57606a">1 个 L2 HyperNode，含 3 个 L1 HyperNode，每个含 8 节点</text>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#57606a"/>
+    </marker>
+  </defs>
 
-<!-- ===== 左：整理前 ===== -->
-<text x="260" y="72" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2328">整理前 · 当前状态</text>
-<text x="260" y="88" text-anchor="middle" font-size="11" fill="#57606a">A 6/8 · B 6/8 · C 4/8 · 共 16/24 占用，上层有空隙</text>
+  <g transform="translate(0,-80)">
 
-<g transform="translate(16,104)">
-  <rect width="488" height="296" rx="12" fill="#fafbfc" stroke="#57606a" stroke-width="1.5"/>
-  <text x="16" y="20" font-size="13" font-weight="600" fill="#57606a">L2 HyperNode · 24 节点 · 16 占用 / 8 空闲</text>
+    <!-- ================================================================
+         面板 0 · 现状（最左侧）
+    ================================================================ -->
+    <g transform="translate(0,174)">
+      <text x="260" y="66" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2328">集群现状</text>
+      <text x="260" y="82" text-anchor="middle" font-size="11" fill="#57606a">2 个 L1（A、B）各 8 节点 · 每节点 8 卡、Pod 占 4 卡</text>
 
-  <g transform="translate(20,36)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode A · 6/8 占用</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n1</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n2</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n3</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n4</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n5</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n6</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="356" y="52" text-anchor="middle" font-size="11" fill="#57606a">n7</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="409" y="52" text-anchor="middle" font-size="11" fill="#57606a">n8</text>
-  </g>
+      <g transform="translate(16,96)">
+        <rect width="488" height="216" rx="12" fill="#fafbfc" stroke="#57606a" stroke-width="1.5"/>
+        <text x="16" y="22" font-size="13" font-weight="600" fill="#57606a">L2 HyperNode · 16 节点 · 每节点 Pod 占 4/8</text>
 
-  <g transform="translate(20,120)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode B · 6/8 占用</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n9</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n10</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n11</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n12</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n13</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n14</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="356" y="52" text-anchor="middle" font-size="11" fill="#57606a">n15</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="409" y="52" text-anchor="middle" font-size="11" fill="#57606a">n16</text>
-  </g>
+        <g transform="translate(20,36)">
+          <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+          <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode A · 8 节点 · 每节点 4/8</text>
+          <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="332" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="356" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="385" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="409" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+        </g>
 
-  <g transform="translate(20,204)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode C · 4/8 占用</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n17</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n18</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n19</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n20</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="250" y="52" text-anchor="middle" font-size="11" fill="#57606a">n21</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="303" y="52" text-anchor="middle" font-size="11" fill="#57606a">n22</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="356" y="52" text-anchor="middle" font-size="11" fill="#57606a">n23</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="409" y="52" text-anchor="middle" font-size="11" fill="#57606a">n24</text>
-  </g>
-</g>
+        <g transform="translate(20,120)">
+          <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+          <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode B · 8 节点 · 每节点 4/8</text>
+          <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="332" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="356" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+          <rect x="385" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="409" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">4/8</text>
+        </g>
+      </g>
 
-<!-- ===== 两张图之间的箭头 ===== -->
-<line x1="512" y1="252" x2="576" y2="252" stroke="#57606a" stroke-width="3"/>
-<path d="M 578 252 L 568 245 M 578 252 L 568 259" stroke="#57606a" stroke-width="3" stroke-linecap="round" fill="none"/>
-
-<!-- ===== 右：整理后 ===== -->
-<text x="828" y="72" text-anchor="middle" font-size="14" font-weight="700" fill="#1f2328">整理后 · 目标状态</text>
-<text x="828" y="88" text-anchor="middle" font-size="11" fill="#57606a">A 8/8 · B 8/8 · C 0/8 · C 整层腾空</text>
-
-<g transform="translate(584,104)">
-  <rect width="488" height="296" rx="12" fill="#fafbfc" stroke="#57606a" stroke-width="1.5"/>
-  <text x="16" y="20" font-size="13" font-weight="600" fill="#57606a">L2 HyperNode · 24 节点 · 16 占用 / 8 空闲</text>
-
-  <g transform="translate(20,36)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode A · 8/8（满）</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n1</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n2</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n3</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n4</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n5</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n6</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="356" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n7</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="409" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n8</text>
-  </g>
-
-  <g transform="translate(20,120)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode B · 8/8（满）</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="38" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n9</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="91" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n10</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="144" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n11</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="197" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n12</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="250" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n13</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="303" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n14</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="356" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n15</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="#6366f1"/><text x="409" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">n16</text>
-  </g>
-
-  <g transform="translate(20,204)">
-    <rect width="448" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
-    <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode C · 0/8</text>
-    <rect x="14" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="38" y="52" text-anchor="middle" font-size="11" fill="#57606a">n17</text>
-    <rect x="67" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="91" y="52" text-anchor="middle" font-size="11" fill="#57606a">n18</text>
-    <rect x="120" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="144" y="52" text-anchor="middle" font-size="11" fill="#57606a">n19</text>
-    <rect x="173" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="197" y="52" text-anchor="middle" font-size="11" fill="#57606a">n20</text>
-    <rect x="226" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="250" y="52" text-anchor="middle" font-size="11" fill="#57606a">n21</text>
-    <rect x="279" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="303" y="52" text-anchor="middle" font-size="11" fill="#57606a">n22</text>
-    <rect x="332" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="356" y="52" text-anchor="middle" font-size="11" fill="#57606a">n23</text>
-    <rect x="385" y="32" width="48" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="409" y="52" text-anchor="middle" font-size="11" fill="#57606a">n24</text>
-  </g>
-</g>
-
-<!-- ===== 待调度 Job（左 · 整理前） ===== -->
-<g transform="translate(86,414)">
-  <text x="0" y="27" font-size="13" font-weight="700" fill="#1f2328">待调度 Job 1 · 1 个组 · 6 个 Pod</text>
-  <g transform="translate(210,0)">
-    <rect width="162" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-    <circle cx="16" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="16" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-    <circle cx="42" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="42" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    <circle cx="68" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="68" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p3</text>
-    <circle cx="94" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="94" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p4</text>
-    <circle cx="120" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="120" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p5</text>
-    <circle cx="146" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="146" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p6</text>
-  </g>
-</g>
-
-<g transform="translate(18,466)">
-  <text x="0" y="27" font-size="13" font-weight="700" fill="#1f2328">待调度 Job 2 · 3 个组 · 每组 2 个 Pod</text>
-  <g transform="translate(248,0)">
-    <g transform="translate(0,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
+      <!-- ===== 待调度 Job 行 · 现状 ===== -->
+      <g transform="translate(28,322)">
+        <text x="0" y="20" font-size="12" font-weight="700" fill="#1f2328">待调度 Job · 8 个 Pod · 每个 Pod 申请 8 卡</text>
+        <g transform="translate(255,0)">
+          <rect width="210" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
+          <circle cx="16" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="16" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
+          <circle cx="42" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="42" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
+          <circle cx="68" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="68" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p3</text>
+          <circle cx="94" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="94" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p4</text>
+          <circle cx="120" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="120" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p5</text>
+          <circle cx="146" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="146" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p6</text>
+          <circle cx="172" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="172" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p7</text>
+          <circle cx="198" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="198" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p8</text>
+        </g>
+      </g>
     </g>
-    <g transform="translate(84,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    </g>
-    <g transform="translate(168,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    </g>
-  </g>
-</g>
 
-<!-- ===== 待调度 Job（右 · 整理后） ===== -->
-<g transform="translate(654,414)">
-  <text x="0" y="27" font-size="13" font-weight="700" fill="#1f2328">待调度 Job 1 · 1 个组 · 6 个 Pod</text>
-  <g transform="translate(210,0)">
-    <rect width="162" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-    <circle cx="16" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="16" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-    <circle cx="42" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="42" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    <circle cx="68" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="68" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p3</text>
-    <circle cx="94" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="94" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p4</text>
-    <circle cx="120" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="120" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p5</text>
-    <circle cx="146" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="146" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p6</text>
-  </g>
-</g>
+    <!-- ================================================================
+         三行：作业拓扑需求（文字）→ 碎片整理方案（图）
+    ================================================================ -->
 
-<g transform="translate(586,466)">
-  <text x="0" y="27" font-size="13" font-weight="700" fill="#1f2328">待调度 Job 2 · 3 个组 · 每组 2 个 Pod</text>
-  <g transform="translate(248,0)">
-    <g transform="translate(0,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
+    <!-- 行 1 · 情况 1 -->
+    <g transform="translate(548,202)">
+      <rect width="300" height="52" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="24" y="32" font-size="14" font-weight="700" fill="#1f2328">情况 1：1 组 × 8 个 Pod，需同在一个 L1</text>
     </g>
-    <g transform="translate(84,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    </g>
-    <g transform="translate(168,0)">
-      <rect width="72" height="32" rx="8" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/>
-      <circle cx="22" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="22" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p1</text>
-      <circle cx="50" cy="16" r="10" fill="#fde68a" stroke="#f59e0b" stroke-width="1.5"/><text x="50" y="18.5" text-anchor="middle" font-size="8" fill="#b45309">p2</text>
-    </g>
-  </g>
-</g>
 
-<!-- ===== 图例 ===== -->
-<rect x="32" y="548" width="14" height="14" rx="3" fill="#6366f1"/><text x="52" y="560" font-size="12" fill="#57606a">实色 = 有 Pod 占用的节点</text>
-<rect x="210" y="548" width="14" height="14" rx="3" fill="#ffffff" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="230" y="560" font-size="12" fill="#57606a">虚框 = 空闲节点</text>
-<circle cx="377" cy="555" r="7" fill="#fde68a" stroke="#f59e0b"/><text x="390" y="560" font-size="12" fill="#57606a">待调度 Job 的 Pod</text>
-<rect x="522" y="550" width="26" height="18" rx="5" fill="none" stroke="#9ca3af" stroke-width="1.5" stroke-dasharray="4 3"/><text x="554" y="560" font-size="12" fill="#57606a">虚线小框 = 组（PodGroup/SubGroup）</text>
-<text x="1074" y="568" text-anchor="end" font-size="12" fill="#57606a">每格 = 1 个节点</text>
+    <g transform="translate(936,120)">
+      <rect width="448" height="216" rx="12" fill="#fafbfc" stroke="#57606a" stroke-width="1.5"/>
+      <text x="16" y="22" font-size="13" font-weight="600" fill="#57606a">L2 HyperNode · L1 A 已满（并入 B 的 Pod）· L1 B 整层腾空</text>
+
+      <g transform="translate(20,36)">
+        <rect width="408" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+        <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode A · 8 节点 · 均 8/8（已满）</text>
+        <rect x="14" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="36" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="63" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="85" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="112" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="134" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="161" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="183" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="210" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="232" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="259" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="281" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="308" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="330" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="357" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="379" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+      </g>
+
+      <g transform="translate(20,120)">
+        <rect width="408" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+        <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode B · 0/8（整层腾空，供 8 个新 Pod 落位）</text>
+        <rect x="14" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="36" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="63" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="85" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="112" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="134" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="161" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="183" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="210" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="232" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="259" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="281" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="308" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="330" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="357" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="379" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+      </g>
+    </g>
+
+    <!-- 行 2 · 情况 2（无反亲和） -->
+    <g transform="translate(548,352)">
+      <rect width="300" height="52" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="24" y="23" font-size="14" font-weight="700" fill="#1f2328">情况 2：2 组 × 4 个 Pod，每组需同</text>
+      <text x="24" y="42" font-size="14" font-weight="700" fill="#1f2328">在一个 L1</text>
+    </g>
+
+    <!-- 行 3 · 情况 3（反亲和） -->
+    <g transform="translate(548,510)">
+      <rect width="300" height="52" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+      <text x="24" y="23" font-size="14" font-weight="700" fill="#1f2328">情况 3：2 组 × 4 个 Pod，每组需同</text>
+      <text x="24" y="42" font-size="14" font-weight="700" fill="#1f2328">在一个 L1，组间反亲和</text>
+    </g>
+
+    <g transform="translate(936,428)">
+      <rect width="448" height="216" rx="12" fill="#fafbfc" stroke="#57606a" stroke-width="1.5"/>
+      <text x="16" y="22" font-size="13" font-weight="600" fill="#57606a">L2 HyperNode · 反亲和 → L1 A、B 各腾出 4 个节点</text>
+
+      <g transform="translate(20,36)">
+        <rect width="408" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+        <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode A · 前 4 节点 8/8 · 后 4 节点 0/8（供组 1）</text>
+        <rect x="14" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="36" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="63" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="85" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="112" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="134" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="161" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="183" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="210" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="232" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="259" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="281" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="308" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="330" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="357" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="379" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+      </g>
+
+      <g transform="translate(20,120)">
+        <rect width="408" height="76" rx="10" fill="#ffffff" stroke="#d0d7de"/>
+        <text x="12" y="18" font-size="13" font-weight="600" fill="#1f2328">L1 HyperNode B · 前 4 节点 8/8 · 后 4 节点 0/8（供组 2）</text>
+        <rect x="14" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="36" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="63" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="85" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="112" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="134" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="161" y="32" width="44" height="30" rx="6" fill="#6366f1"/><text x="183" y="52" text-anchor="middle" font-size="11" font-weight="600" fill="#fff">8/8</text>
+        <rect x="210" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="232" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="259" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="281" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="308" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="330" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+        <rect x="357" y="32" width="44" height="30" rx="6" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="379" y="52" text-anchor="middle" font-size="11" fill="#57606a">0/8</text>
+      </g>
+    </g>
+
+    <!-- ================================================================
+         情况 → 方案 箭头
+    ================================================================ -->
+    <!-- 情况 1 → 方案 1 -->
+    <line x1="852" y1="228" x2="928" y2="228" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 情况 3 → 方案 3 -->
+    <line x1="852" y1="536" x2="928" y2="536" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 情况 2 → 方案 1（情况2对方案1也适用） -->
+    <line x1="852" y1="378" x2="928" y2="228" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 情况 2 → 方案 3（情况2对方案3也适用） -->
+    <line x1="852" y1="378" x2="928" y2="536" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- ================================================================
+         横向箭头：现状 → 各行方案
+    ================================================================ -->
+    <!-- 集群现状 → 情况 1 -->
+    <line x1="506" y1="378" x2="544" y2="228" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 集群现状 → 情况 2 -->
+    <line x1="506" y1="378" x2="544" y2="378" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- 集群现状 → 情况 3 -->
+    <line x1="506" y1="378" x2="544" y2="536" stroke="#57606a" stroke-width="2" marker-end="url(#arrow)"/>
+
+    <!-- ================================================================
+         图例
+    ================================================================ -->
+    <rect x="16" y="664" width="14" height="14" rx="3" fill="#6366f1"/><text x="36" y="676" font-size="12" fill="#57606a">实色 = 有 Pod 占用的节点</text>
+    <rect x="200" y="664" width="14" height="14" rx="3" fill="none" stroke="#d8dee4" stroke-dasharray="3 3"/><text x="220" y="676" font-size="12" fill="#57606a">虚框 = 腾空的节点（0/8）</text>
+    <circle cx="407" cy="671" r="7" fill="#fde68a" stroke="#f59e0b"/><text x="420" y="676" font-size="12" fill="#57606a">待调度 Job 的 Pod（黄色，等待落位）</text>
+    <text x="1324" y="676" text-anchor="end" font-size="12" fill="#57606a">数字 x/8 = 每节点共 8 卡、已用 x 卡</text>
+  </g>
 </svg>
