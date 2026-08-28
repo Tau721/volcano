@@ -94,18 +94,19 @@ func (s *Session) OrderVictims(victims []*schedapi.TaskInfo) []*schedapi.TaskInf
 	return ordered
 }
 
-// DisruptionScoreFn measures one candidate-plan disruption dimension. Higher
-// raw values are more disruptive; Session converts them to [0,100] preferences.
-type DisruptionScoreFn func(ctx *api.PlanContext, plan *api.CandidatePlan) int64
+// PlanScoreFn measures one candidate-plan dimension as a preference: higher
+// values are more preferred. Plugins that penalize a dimension (disruption,
+// cost) return negative values, mirroring scheduler NodeOrderFn semantics.
+type PlanScoreFn func(ctx *api.PlanContext, plan *api.CandidatePlan) int64
 
-type scoreTerm struct {
+type planScoreTerm struct {
 	name   string
 	weight int64
-	fn     DisruptionScoreFn
+	fn     PlanScoreFn
 }
 
-// DisruptionScoreTerm explains one enabled scoring dimension for one candidate.
-type DisruptionScoreTerm struct {
+// PlanScoreTerm explains one enabled scoring dimension for one candidate.
+type PlanScoreTerm struct {
 	Name         string
 	Weight       int64
 	Raw          int64
@@ -113,11 +114,11 @@ type DisruptionScoreTerm struct {
 	Contribution int64
 }
 
-// CandidateDisruptionScore is the complete score used to order one candidate.
+// CandidatePlanScore is the complete score used to order one candidate.
 // Higher Total is preferred, matching scheduler node-score semantics.
-type CandidateDisruptionScore struct {
+type CandidatePlanScore struct {
 	Total int64
-	Terms []DisruptionScoreTerm
+	Terms []PlanScoreTerm
 }
 
 const (
@@ -125,21 +126,22 @@ const (
 	MaxCandidateScore int64 = 100
 )
 
-func (s *Session) AddDisruptionScoreFn(name string, weight int64, fn DisruptionScoreFn) {
+func (s *Session) AddPlanScoreFn(name string, weight int64, fn PlanScoreFn) {
 	if fn != nil {
-		s.scoreTerms = append(s.scoreTerms, scoreTerm{name: name, weight: weight, fn: fn})
+		s.planScoreTerms = append(s.planScoreTerms, planScoreTerm{name: name, weight: weight, fn: fn})
 	}
 }
 
-// DisruptionScores reverse-normalizes every enabled term across the candidate
-// batch, then applies its configured integer weight.
-func (s *Session) DisruptionScores(candidates []*api.CandidatePlan) []CandidateDisruptionScore {
-	scores := make([]CandidateDisruptionScore, len(candidates))
+// PlanScores normalizes every enabled term across the candidate batch to
+// [0,100] preference, then applies its configured integer weight. Higher raw
+// values normalize to higher scores.
+func (s *Session) PlanScores(candidates []*api.CandidatePlan) []CandidatePlanScore {
+	scores := make([]CandidatePlanScore, len(candidates))
 	if len(candidates) == 0 {
 		return scores
 	}
 	ctx := s.PlanContext()
-	for _, term := range s.scoreTerms {
+	for _, term := range s.planScoreTerms {
 		if term.weight <= 0 {
 			continue
 		}
@@ -156,17 +158,17 @@ func (s *Session) DisruptionScores(candidates []*api.CandidatePlan) []CandidateD
 		}
 		span := maximum - minimum
 		for index := range candidates {
-			preferenceScore := MaxCandidateScore
+			score := MaxCandidateScore
 			if span > 0 {
-				normalizedCost := int64(float64(rawValues[index]-minimum) * float64(MaxCandidateScore) / float64(span))
-				preferenceScore = MaxCandidateScore - normalizedCost
+				normalizedScore := int64(float64(rawValues[index]-minimum) * float64(MaxCandidateScore) / float64(span))
+				score = normalizedScore
 			}
-			preferenceScore = max(MinCandidateScore, min(MaxCandidateScore, preferenceScore))
-			contribution := term.weight * preferenceScore
+			score = max(MinCandidateScore, min(MaxCandidateScore, score))
+			contribution := term.weight * score
 			scores[index].Total += contribution
-			scores[index].Terms = append(scores[index].Terms, DisruptionScoreTerm{
+			scores[index].Terms = append(scores[index].Terms, PlanScoreTerm{
 				Name: term.name, Weight: term.weight, Raw: rawValues[index],
-				Score: preferenceScore, Contribution: contribution,
+				Score: score, Contribution: contribution,
 			})
 		}
 	}

@@ -90,7 +90,7 @@ type preparedUnit struct {
 
 type scoredCandidate struct {
 	candidate candidate
-	score     framework.CandidateDisruptionScore
+	score     framework.CandidatePlanScore
 }
 
 // drainState is the running state of one drain pass. Feasibility (which victims
@@ -158,7 +158,7 @@ func drainGreedy(
 		klog.V(4).InfoS("repack drain: step ordered active units", "step", step,
 			"activeCandidates", len(ordered), "nodesFreedSoFar", len(s.freedNodes))
 
-		// 2. Lazily run the expensive scheduler simulation in disruption order.
+		// 2. Lazily run the expensive scheduler simulation in plan score order.
 		chosen, selectedPosition, ok := s.firstFeasibleCandidate(ordered)
 		if !ok {
 			break
@@ -584,7 +584,7 @@ func (s *drainState) staysOccupied(n *schedapi.NodeInfo) bool {
 }
 
 // scoreCandidates orders active candidates by deterministic tie-breakers, then
-// evaluates their preliminary disruption scores. Stable score ordering preserves
+// evaluates their preliminary plan scores. Stable score ordering preserves
 // higher unit benefit and lexical unit key when scores tie.
 func (s *drainState) scoreCandidates(activeCandidates []candidate) []scoredCandidate {
 	orderedCandidates := append([]candidate(nil), activeCandidates...)
@@ -605,7 +605,7 @@ func (s *drainState) scoreCandidates(activeCandidates []candidate) []scoredCandi
 			candidatePlans[index] = api.NewCandidatePlan(s.moves, moves)
 		}
 	}
-	scores := s.ssn.DisruptionScores(candidatePlans)
+	scores := s.ssn.PlanScores(candidatePlans)
 	scored := make([]scoredCandidate, len(orderedCandidates))
 	for index := range orderedCandidates {
 		scored[index] = scoredCandidate{candidate: orderedCandidates[index], score: scores[index]}

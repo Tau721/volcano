@@ -275,7 +275,7 @@ func TestDrainStopsBeforeSimulationWhenContextIsCancelled(t *testing.T) {
 	}
 }
 
-// When both nodes are feasible drain targets, the production disruption scores
+// When both nodes are feasible drain targets, the production plan scores
 // must choose the smaller blast radius. This mirrors three independent two-pod
 // Deployments (one 2-card pod from each on node-a) and a one-pod Deployment on
 // node-b. Every PodGroup has minAvailable=1: moving b-0 breaches its one-pod
@@ -471,7 +471,7 @@ func TestReceiverPreferenceAccountsForFutureMinAvailableBreach(t *testing.T) {
 	}
 }
 
-func TestPreliminaryCandidateOrderUsesDisruptionScoreThenStableTieBreakers(t *testing.T) {
+func TestPreliminaryCandidateOrderUsesPlanScoreThenStableTieBreakers(t *testing.T) {
 	session := drainSessionWithPlugins(&fakeSnap{}, allMovable, 1, 0, 0, []string{"workloaddisruption"})
 	defer framework.CloseSession(session)
 	state := &drainState{ssn: session}
@@ -661,7 +661,7 @@ func TestDrain_OnlyEmptyAndFullNodesSkipsSimulation(t *testing.T) {
 	ssn.AddDomainFn(nodeUnits)
 	ssn.AddMovableFn(allMovable)
 	scoreCalls := 0
-	ssn.AddDisruptionScoreFn("mustNotRun", 1, func(*api.PlanContext, *api.CandidatePlan) int64 {
+	ssn.AddPlanScoreFn("mustNotRun", 1, func(*api.PlanContext, *api.CandidatePlan) int64 {
 		scoreCalls++
 		return 0
 	})

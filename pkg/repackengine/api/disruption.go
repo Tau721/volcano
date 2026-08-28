@@ -30,13 +30,13 @@ type PodGroupView struct {
 	Footprint    int64 // gang's total accelerator cards (whole-gang blast radius)
 }
 
-// PodGroupViewer supplies disruption-scoring facts.
+// PodGroupViewer supplies plan-scoring facts.
 type PodGroupViewer interface {
 	PodGroupView(id api.JobID) PodGroupView
 }
 
 // PlanContext carries lookups shared by every scoring strategy in a comparison.
-// It is built by the engine Session and passed to the disruption score functions
+// It is built by the engine Session and passed to the plan score functions
 // that plugins register.
 type PlanContext struct {
 	TargetResource v1.ResourceName // accelerator resource being defragmented
@@ -98,7 +98,7 @@ type PlanMoveAggregate struct {
 }
 
 // MoveAggregate computes (and caches) the move aggregate for the given context.
-// Exported so disruption score functions in plugin packages can build on it.
+// Exported so plan score functions in plugin packages can build on it.
 func (plan *CandidatePlan) MoveAggregate(context *PlanContext) *PlanMoveAggregate {
 	if plan == nil {
 		return &PlanMoveAggregate{ByPodGroup: map[api.JobID]*PodGroupMoveAggregate{}}
