@@ -30,7 +30,7 @@ import (
 const candidateOrderEdgeCount = 3
 
 // logCandidateOrder separates the operator-facing decision from its scoring
-// mechanics. scored is already in preliminary disruption order;
+// mechanics. scored is already in preliminary score order;
 // selectedPosition identifies the first candidate that passed full scheduling
 // simulation (one-based).
 func (s *drainState) logCandidateOrder(step int, ordered []scoredCandidate, selectedPosition int) {
@@ -164,24 +164,24 @@ func candidateSelectionReason(ordered []scoredCandidate, selectedPosition int) s
 	return "score and drain benefit tie; lexical target name"
 }
 
-func formatPlanImpact(terms []framework.DisruptionScoreTerm, targetResource v1.ResourceName) string {
+func formatPlanImpact(terms []framework.PlanScoreTerm, targetResource v1.ResourceName) string {
 	impact := make([]string, 0, len(terms))
 	for _, term := range terms {
-		impact = append(impact, fmt.Sprintf("%s=%s", scoreTermDisplayName(term.Name, targetResource), formatReadableScoreValue(term.Raw)))
+		impact = append(impact, fmt.Sprintf("%s=%s", planScoreTermDisplayName(term.Name, targetResource), formatReadableScoreValue(term.Raw)))
 	}
 	return strings.Join(impact, " ")
 }
 
-func formatScoreContributions(terms []framework.DisruptionScoreTerm, targetResource v1.ResourceName) string {
+func formatScoreContributions(terms []framework.PlanScoreTerm, targetResource v1.ResourceName) string {
 	contributions := make([]string, 0, len(terms))
 	for _, term := range terms {
 		contributions = append(contributions, fmt.Sprintf(
-			"%s=%d", scoreTermDisplayName(term.Name, targetResource), term.Contribution))
+			"%s=%d", planScoreTermDisplayName(term.Name, targetResource), term.Contribution))
 	}
 	return strings.Join(contributions, " ")
 }
 
-func scoreTermDisplayName(termName string, targetResource v1.ResourceName) string {
+func planScoreTermDisplayName(termName string, targetResource v1.ResourceName) string {
 	switch termName {
 	case "affectedPodGroups":
 		return "podGroups"

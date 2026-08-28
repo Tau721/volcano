@@ -305,7 +305,7 @@ Engine 的 `reconcile` 是控制器技术入口，负责对象读取、K=1 gate 
 | `MovableFn` | AND | 任一 Plugin 可否决 Pod 移动 |
 | `DomainFn` | Union | 贡献 Node、未来 HyperNode 等 FreeableUnit |
 | `CandidateFilterFn` | 规范化顺序短路 | 评分前硬过滤预算等条件 |
-| `DisruptionScoreFn` | 逐维归一化加权 | 候选软排序 |
+| `PlanScoreFn` | 逐维归一化加权 | 候选软排序 |
 | `VictimOrderFn` | 字典序比较器链 | 调度模拟中的 Pod 顺序 |
 | `ReceiverPoolFn` | 链式交集裁剪 | 构造 receiver universe |
 | `ReceiverPreferenceFn` | 分阶段字典序 | 接收节点偏好排序 |
@@ -757,7 +757,7 @@ test/e2e/repack/                            # 全量 E2E
 - 新的不可移动条件 → `MovableFn`；
 - HyperNode 或其他释放单元 → `DomainFn`；
 - 新预算或硬规则 → `CandidateFilterFn`/`ConstraintFn`；
-- 新的业务中断偏好 → `DisruptionScoreFn`；
+- 新的 plan 偏好/成本维度 → `PlanScoreFn`；
 - 新 receiver 偏好 → `ReceiverPreferenceFn`；
 - 只有改变一次 Run 的业务阶段时才增加 Action；
 - 只有现有 Lazy Drain 搜索无法表达时才考虑新的 Planner。

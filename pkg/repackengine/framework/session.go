@@ -66,10 +66,10 @@ type Session struct {
 	plugins       []Plugin // opened plugins, for OnSessionClose
 	capabilities  map[PluginCapability]bool
 
-	movableFns    []MovableFn
-	domainFns     []DomainFn
-	scoreTerms    []scoreTerm
-	constraintFns []PlanConstraintFn
+	movableFns     []MovableFn
+	domainFns      []DomainFn
+	planScoreTerms []planScoreTerm
+	constraintFns  []PlanConstraintFn
 
 	candidateFilterFns    []namedCandidateFilter
 	receiverPoolFns       []ReceiverPoolFn

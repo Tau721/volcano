@@ -34,9 +34,9 @@ func TestFormatCandidateOrderSummaryShowsOnlyThreeBestAndThreeWorst(t *testing.T
 				unit: api.FreeableUnit{Level: "node", Nodes: []string{nodeName}, Weight: 1},
 				key:  nodeName,
 			},
-			score: framework.CandidateDisruptionScore{
+			score: framework.CandidatePlanScore{
 				Total: int64(index),
-				Terms: []framework.DisruptionScoreTerm{{
+				Terms: []framework.PlanScoreTerm{{
 					Name: "movedPods", Weight: 1, Raw: int64(index),
 					Score: int64(index), Contribution: int64(index),
 				}},
@@ -94,7 +94,7 @@ func TestCandidateSelectionReasonExplainsDecision(t *testing.T) {
 	scored := func(key string, score int64, benefit float64) scoredCandidate {
 		return scoredCandidate{
 			candidate: candidate{key: key, unit: api.FreeableUnit{Weight: benefit}},
-			score:     framework.CandidateDisruptionScore{Total: score},
+			score:     framework.CandidatePlanScore{Total: score},
 		}
 	}
 	tests := []struct {
@@ -144,22 +144,24 @@ func TestCandidateSelectionReasonExplainsDecision(t *testing.T) {
 }
 
 func TestFormatPlanImpactUsesOperatorFriendlyNames(t *testing.T) {
-	terms := []framework.DisruptionScoreTerm{
-		{Name: "affectedPodGroups", Raw: 1},
-		{Name: "movedResource", Raw: 4},
-		{Name: "movedPods", Raw: 2},
+	// Disruption terms carry negated magnitudes under the higher-is-better
+	// PlanScoreFn contract; the formatter prints them verbatim.
+	terms := []framework.PlanScoreTerm{
+		{Name: "affectedPodGroups", Raw: -1},
+		{Name: "movedResource", Raw: -4},
+		{Name: "movedPods", Raw: -2},
 		{Name: "gangBreaches", Raw: 0},
-		{Name: "damagedResource", Raw: 4},
+		{Name: "damagedResource", Raw: -4},
 	}
 	got := formatPlanImpact(terms, gpu)
-	want := "podGroups=1 nvidia.com/gpu=4 pods=2 gangBreaches=0 resourceInAffectedGangs=4"
+	want := "podGroups=-1 nvidia.com/gpu=-4 pods=-2 gangBreaches=0 resourceInAffectedGangs=-4"
 	if got != want {
 		t.Fatalf("formatPlanImpact()=%q, want %q", got, want)
 	}
 }
 
 func TestFormatScoreContributionsHidesNormalizationMechanics(t *testing.T) {
-	terms := []framework.DisruptionScoreTerm{
+	terms := []framework.PlanScoreTerm{
 		{Name: "affectedPodGroups", Contribution: 1000},
 		{Name: "movedResource", Contribution: 125},
 	}

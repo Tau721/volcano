@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package workloaddisruption registers the gang-agnostic disruption scores every repack run
+// Package workloaddisruption registers the gang-agnostic disruption plan scores every repack run
 // wants: number of affected PodGroups, moved target resources, and moved pods.
 // Cluster-level weights are configurable through the workloaddisruption plugin
 // arguments. Gang-semantics scores live in the gangdisruption plugin.
@@ -90,14 +90,16 @@ func validateArguments(arguments framework.Arguments) error {
 func (*workloadDisruptionPlugin) Name() string { return Name }
 
 func (p *workloadDisruptionPlugin) OnSessionOpen(ssn *framework.Session) {
-	ssn.AddDisruptionScoreFn("affectedPodGroups", p.affectedPodGroupsWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
-		return p.MoveAggregate(ctx).AffectedPodGroups
+	// Disruption is a cost, so each dimension returns its negated magnitude:
+	// higher PlanScoreFn values mean a more preferred candidate plan.
+	ssn.AddPlanScoreFn("affectedPodGroups", p.affectedPodGroupsWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
+		return -p.MoveAggregate(ctx).AffectedPodGroups
 	})
-	ssn.AddDisruptionScoreFn("movedResource", p.movedResourceWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
-		return p.MoveAggregate(ctx).MovedResource
+	ssn.AddPlanScoreFn("movedResource", p.movedResourceWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
+		return -p.MoveAggregate(ctx).MovedResource
 	})
-	ssn.AddDisruptionScoreFn("movedPods", p.movedPodsWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
-		return p.MoveAggregate(ctx).MovedPods
+	ssn.AddPlanScoreFn("movedPods", p.movedPodsWeight, func(ctx *api.PlanContext, p *api.CandidatePlan) int64 {
+		return -p.MoveAggregate(ctx).MovedPods
 	})
 }
 

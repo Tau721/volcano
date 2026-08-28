@@ -68,12 +68,13 @@ func TestOrderVictimsComposesComparators(t *testing.T) {
 	}
 }
 
-func TestSession_DisruptionScoresExplainNormalizationAndWeighting(t *testing.T) {
+func TestSession_PlanScoresExplainNormalizationAndWeighting(t *testing.T) {
 	ssn := newSession(&fakeSnap{})
-	ssn.AddDisruptionScoreFn("movedPods", 1, func(ctx *api.PlanContext, plan *api.CandidatePlan) int64 {
-		return plan.MoveAggregate(ctx).MovedPods
+	// Disruption is a cost; the score fn negates it so higher = more preferred.
+	ssn.AddPlanScoreFn("movedPods", 1, func(ctx *api.PlanContext, plan *api.CandidatePlan) int64 {
+		return -plan.MoveAggregate(ctx).MovedPods
 	})
-	ssn.AddDisruptionScoreFn("constantRisk", 2, func(*api.PlanContext, *api.CandidatePlan) int64 {
+	ssn.AddPlanScoreFn("constantRisk", 2, func(*api.PlanContext, *api.CandidatePlan) int64 {
 		return 7
 	})
 	cheap := api.NewCandidatePlan(nil, []*api.Move{
@@ -84,7 +85,7 @@ func TestSession_DisruptionScoresExplainNormalizationAndWeighting(t *testing.T) 
 		move(task("c", "gc", 1), "n0", "n1"),
 	})
 
-	scores := ssn.DisruptionScores([]*api.CandidatePlan{costly, cheap})
+	scores := ssn.PlanScores([]*api.CandidatePlan{costly, cheap})
 	if len(scores) != 2 || len(scores[0].Terms) != 2 || len(scores[1].Terms) != 2 {
 		t.Fatalf("scores=%+v, want two candidates with two term explanations each", scores)
 	}
@@ -92,7 +93,7 @@ func TestSession_DisruptionScoresExplainNormalizationAndWeighting(t *testing.T) 
 		t.Fatalf("totals=(%v,%v), want (200,300)", scores[0].Total, scores[1].Total)
 	}
 	movedPods := scores[0].Terms[0]
-	if movedPods.Name != "movedPods" || movedPods.Raw != 2 || movedPods.Weight != 1 ||
+	if movedPods.Name != "movedPods" || movedPods.Raw != -2 || movedPods.Weight != 1 ||
 		movedPods.Score != 0 || movedPods.Contribution != 0 {
 		t.Errorf("costly movedPods explanation=%+v", movedPods)
 	}
@@ -106,15 +107,15 @@ func TestSession_DisruptionScoresExplainNormalizationAndWeighting(t *testing.T) 
 	}
 }
 
-func TestSession_DisruptionScoresSkipZeroWeight(t *testing.T) {
+func TestSession_PlanScoresSkipZeroWeight(t *testing.T) {
 	ssn := newSession(&fakeSnap{})
 	calls := 0
-	ssn.AddDisruptionScoreFn("disabled", 0, func(*api.PlanContext, *api.CandidatePlan) int64 {
+	ssn.AddPlanScoreFn("disabled", 0, func(*api.PlanContext, *api.CandidatePlan) int64 {
 		calls++
 		return 100
 	})
 
-	scores := ssn.DisruptionScores([]*api.CandidatePlan{{}, {}})
+	scores := ssn.PlanScores([]*api.CandidatePlan{{}, {}})
 	if calls != 0 {
 		t.Fatalf("disabled score function called %d times, want 0", calls)
 	}
@@ -125,10 +126,10 @@ func TestSession_DisruptionScoresSkipZeroWeight(t *testing.T) {
 	}
 }
 
-func TestSession_DisruptionScoresUseIntegerRange(t *testing.T) {
+func TestSession_PlanScoresUseIntegerRange(t *testing.T) {
 	ssn := newSession(&fakeSnap{})
-	ssn.AddDisruptionScoreFn("cost", 3, func(ctx *api.PlanContext, plan *api.CandidatePlan) int64 {
-		return plan.MoveAggregate(ctx).MovedPods
+	ssn.AddPlanScoreFn("cost", 3, func(ctx *api.PlanContext, plan *api.CandidatePlan) int64 {
+		return -plan.MoveAggregate(ctx).MovedPods
 	})
 
 	candidates := []*api.CandidatePlan{
@@ -136,8 +137,8 @@ func TestSession_DisruptionScoresUseIntegerRange(t *testing.T) {
 		api.NewCandidatePlan(nil, candidateMoves(2)),
 		api.NewCandidatePlan(nil, candidateMoves(4)),
 	}
-	scores := ssn.DisruptionScores(candidates)
-	wantStrategyScores := []int64{100, 67, 0}
+	scores := ssn.PlanScores(candidates)
+	wantStrategyScores := []int64{100, 66, 0}
 	for index, want := range wantStrategyScores {
 		if got := scores[index].Terms[0].Score; got != want {
 			t.Errorf("candidate[%d] strategy score=%d, want %d", index, got, want)

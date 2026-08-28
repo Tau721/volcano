@@ -263,7 +263,7 @@ func (s *SessionSnapshot) receiverHasTargetResourceCapacity(victim *schedapi.Tas
 	return api.Scalar(victim.InitResreq, s.resource) <= available
 }
 
-// PodGroupView reads disruption-scoring facts off JobInfo.
+// PodGroupView reads plan-scoring facts off JobInfo.
 func (s *SessionSnapshot) PodGroupView(id schedapi.JobID) api.PodGroupView {
 	ji, ok := s.ssn.Jobs[id]
 	if !ok || ji == nil {

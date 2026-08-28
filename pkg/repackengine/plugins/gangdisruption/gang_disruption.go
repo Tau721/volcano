@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package gangdisruption is the gang-awareness plugin: it registers the gang-semantics
-// disruption scores so the planner prefers plans that don't shatter PodGroups —
+// disruption plan scores so the planner prefers plans that don't shatter PodGroups —
 // gangBreaches (gangs pushed below minAvailable) and damagedResource (a breached gang
 // counts its WHOLE footprint as lost, capturing "突破 minAvailable 即整组受损").
 package gangdisruption
@@ -96,8 +96,12 @@ func validateArguments(arguments framework.Arguments) error {
 func (*gangDisruptionPlugin) Name() string { return Name }
 
 func (p *gangDisruptionPlugin) OnSessionOpen(ssn *framework.Session) {
-	ssn.AddDisruptionScoreFn("gangBreaches", p.gangBreachesWeight, scoreGangBreaches)
-	ssn.AddDisruptionScoreFn("damagedResource", p.damagedResourceWeight, scoreDamagedResource)
+	// Disruption is a cost, so each dimension returns its negated magnitude:
+	// higher PlanScoreFn values mean a more preferred candidate plan.
+	ssn.AddPlanScoreFn("gangBreaches", p.gangBreachesWeight,
+		func(ctx *api.PlanContext, p *api.CandidatePlan) int64 { return -scoreGangBreaches(ctx, p) })
+	ssn.AddPlanScoreFn("damagedResource", p.damagedResourceWeight,
+		func(ctx *api.PlanContext, p *api.CandidatePlan) int64 { return -scoreDamagedResource(ctx, p) })
 	ssn.AddReceiverPreferenceFn("futureGangImpact", framework.ReceiverPreferencePhaseDisruption,
 		func(ctx *api.PlanContext, candidate *framework.PlanningCandidate, receiver *framework.ReceiverCandidate) framework.ReceiverPreference {
 			var futureMoves map[schedapi.JobID]api.PodGroupMoveAggregate
