@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -56,6 +57,50 @@ type HyperNodesInfo struct {
 type HyperNodeInfoMap map[string]*HyperNodeInfo
 
 type HyperNodeTierNameMap map[string]int
+
+// NameForTier returns the tier name for a tier number, falling back to tier-N.
+func (m HyperNodeTierNameMap) NameForTier(tier int, hyperNodes HyperNodeInfoMap) string {
+	for name, mappedTier := range m {
+		if mappedTier == tier {
+			return name
+		}
+	}
+	for _, hn := range hyperNodes {
+		if hn.Tier() == tier && hn.TierName() != "" {
+			return hn.TierName()
+		}
+	}
+	return fmt.Sprintf("tier-%d", tier)
+}
+
+// FormatHyperNodeTierListing formats cluster HyperNode tier counts for logging.
+// Tiers are listed from coarse to fine (higher tier number first).
+func FormatHyperNodeTierListing(
+	tiers []int,
+	hyperNodesSetByTier map[int]sets.Set[string],
+	tierNameMap HyperNodeTierNameMap,
+	hyperNodes HyperNodeInfoMap,
+) (total int, tierCount int, listing string) {
+	if len(hyperNodesSetByTier) == 0 {
+		return 0, 0, ""
+	}
+
+	sortedTiers := append([]int(nil), tiers...)
+	sort.Sort(sort.Reverse(sort.IntSlice(sortedTiers)))
+
+	parts := make([]string, 0, len(sortedTiers))
+	for _, tier := range sortedTiers {
+		namesSet := hyperNodesSetByTier[tier]
+		if namesSet.Len() == 0 {
+			continue
+		}
+		total += namesSet.Len()
+		tierCount++
+		tierName := tierNameMap.NameForTier(tier, hyperNodes)
+		parts = append(parts, fmt.Sprintf("%s(tier=%d): %d", tierName, tier, namesSet.Len()))
+	}
+	return total, tierCount, strings.Join(parts, "; ")
+}
 
 // NewHyperNodesInfo initializes a new HyperNodesInfo instance.
 func NewHyperNodesInfo(lister listerv1.NodeLister) *HyperNodesInfo {
@@ -157,6 +202,11 @@ func (hni *HyperNodeInfo) String() string {
 // Tier returns the tier of the hypernode
 func (hni *HyperNodeInfo) Tier() int {
 	return hni.tier
+}
+
+// TierName returns the tierName of the hypernode.
+func (hni *HyperNodeInfo) TierName() string {
+	return hni.tierName
 }
 
 func (hni *HyperNodeInfo) DeepCopy() *HyperNodeInfo {
@@ -282,7 +332,7 @@ func (hni *HyperNodesInfo) BuildHyperNodeCache(hn *HyperNodeInfo, processed sets
 	defer ancestorsChain.Delete(hn.Name)
 
 	if hni.hyperNodeIsDeleting(hn.Name) {
-		klog.InfoS("HyperNode is being deleted", "name", hn.Name)
+		klog.Infof("HyperNode is being deleted, name=%s", hn.Name)
 		return nil
 	}
 
@@ -293,7 +343,7 @@ func (hni *HyperNodesInfo) BuildHyperNodeCache(hn *HyperNodeInfo, processed sets
 				hni.realNodesSet[hn.Name] = sets.New[string]()
 			}
 			members := GetMembers(member.Selector, nodes)
-			klog.V(5).InfoS("Get members of hyperNode", "name", hn.Name, "members", members)
+			klog.V(5).Infof("Get members of hyperNode, name=%s, members=%v", hn.Name, members)
 			hni.realNodesSet[hn.Name] = hni.realNodesSet[hn.Name].Union(members)
 
 		case topologyv1alpha1.MemberTypeHyperNode:
@@ -309,7 +359,7 @@ func (hni *HyperNodesInfo) BuildHyperNodeCache(hn *HyperNodeInfo, processed sets
 
 			memberHn, ok := hni.hyperNodes[memberName]
 			if !ok {
-				klog.InfoS("HyperNode not exists in cache, maybe not created or not be watched", "name", memberName, "parent", hn.Name)
+				klog.Infof("HyperNode not exists in cache, maybe not created or not be watched, name=%s, parent=%s", memberName, hn.Name)
 				continue
 			}
 
@@ -324,12 +374,12 @@ func (hni *HyperNodesInfo) BuildHyperNodeCache(hn *HyperNodeInfo, processed sets
 			hni.realNodesSet[hn.Name] = hni.realNodesSet[hn.Name].Union(hni.realNodesSet[memberName])
 
 		default:
-			klog.ErrorS(nil, "Unknown member type", "type", member.Type)
+			klog.Errorf("Unknown member type, type=%v", member.Type)
 		}
 	}
 
 	processed.Insert(hn.Name)
-	klog.V(3).InfoS("Successfully built RealNodesSet with members", "name", hn.Name, "nodeSets", hni.realNodesSet[hn.Name])
+	klog.V(3).Infof("Successfully built RealNodesSet with members, name=%s, nodeSets=%v", hn.Name, hni.realNodesSet[hn.Name])
 	return nil
 }
 
@@ -413,7 +463,7 @@ func (hni *HyperNodesInfo) GetLeafNodes(hyperNodeName string) sets.Set[string] {
 
 func (hni *HyperNodesInfo) findLeafNodesWithCycleCheck(hyperNodeName string, leafNodes sets.Set[string], ancestorsChain sets.Set[string]) {
 	if ancestorsChain.Has(hyperNodeName) {
-		klog.ErrorS(nil, "Cycle detected in HyperNode hierarchy", "hyperNode", hyperNodeName)
+		klog.Errorf("Cycle detected in HyperNode hierarchy, hyperNode=%s", hyperNodeName)
 		return
 	}
 
@@ -474,7 +524,7 @@ func (hni *HyperNodesInfo) addChild(parent, member string) error {
 
 	childHn, ok := hni.hyperNodes[member]
 	if !ok {
-		klog.InfoS("HyperNode not exists in cache, maybe not created or not be watched, will set parent first", "name", member, "parent", parent)
+		klog.Infof("HyperNode not exists in cache, maybe not created or not be watched, will set parent first, name=%s, parent=%s", member, parent)
 		childHn = NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{
 			Name: member,
 		}})
@@ -506,7 +556,7 @@ func GetMembers(selector topologyv1alpha1.MemberSelector, nodes []*corev1.Node) 
 		pattern := selector.RegexMatch.Pattern
 		reg, err := regexp.Compile(pattern)
 		if err != nil {
-			klog.ErrorS(err, "Failed to compile regular expression", "pattern", pattern)
+			klog.Errorf("Failed to compile regular expression, pattern=%s, err=%v", pattern, err)
 			return sets.Set[string]{}
 		}
 		for _, node := range nodes {
@@ -522,7 +572,7 @@ func GetMembers(selector topologyv1alpha1.MemberSelector, nodes []*corev1.Node) 
 		}
 		labelSelector, err := metav1.LabelSelectorAsSelector(selector.LabelMatch)
 		if err != nil {
-			klog.ErrorS(err, "Failed to convert labelMatch to labelSelector", "LabelMatch", selector.LabelMatch)
+			klog.Errorf("Failed to convert labelMatch to labelSelector, LabelMatch=%v, err=%v", selector.LabelMatch, err)
 			return sets.Set[string]{}
 		}
 		for _, node := range nodes {
@@ -552,7 +602,7 @@ func (hni *HyperNodesInfo) updateAncestors(name string) error {
 	// When last time BuildHyperNodeCache has an err that a hyperNode has multi parents, after the parent is updated
 	// we should find the parent hyperNode to rebuild the correct cache.
 	if hni.builtErrHyperNode == name {
-		klog.InfoS("Rebuilt parent hyperNode", "name", hni.builtErrHyperNode)
+		klog.Infof("Rebuilt parent hyperNode, name=%s", hni.builtErrHyperNode)
 		leafHyperNodes := hni.GetLeafNodes(name)
 		for leaf := range leafHyperNodes {
 			if err := hni.rebuildCache(leaf); err != nil {
@@ -578,7 +628,7 @@ func (hni *HyperNodesInfo) rebuildCache(name string) error {
 	ancestorsChain := sets.New[string]()
 	nodes, err := hni.nodeLister.List(labels.Everything())
 	if err != nil {
-		klog.ErrorS(err, "Failed to list nodes", "hyperNodeName", name)
+		klog.Errorf("Failed to list nodes, hyperNodeName=%s, err=%v", name, err)
 		return err
 	}
 
@@ -643,7 +693,7 @@ func (hni *HyperNodesInfo) resetChildren(name string) {
 func (hni *HyperNodesInfo) deleteHyperNode(name string) {
 	hn, ok := hni.hyperNodes[name]
 	if !ok {
-		klog.ErrorS(nil, "HyperNode not exists in cache", "name", name)
+		klog.Errorf("HyperNode not exists in cache, name=%s", name)
 		return
 	}
 	delete(hni.hyperNodes, name)
@@ -654,7 +704,7 @@ func (hni *HyperNodesInfo) deleteHyperNode(name string) {
 func (hni *HyperNodesInfo) markHyperNodeIsDeleting(name string) {
 	hn, ok := hni.hyperNodes[name]
 	if !ok {
-		klog.ErrorS(nil, "HyperNode not exists in cache", "name", name)
+		klog.Errorf("HyperNode not exists in cache, name=%s", name)
 		return
 	}
 	hn.isDeleting = true
@@ -664,7 +714,7 @@ func (hni *HyperNodesInfo) markHyperNodeIsDeleting(name string) {
 func (hni *HyperNodesInfo) hyperNodeIsDeleting(name string) bool {
 	hn, ok := hni.hyperNodes[name]
 	if !ok {
-		klog.ErrorS(nil, "HyperNode not exists in cache", "name", name)
+		klog.Errorf("HyperNode not exists in cache, name=%s", name)
 		return false
 	}
 	return hn.isDeleting
@@ -705,7 +755,7 @@ func (hni *HyperNodesInfo) nodeMatchSelector(nodeName string, selector topologyv
 	if selector.RegexMatch != nil {
 		reg, err := regexp.Compile(selector.RegexMatch.Pattern)
 		if err != nil {
-			klog.ErrorS(err, "Failed to compile regex pattern", "pattern", selector.RegexMatch.Pattern)
+			klog.Errorf("Failed to compile regex pattern, pattern=%s, err=%v", selector.RegexMatch.Pattern, err)
 			return false
 		}
 		return reg.MatchString(nodeName)
@@ -716,13 +766,13 @@ func (hni *HyperNodesInfo) nodeMatchSelector(nodeName string, selector topologyv
 		}
 		labelSelector, err := metav1.LabelSelectorAsSelector(selector.LabelMatch)
 		if err != nil {
-			klog.ErrorS(err, "Failed to convert labelMatch to labelSelector", "LabelMatch", selector.LabelMatch)
+			klog.Errorf("Failed to convert labelMatch to labelSelector, LabelMatch=%v, err=%v", selector.LabelMatch, err)
 			return false
 		}
 		node, err := hni.nodeLister.Get(nodeName)
 
 		if err != nil {
-			klog.ErrorS(err, "Failed to get node", "nodeName", nodeName)
+			klog.Errorf("Failed to get node, nodeName=%s, err=%v", nodeName, err)
 			return false
 		}
 		nodeLabels := labels.Set(node.Labels)
@@ -755,6 +805,68 @@ func (hnim HyperNodeInfoMap) GetAncestors(name string) []string {
 		}
 	}
 	return ancestors
+}
+
+// GetAncestorHyperNode returns the ancestor HyperNode name at the given tier.
+func (hnim HyperNodeInfoMap) GetAncestorHyperNode(hyperNodeName string, tier int) string {
+	for _, ancestor := range hnim.GetAncestors(hyperNodeName) {
+		if hn, ok := hnim[ancestor]; ok && hn.Tier() == tier {
+			return ancestor
+		}
+	}
+	return ""
+}
+
+// ResolveHyperNodesAtTier maps a placed HyperNode to topology domain name(s) at tier.
+// When placement is coarser than tier, all descendant HyperNodes at tier are returned;
+// when placement is at or finer than tier, the single ancestor at tier (including self) is returned.
+func (hnim HyperNodeInfoMap) ResolveHyperNodesAtTier(hyperNodeName string, tier int) []string {
+	hn, ok := hnim[hyperNodeName]
+	if !ok {
+		return nil
+	}
+	if hn.Tier() > tier {
+		return hnim.hyperNodesAtTierUnder(hyperNodeName, tier)
+	}
+	if ancestor := hnim.GetAncestorHyperNode(hyperNodeName, tier); ancestor != "" {
+		return []string{ancestor}
+	}
+	return nil
+}
+
+// hyperNodesAtTierUnder lists HyperNode names at tier that lie under root in the tree.
+// Called when a job's placement is coarser than the anti-affinity term tier (for example
+// allocated at supernode while the term compares at rack): every descendant domain at tier
+// under root must be treated as occupied.
+//
+// The scan walks all HyperNodes at tier and keeps those whose ancestor chain includes root.
+// Upward lookup via GetAncestors is used instead of BFS from root.Children so this stays
+// correct when only Parent links are populated (tests and early cache states).
+func (hnim HyperNodeInfoMap) hyperNodesAtTierUnder(root string, tier int) []string {
+	names := make([]string, 0)
+	for name, hn := range hnim {
+		if hn.Tier() != tier {
+			continue
+		}
+		for _, ancestor := range hnim.GetAncestors(name) {
+			if ancestor == root {
+				names = append(names, name)
+				break
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// GetAncestorHyperNodeByTierName returns the ancestor HyperNode name at HyperNode.spec.tierName.
+func (hnim HyperNodeInfoMap) GetAncestorHyperNodeByTierName(hyperNodeName, tierName string) string {
+	for _, ancestor := range hnim.GetAncestors(hyperNodeName) {
+		if hn, ok := hnim[ancestor]; ok && hn.TierName() == tierName {
+			return ancestor
+		}
+	}
+	return ""
 }
 
 // getParent returns hyperNode's parent, this is usually used when a new hyperNode is added
@@ -806,4 +918,59 @@ func (hnim HyperNodeInfoMap) GetLCAHyperNode(hypernode, jobHyperNode string) str
 		}
 	}
 	return ""
+}
+
+// GetSearchRoot returns the HyperNode subtree root for gradient search.
+// It intersects the caller-provided hyperNode with the envelope implied by allocatedHyperNode.
+func GetSearchRoot(
+	hyperNodes HyperNodeInfoMap,
+	hyperNodeAvailable *HyperNodeInfo,
+	highestAllowedTier int,
+	allocatedHyperNode string,
+) (*HyperNodeInfo, error) {
+	if allocatedHyperNode == "" {
+		return hyperNodeAvailable, nil
+	}
+
+	hyperNodeHighestAllowed, err := GetHighestAllowedHyperNode(hyperNodes, highestAllowedTier, allocatedHyperNode)
+	if err != nil {
+		return nil, fmt.Errorf("get highest allowed hyperNode failed: %w", err)
+	}
+
+	lca := hyperNodes.GetLCAHyperNode(hyperNodeAvailable.Name, hyperNodeHighestAllowed)
+	if lca == hyperNodeHighestAllowed {
+		return hyperNodeAvailable, nil
+	}
+	if lca == hyperNodeAvailable.Name {
+		hni, ok := hyperNodes[hyperNodeHighestAllowed]
+		if !ok {
+			return nil, fmt.Errorf("failed to get highest allowed HyperNode info for %s", hyperNodeHighestAllowed)
+		}
+		return hni, nil
+	}
+
+	return nil, fmt.Errorf("there is no intersection between hyperNodeAvailable %s and hyperNodeHighestAllowed %s",
+		hyperNodeAvailable.Name, hyperNodeHighestAllowed)
+}
+
+// GetHighestAllowedHyperNode returns the coarsest ancestor of allocatedHyperNode within highestAllowedTier.
+func GetHighestAllowedHyperNode(hyperNodes HyperNodeInfoMap, highestAllowedTier int, allocatedHyperNode string) (string, error) {
+	var highestAllowedHyperNode string
+
+	for _, ancestor := range hyperNodes.GetAncestors(allocatedHyperNode) {
+		hni, ok := hyperNodes[ancestor]
+		if !ok {
+			return "", fmt.Errorf("allocated hyperNode %s ancestor %s not found", allocatedHyperNode, ancestor)
+		}
+		if hni.Tier() > highestAllowedTier {
+			break
+		}
+		highestAllowedHyperNode = ancestor
+	}
+
+	if highestAllowedHyperNode == "" {
+		return "", fmt.Errorf("allocated hyperNode %s tier is greater than highest allowed tier %d", allocatedHyperNode, highestAllowedTier)
+	}
+
+	return highestAllowedHyperNode, nil
 }

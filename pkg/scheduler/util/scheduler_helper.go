@@ -152,7 +152,7 @@ func PrioritizeHyperNodes(candidateHyperNodes map[string][]*api.NodeInfo, subJob
 	// plugin scores of hyperNode.
 	for pluginName, scores := range mapScores {
 		for hyperNode, score := range scores {
-			klog.V(5).InfoS("Add plugin score at hypeNode", "subJob", subJob.UID, "pluginName", pluginName, "hyperNodeName", hyperNode, "score", score)
+			klog.V(5).Infof("Add plugin score at hypeNode, subJob=%s, pluginName=%s, hyperNodeName=%s, score=%v", subJob.UID, pluginName, hyperNode, score)
 			hyperNodesScoreMap[hyperNode] += score
 		}
 	}
@@ -172,7 +172,7 @@ func PrioritizeHyperNodes(candidateHyperNodes map[string][]*api.NodeInfo, subJob
 		}
 	}
 
-	klog.V(5).InfoS("Prioritize hyperNode score map for subJob", "subJob", subJob.UID, "scoreMap", hyperNodeScoreMap)
+	klog.V(5).Infof("Prioritize hyperNode score map for subJob, subJob=%s, scoreMap=%v", subJob.UID, hyperNodeScoreMap)
 	return hyperNodeScores, nil
 }
 

@@ -21,6 +21,7 @@ limitations under the License.
 package api
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -310,7 +311,7 @@ func TestTaskSchedulingReason(t *testing.T) {
 	t5 := buildPod("ns1", "task-5", "node3", v1.PodPending, BuildResourceList("1", "1G"), nil, make(map[string]string))
 	t6 := buildPod("ns1", "task-6", "", v1.PodPending, BuildResourceList("1", "1G"), nil, make(map[string]string))
 
-	originReason1 := ". Origin reason is task-6: 0/3 nodes are unavailable: 1 node(s) pod number exceeded, 2 node(s) resource fit failed."
+	originReason1 := ". Node: task-6: 0/3 nodes are unavailable: 1 node(s) pod number exceeded, 2 node(s) resource fit failed."
 
 	tests := []struct {
 		desc     string
@@ -335,12 +336,12 @@ func TestTaskSchedulingReason(t *testing.T) {
 			},
 			expected: map[types.UID]string{
 				"pg":   "pod group is not ready, 6 Pending, 6 minAvailable; Pending: 3 Schedulable, 3 Unschedulable" + originReason1,
-				t1.UID: "pod group is not ready, 6 Pending, 6 minAvailable; Pending: 3 Schedulable, 3 Unschedulable" + originReason1,
-				t2.UID: "pod group is not ready, 6 Pending, 6 minAvailable; Pending: 3 Schedulable, 3 Unschedulable" + originReason1,
+				t1.UID: "",
+				t2.UID: "",
 				t3.UID: "Pod ns1/task-3 can possibly be assigned to node1, once minAvailable is satisfied",
 				t4.UID: "Pod ns1/task-4 can possibly be assigned to node2, once minAvailable is satisfied",
 				t5.UID: "Pod ns1/task-5 can possibly be assigned to node3, once minAvailable is satisfied",
-				t6.UID: "0/3 nodes are unavailable: 1 node(s) pod number exceeded, 2 node(s) resource fit failed.",
+				t6.UID: "Node: 0/3 nodes are unavailable: 1 node(s) pod number exceeded, 2 node(s) resource fit failed.",
 			},
 		},
 	}
@@ -382,11 +383,10 @@ func TestTaskSchedulingReason(t *testing.T) {
 			task.Status = Pending
 			job.TaskStatusIndex[Pending][task.UID] = task
 		}
-		job.JobFitErrors = job.FitError()
 
 		// assert
 		for uid, exp := range test.expected {
-			msg := job.JobFitErrors
+			msg := job.FitError()
 			if uid != "pg" {
 				_, msg, _ = job.TaskSchedulingReason(TaskID(uid))
 			}
@@ -394,6 +394,88 @@ func TestTaskSchedulingReason(t *testing.T) {
 				t.Errorf("[x] case #%d, task %v\nwant: %s\n got: %s", i, uid, exp, msg)
 			}
 		}
+	}
+}
+
+func TestSchedulingDimensions(t *testing.T) {
+	hyperNodeSummary := "2/3 hyperNodes available: supernode 2/2"
+	nodeSummary := "In hyperNode sn-b: 0/3 nodes are unavailable: 2 Insufficient cpu"
+
+	got := FormatSchedulingDimensions(hyperNodeSummary, nodeSummary)
+	want := "HyperNode: 2/3 hyperNodes available: supernode 2/2; Node: In hyperNode sn-b: 0/3 nodes are unavailable: 2 Insufficient cpu"
+	if got != want {
+		t.Fatalf("FormatSchedulingDimensions() = %q, want %q", got, want)
+	}
+
+	job := NewJobInfo("job-1")
+	job.JobFitErrors = hyperNodeSummary
+	nodeFitErrors := NewFitErrors()
+	nodeFitErrors.SetHyperNode("sn-b")
+	nodeFitErrors.SetNodeError("node1", &FitError{Status: []*Status{{Reason: NodeResourceFitFailed}}})
+	nodeFitErrors.SetNodeError("node2", &FitError{Status: []*Status{{Reason: NodeResourceFitFailed}}})
+	nodeFitErrors.SetNodeError("node3", &FitError{Status: []*Status{{Reason: NodeResourceFitFailed}}})
+	job.NodesFitErrors = map[TaskID]*FitErrors{
+		"task-1": nodeFitErrors,
+	}
+	task := &TaskInfo{
+		UID:  "task-1",
+		Name: "worker-0",
+		TransactionContext: TransactionContext{
+			Status: Pending,
+		},
+	}
+	job.Tasks[task.UID] = task
+	job.TaskStatusIndex = map[TaskStatus]TasksMap{Pending: {task.UID: task}}
+
+	fitErr := job.FitError()
+	if !strings.Contains(fitErr, "HyperNode: "+hyperNodeSummary) {
+		t.Fatalf("FitError() missing hyperNode summary: %q", fitErr)
+	}
+	if !strings.Contains(fitErr, "Node: worker-0:") {
+		t.Fatalf("FitError() missing node summary: %q", fitErr)
+	}
+
+	_, msg, _ := job.TaskSchedulingReason("task-1")
+	if !strings.Contains(msg, "HyperNode: "+hyperNodeSummary) {
+		t.Fatalf("TaskSchedulingReason() missing hyperNode summary: %q", msg)
+	}
+	if !strings.Contains(msg, "Node: In hyperNode sn-b:") {
+		t.Fatalf("TaskSchedulingReason() missing node summary: %q", msg)
+	}
+}
+
+func TestJobInfoMergeSubJobHyperNodeFitErrors(t *testing.T) {
+	job := &JobInfo{}
+	job.JobFitErrors = "2/2 hyperNodes available: supernode 2/2"
+	stats := &HyperNodeGradientStats{
+		PluginEligibleByTier: map[string]map[int]int{
+			"network-topology-aware": {2: 0},
+		},
+		IntersectedByTier: map[int]int{2: 0},
+	}
+	hyperNodesSetByTier := map[int]sets.Set[string]{2: sets.New("sn-a")}
+	job.MergeSubJobHyperNodeFitErrors(job.JobFitErrors, "sub-1", stats, nil, nil,
+		hyperNodesSetByTier, HyperNodeTierNameMap{"supernode": 2}, nil)
+	if !strings.Contains(job.JobFitErrors, "2/2 hyperNodes available") {
+		t.Fatalf("expected job baseline preserved: %q", job.JobFitErrors)
+	}
+	if !strings.Contains(job.JobFitErrors, "subJob sub-1:") {
+		t.Fatalf("expected subJob scope appended: %q", job.JobFitErrors)
+	}
+}
+
+func TestJobInfoSetHyperNodeFitErrors(t *testing.T) {
+	job := &JobInfo{}
+	stats := &HyperNodeGradientStats{
+		PluginEligibleByTier: map[string]map[int]int{
+			"network-topology-aware": {2: 1},
+		},
+		IntersectedByTier: map[int]int{2: 1},
+	}
+	hyperNodesSetByTier := map[int]sets.Set[string]{2: sets.New("sn-a")}
+	job.SetHyperNodeFitErrors(stats, nil, nil, hyperNodesSetByTier, HyperNodeTierNameMap{"supernode": 2}, nil)
+	if job.JobFitErrors == "" {
+		t.Fatal("expected JobFitErrors to be set")
 	}
 }
 
@@ -813,4 +895,25 @@ func TestGetMinDRAResourcesFallbackWithoutTaskMinAvailable(t *testing.T) {
 			Capacity: map[string]resource.Quantity{},
 		},
 	}, job.GetMinDRAResources())
+}
+
+func TestRequiresHyperNodeAllocateIncludesSoftNetworkTopology(t *testing.T) {
+	t.Run("job soft topology", func(t *testing.T) {
+		job := NewJobInfo("job")
+		job.NetworkTopology = &scheduling.NetworkTopologySpec{Mode: scheduling.SoftNetworkTopologyMode}
+		assert.True(t, job.RequiresHyperNodeAllocate())
+	})
+
+	t.Run("subJob soft topology", func(t *testing.T) {
+		job := NewJobInfo("job")
+		job.SubJobs["soft"] = &SubJobInfo{
+			UID:             "soft",
+			NetworkTopology: &scheduling.NetworkTopologySpec{Mode: scheduling.SoftNetworkTopologyMode},
+		}
+		assert.True(t, job.RequiresHyperNodeAllocate())
+	})
+
+	t.Run("no topology", func(t *testing.T) {
+		assert.False(t, NewJobInfo("job").RequiresHyperNodeAllocate())
+	})
 }

@@ -112,6 +112,11 @@ func (np NodePhase) String() string {
 	return "Unknown"
 }
 
+// validateStatusUpdate validates whether the status transfer is valid.
+func validateStatusUpdate(oldStatus, newStatus TaskStatus) error {
+	return nil
+}
+
 // LessFn is the func declaration used by sort or priority queue.
 type LessFn func(interface{}, interface{}) bool
 
@@ -405,6 +410,10 @@ type SimulatePredicateFn func(ctx context.Context, state fwk.CycleState, task *T
 // Plugins implement this function to verify if the queue has enough resources to schedule the task while maintaining topology constraints
 type SimulateAllocatableFn func(ctx context.Context, state fwk.CycleState, queue *QueueInfo, task *TaskInfo) bool
 
+// SearchPurpose indicates the scheduling context in which a HyperNode gradient
+// is being computed. Allocate and eviction searches treat resource availability
+// and traversal order differently (e.g. repack eviction search evaluates
+// allocatable capacity instead of idle capacity).
 type SearchPurpose int
 
 const (
@@ -414,10 +423,44 @@ const (
 	PurposeEvict
 )
 
-// HyperNodeGradientForJobFn group hyperNodes into several gradients,
-// and discard hyperNodes that unmatched the job topology requirements.
-type HyperNodeGradientForJobFn func(job *JobInfo, hyperNode *HyperNodeInfo, purpose SearchPurpose) [][]*HyperNodeInfo
+// HyperNodeGradientResult distinguishes hard candidate membership from soft
+// traversal order. Applied gradients participate in hard intersection. Ordered
+// gradients only prioritize complete candidate layers and must not remove
+// otherwise eligible candidates.
+type HyperNodeGradientResult struct {
+	Applied   bool
+	Ordered   bool
+	Gradients [][]*HyperNodeInfo
+}
 
-// HyperNodeGradientForSubJobFn group hyperNodes into several gradients,
-// and discard hyperNodes that unmatched the subJob topology requirements.
-type HyperNodeGradientForSubJobFn func(subJob *SubJobInfo, hyperNode *HyperNodeInfo, purpose SearchPurpose) [][]*HyperNodeInfo
+// HyperNodeGradientAbstain returns a neutral result that does not participate
+// in framework candidate intersection.
+func HyperNodeGradientAbstain() HyperNodeGradientResult {
+	return HyperNodeGradientResult{}
+}
+
+// HyperNodeGradientPrefer returns a soft traversal preference. The gradients
+// provide candidate layer order but do not participate in hard intersection.
+func HyperNodeGradientPrefer(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Ordered: true, Gradients: gradients}
+}
+
+// HyperNodeGradientConstrain returns an applicable hard constraint. An empty
+// gradient is an applicable unschedulable result, not an abstention.
+func HyperNodeGradientConstrain(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Applied: true, Gradients: gradients}
+}
+
+// HyperNodeGradientConstrainAndPrefer returns a hard constraint whose complete
+// candidate layers also carry a soft traversal preference.
+func HyperNodeGradientConstrainAndPrefer(gradients [][]*HyperNodeInfo) HyperNodeGradientResult {
+	return HyperNodeGradientResult{Applied: true, Ordered: true, Gradients: gradients}
+}
+
+// HyperNodeGradientForJobFn returns one plugin's HyperNode constraint for a job.
+// purpose distinguishes allocation search (PurposeAllocate) from eviction search
+// (PurposeEvict) so plugins can apply search-specific resource semantics.
+type HyperNodeGradientForJobFn func(job *JobInfo, hyperNode *HyperNodeInfo, purpose SearchPurpose) HyperNodeGradientResult
+
+// HyperNodeGradientForSubJobFn returns one plugin's HyperNode constraint for a subJob.
+type HyperNodeGradientForSubJobFn func(subJob *SubJobInfo, hyperNode *HyperNodeInfo, purpose SearchPurpose) HyperNodeGradientResult

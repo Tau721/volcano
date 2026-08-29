@@ -37,6 +37,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	"k8s.io/klog/v2"
 	"k8s.io/kubernetes/pkg/features"
@@ -680,15 +681,23 @@ func (ji *JobInfo) AddTaskInfo(ti *TaskInfo) {
 }
 
 // UpdateTaskStatus is used to update task's status in a job.
-func (ji *JobInfo) UpdateTaskStatus(task *TaskInfo, status TaskStatus) {
+func (ji *JobInfo) UpdateTaskStatus(task *TaskInfo, status TaskStatus) error {
+	if err := validateStatusUpdate(task.Status, status); err != nil {
+		return err
+	}
+
 	// First remove the task (if exist) from the task list.
 	if _, found := ji.Tasks[task.UID]; found {
-		ji.DeleteTaskInfo(task)
+		if err := ji.DeleteTaskInfo(task); err != nil {
+			return err
+		}
 	}
 
 	// Update task's status to the target status once task addition is guaranteed to succeed.
 	task.Status = status
 	ji.AddTaskInfo(task)
+
+	return nil
 }
 
 func (ji *JobInfo) deleteTaskIndex(ti *TaskInfo) {
@@ -702,7 +711,7 @@ func (ji *JobInfo) deleteTaskIndex(ti *TaskInfo) {
 }
 
 // DeleteTaskInfo is used to delete a task from a job
-func (ji *JobInfo) DeleteTaskInfo(ti *TaskInfo) {
+func (ji *JobInfo) DeleteTaskInfo(ti *TaskInfo) error {
 	if task, found := ji.Tasks[ti.UID]; found {
 		ji.TotalRequest.Sub(task.Resreq)
 		if AllocatedStatus(task.Status) {
@@ -711,10 +720,11 @@ func (ji *JobInfo) DeleteTaskInfo(ti *TaskInfo) {
 		delete(ji.Tasks, task.UID)
 		ji.deleteTaskIndex(task)
 		ji.deleteTaskFromSubJob(ti)
-		return
+		return nil
 	}
 
 	klog.Warningf("failed to find task <%v/%v> in job <%v/%v>", ti.Namespace, ti.Name, ji.Namespace, ji.Name)
+	return nil
 }
 
 // Clone is used to clone a jobInfo object
@@ -819,20 +829,28 @@ func (ji *JobInfo) FitError() string {
 		reasonMsg += "; " + fmt.Sprintf("%s: %s", Pending.String(), strings.Join(sortReasonsHistogram(reasons), ", "))
 	}
 
-	// record the original reason: such as can not enqueue or failed reasons of first pod failed to predicated
-	if ji.JobFitErrors != "" {
-		reasonMsg += ". Origin reason is: " + ji.JobFitErrors
+	if dimensions := ji.schedulingDimensions(""); dimensions != "" {
+		reasonMsg += ". " + dimensions
+	}
+
+	return reasonMsg
+}
+
+func (ji *JobInfo) schedulingDimensions(taskID TaskID) string {
+	var nodeSummary string
+	if taskID != "" {
+		if fe := ji.NodesFitErrors[taskID]; fe != nil {
+			nodeSummary = fe.Error()
+		}
 	} else {
 		for _, taskInfo := range ji.Tasks {
-			fitError := ji.NodesFitErrors[taskInfo.UID]
-			if fitError != nil {
-				reasonMsg += fmt.Sprintf(". Origin reason is %v: %v", taskInfo.Name, fitError.Error())
+			if fe := ji.NodesFitErrors[taskInfo.UID]; fe != nil {
+				nodeSummary = fmt.Sprintf("%s: %s", taskInfo.Name, fe.Error())
 				break
 			}
 		}
 	}
-
-	return reasonMsg
+	return FormatSchedulingDimensions(ji.JobFitErrors, nodeSummary)
 }
 
 // TaskSchedulingReason get detailed reason and message of the given task
@@ -849,28 +867,36 @@ func (ji *JobInfo) TaskSchedulingReason(tid TaskID) (reason, msg, nominatedNodeN
 		ctx = *taskInfo.LastTransaction
 	}
 
-	msg = ji.JobFitErrors
 	switch status := ctx.Status; status {
 	case Allocated:
 		// Pod is schedulable
-		msg = fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName)
+		msg = AppendSchedulingDimensions(
+			fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName),
+			ji.JobFitErrors, "",
+		)
 		return PodReasonSchedulable, msg, ""
 	case Pipelined:
-		msg = fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once resource is released and minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName)
+		msg = AppendSchedulingDimensions(
+			fmt.Sprintf("Pod %s/%s can possibly be assigned to %s, once resource is released and minAvailable is satisfied", taskInfo.Namespace, taskInfo.Name, ctx.NodeName),
+			ji.JobFitErrors, "",
+		)
 		if ctx.EvictionOccurred {
 			nominatedNodeName = ctx.NodeName
 		}
 		return PodReasonUnschedulable, msg, nominatedNodeName
 	case Pending:
+		var nodeSummary string
 		if fe := ji.NodesFitErrors[tid]; fe != nil {
-			// Pod is unschedulable
-			return PodReasonUnschedulable, fe.Error(), ""
+			nodeSummary = fe.Error()
 		}
-		// Pod is not scheduled yet, keep UNSCHEDULABLE as the reason to support cluster autoscaler
-		return PodReasonUnschedulable, msg, ""
+		return PodReasonUnschedulable, ji.schedulingDimensionsForTask(nodeSummary), ""
 	default:
-		return status.String(), msg, ""
+		return status.String(), ji.schedulingDimensionsForTask(""), ""
 	}
+}
+
+func (ji *JobInfo) schedulingDimensionsForTask(nodeSummary string) string {
+	return FormatSchedulingDimensions(ji.JobFitErrors, nodeSummary)
 }
 
 // ReadyTaskNum returns the number of tasks that are ready or that is best-effort.
@@ -1245,10 +1271,48 @@ func (ji *JobInfo) WithNetworkTopology() bool {
 	return ji.NetworkTopology != nil
 }
 
-// ResetFitErr will set job and node fit err to nil.
+// ResetFitErr clears node-level fit errors between HyperNode dry-run attempts.
+// HyperNode-tier summary in JobFitErrors is preserved.
 func (ji *JobInfo) ResetFitErr() {
-	ji.JobFitErrors = ""
 	ji.NodesFitErrors = make(map[TaskID]*FitErrors)
+}
+
+// SetHyperNodeFitErrors stores HyperNode-tier scheduling diagnostics in JobFitErrors.
+func (ji *JobInfo) SetHyperNodeFitErrors(
+	stats *HyperNodeGradientStats,
+	resourceStats *HyperNodeMinResourceFilterStats,
+	minResource *Resource,
+	hyperNodesSetByTier map[int]sets.Set[string],
+	tierNameMap HyperNodeTierNameMap,
+	hyperNodes HyperNodeInfoMap,
+) {
+	if stats == nil {
+		return
+	}
+	ji.JobFitErrors = FormatHyperNodeFitSummary(
+		stats, resourceStats, minResource, hyperNodesSetByTier, tierNameMap, hyperNodes,
+	)
+}
+
+// MergeSubJobHyperNodeFitErrors appends subJob-tier HyperNode diagnostics to the job baseline.
+func (ji *JobInfo) MergeSubJobHyperNodeFitErrors(
+	baseline string,
+	subJobID SubJobID,
+	stats *HyperNodeGradientStats,
+	resourceStats *HyperNodeMinResourceFilterStats,
+	minResource *Resource,
+	hyperNodesSetByTier map[int]sets.Set[string],
+	tierNameMap HyperNodeTierNameMap,
+	hyperNodes HyperNodeInfoMap,
+) {
+	if stats == nil {
+		ji.JobFitErrors = baseline
+		return
+	}
+	subSummary := FormatHyperNodeFitSummary(
+		stats, resourceStats, minResource, hyperNodesSetByTier, tierNameMap, hyperNodes,
+	)
+	ji.JobFitErrors = MergeHyperNodeFitSummary(baseline, string(subJobID), subSummary)
 }
 
 // ResetSubJobFitErr will set subJob's node fit err to nil.
@@ -1341,6 +1405,15 @@ func (ji *JobInfo) ContainsHardTopology() bool {
 		return true
 	}
 	return false
+}
+
+// RequiresHyperNodeAllocate returns whether the job needs HyperNode-level allocation.
+// Soft network topology and preferred topology affinity also require this path
+// so HyperNodeOrderFn can score the full candidate universe before falling back.
+func (ji *JobInfo) RequiresHyperNodeAllocate() bool {
+	return ji.ContainsNetworkTopology() || ji.ContainsSubJobPolicy() ||
+		ji.ContainsHardPodGroupAntiAffinity() || ji.HasPreferredPodGroupAntiAffinity() ||
+		ji.ContainsHardSubGroupTopologyAffinity() || ji.HasPreferredSubGroupTopologyAffinity()
 }
 
 // ContainsNetworkTopologyInSubJob returns whether the subJobs in the job contain network topology

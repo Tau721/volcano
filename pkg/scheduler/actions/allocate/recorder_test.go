@@ -33,8 +33,11 @@ func TestNewRecorder(t *testing.T) {
 	if recorder.jobDecisions == nil {
 		t.Errorf("recorder.jobDecisions should be initialized")
 	}
-	if recorder.subJobDecisions == nil {
-		t.Errorf("recorder.subJobDecisions should be initialized")
+	if recorder.subJobStatusSnapshot == nil {
+		t.Errorf("recorder.subJobStatusSnapshot should be initialized")
+	}
+	if recorder.jobAllocatedHyperNodeSnapshot == nil {
+		t.Errorf("recorder.jobAllocatedHyperNodeSnapshot should be initialized")
 	}
 }
 
@@ -267,5 +270,40 @@ func TestUpdateDecisionToJob_NoSubJob(t *testing.T) {
 
 	if job.SubJobs["subJob1"].AllocatedHyperNode != "node2" {
 		t.Errorf("UpdateDecisionToJob should not update the allocated hyperNode for the subJob without a recorder")
+	}
+}
+
+func TestRecoverSubJobStatus_RestoresJobAllocatedHyperNode(t *testing.T) {
+	recorder := NewRecorder()
+	jobID := api.JobID("job1")
+	subJobID := api.SubJobID("subJob1")
+	job := &api.JobInfo{
+		UID:                jobID,
+		AllocatedHyperNode: "",
+		SubJobs: map[api.SubJobID]*api.SubJobInfo{
+			subJobID: {
+				UID:                subJobID,
+				AllocatedHyperNode: "",
+			},
+		},
+	}
+	worksheet := &JobWorksheet{
+		subJobWorksheets: map[api.SubJobID]*SubJobWorksheet{
+			subJobID: {},
+		},
+	}
+
+	recorder.SnapshotSubJobStatus(job, worksheet)
+
+	job.AllocatedHyperNode = "sn-a"
+	job.SubJobs[subJobID].AllocatedHyperNode = "sn-a"
+
+	recorder.RecoverSubJobStatus(job)
+
+	if job.AllocatedHyperNode != "" {
+		t.Fatalf("job AllocatedHyperNode = %q, want empty", job.AllocatedHyperNode)
+	}
+	if job.SubJobs[subJobID].AllocatedHyperNode != "" {
+		t.Fatalf("subJob AllocatedHyperNode = %q, want empty", job.SubJobs[subJobID].AllocatedHyperNode)
 	}
 }

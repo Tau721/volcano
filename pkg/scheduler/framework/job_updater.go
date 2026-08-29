@@ -108,12 +108,45 @@ func (ju *JobUpdater) isJobAllocatedHyperNodeChanged(job *api.JobInfo) bool {
 	return oldHyperNode != job.PodGroup.GetAnnotations()[api.JobAllocatedHyperNode]
 }
 
+// syncAllocatedHyperNodeAnnotation serializes the in-memory job.AllocatedHyperNode field into the
+// PodGroup annotation so the writeback in updateJob can detect placement changes and persist them.
+// Without this, scheduling decisions (initial allocation, scale-in via pod deletion, etc.) only
+// update the in-memory field and the PodGroup annotation goes stale.
+func syncAllocatedHyperNodeAnnotation(job *api.JobInfo) {
+	if job.PodGroup == nil {
+		return
+	}
+
+	annotations := job.PodGroup.GetAnnotations()
+	current := ""
+	if annotations != nil {
+		current = annotations[api.JobAllocatedHyperNode]
+	}
+	if current == job.AllocatedHyperNode {
+		return
+	}
+
+	if job.AllocatedHyperNode == "" {
+		if annotations != nil {
+			delete(annotations, api.JobAllocatedHyperNode)
+		}
+		return
+	}
+
+	if annotations == nil {
+		annotations = map[string]string{}
+		job.PodGroup.SetAnnotations(annotations)
+	}
+	annotations[api.JobAllocatedHyperNode] = job.AllocatedHyperNode
+}
+
 // updateJob update specified job
 func (ju *JobUpdater) updateJob(index int) {
 	job := ju.jobQueue[index]
 	ssn := ju.ssn
 
 	job.PodGroup.Status = jobStatus(ssn, job)
+	syncAllocatedHyperNodeAnnotation(job)
 	oldStatus, found := ssn.PodGroupOldState.Status[job.UID]
 	updatePGStatus := !found || isPodGroupStatusUpdated(job.PodGroup.Status, oldStatus)
 	updatePGAnnotations := ju.isJobAllocatedHyperNodeChanged(job)

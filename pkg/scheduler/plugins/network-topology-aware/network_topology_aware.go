@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 	"k8s.io/utils/set"
@@ -31,6 +32,8 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/util"
 )
+
+var emptyHyperNodeGradients = [][]*api.HyperNodeInfo{}
 
 const (
 	// PluginName indicates name of volcano scheduler plugin.
@@ -155,7 +158,7 @@ func New(arguments framework.Arguments) framework.Plugin {
 		maxHyperNodesForEviction: getMaxHyperNodesForEviction(arguments),
 		hyperNodeResourceCache:   make(map[string]*resourceStatus),
 	}
-	klog.V(5).InfoS("successfully built plugin", "name", PluginName, "arguments", plugin.String())
+	klog.V(5).Infof("successfully built plugin, name=%s, arguments=%s", PluginName, plugin.String())
 	return &plugin
 }
 
@@ -290,38 +293,12 @@ func (nta *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 		return nta.batchNodeOrderFn(ssn, task, nodes)
 	})
 
-	ssn.AddHyperNodeGradientForJobFn(nta.Name(), func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
-		if hardMode, highestAllowedTier := job.IsHardTopologyMode(); hardMode {
-			jobMinResource := job.GetMinResources()
-			result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, job.AllocatedHyperNode, jobMinResource, purpose)
-			if err != nil {
-				klog.ErrorS(err, "build hyperNode gradient fail", "job", job.UID, "hyperNode", hyperNode.Name,
-					"highestAllowedTier", highestAllowedTier, "allocatedHyperNode", job.AllocatedHyperNode)
-				return nil
-			}
-			if purpose != api.PurposeEvict {
-				return result
-			}
-			return nta.reverseAndCapEvictionGradients(result)
-		}
-		return [][]*api.HyperNodeInfo{{hyperNode}}
+	ssn.AddHyperNodeGradientForJobFn(nta.Name(), func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) api.HyperNodeGradientResult {
+		return nta.hyperNodeGradientForJob(ssn, job, hyperNode, purpose)
 	})
 
-	ssn.AddHyperNodeGradientForSubJobFn(nta.Name(), func(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
-		if hardMode, highestAllowedTier := subJob.IsHardTopologyMode(); hardMode {
-			subJobMinResource := subJob.GetMinResources()
-			result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, subJob.AllocatedHyperNode, subJobMinResource, purpose)
-			if err != nil {
-				klog.ErrorS(err, "build hyperNode gradient fail", "subJob", subJob.UID, "hyperNode", hyperNode.Name,
-					"highestAllowedTier", highestAllowedTier, "allocatedHyperNode", subJob.AllocatedHyperNode)
-				return nil
-			}
-			if purpose != api.PurposeEvict {
-				return result
-			}
-			return nta.reverseAndCapEvictionGradients(result)
-		}
-		return [][]*api.HyperNodeInfo{{hyperNode}}
+	ssn.AddHyperNodeGradientForSubJobFn(nta.Name(), func(subJob *api.SubJobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) api.HyperNodeGradientResult {
+		return nta.hyperNodeGradientForSubJob(ssn, subJob, hyperNode, purpose)
 	})
 
 	ssn.AddEventHandler(&framework.EventHandler{
@@ -356,6 +333,50 @@ func (nta *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 	})
 }
 
+func (nta *networkTopologyAwarePlugin) hyperNodeGradientForJob(
+	ssn *framework.Session,
+	job *api.JobInfo,
+	hyperNode *api.HyperNodeInfo,
+	purpose api.SearchPurpose,
+) api.HyperNodeGradientResult {
+	hardMode, highestAllowedTier := job.IsHardTopologyMode()
+	if !hardMode {
+		return api.HyperNodeGradientAbstain()
+	}
+	result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, job.AllocatedHyperNode, job.GetMinResources(), purpose)
+	if err != nil {
+		klog.Errorf("build hyperNode gradient fail, job=%s, hyperNode=%s, highestAllowedTier=%d, allocatedHyperNode=%s, err=%v",
+			job.UID, hyperNode.Name, highestAllowedTier, job.AllocatedHyperNode, err)
+		return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
+	}
+	if purpose == api.PurposeEvict {
+		return api.HyperNodeGradientConstrain(nta.reverseAndCapEvictionGradients(result))
+	}
+	return api.HyperNodeGradientConstrain(result)
+}
+
+func (nta *networkTopologyAwarePlugin) hyperNodeGradientForSubJob(
+	ssn *framework.Session,
+	subJob *api.SubJobInfo,
+	hyperNode *api.HyperNodeInfo,
+	purpose api.SearchPurpose,
+) api.HyperNodeGradientResult {
+	hardMode, highestAllowedTier := subJob.IsHardTopologyMode()
+	if !hardMode {
+		return api.HyperNodeGradientAbstain()
+	}
+	result, err := nta.hyperNodeGradientFn(ssn, hyperNode, highestAllowedTier, subJob.AllocatedHyperNode, subJob.GetMinResources(), purpose)
+	if err != nil {
+		klog.Errorf("build hyperNode gradient fail, subJob=%s, hyperNode=%s, highestAllowedTier=%d, allocatedHyperNode=%s, err=%v",
+			subJob.UID, hyperNode.Name, highestAllowedTier, subJob.AllocatedHyperNode, err)
+		return api.HyperNodeGradientConstrain(emptyHyperNodeGradients)
+	}
+	if purpose == api.PurposeEvict {
+		return api.HyperNodeGradientConstrain(nta.reverseAndCapEvictionGradients(result))
+	}
+	return api.HyperNodeGradientConstrain(result)
+}
+
 func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {
 	hyperNodeScores := nta.getSubJobHyperNodeBinPackingScore(subJob, hyperNodes)
 
@@ -378,7 +399,7 @@ func (nta *networkTopologyAwarePlugin) HyperNodeOrderFn(ssn *framework.Session, 
 	}
 
 	hyperNodeScores = nta.scaleFinalScore(hyperNodeScores)
-	klog.V(4).Infof("networkTopologyAware hyperNode score is: %v", hyperNodeScores)
+	klog.V(3).Infof("networkTopologyAware hyperNode score is: %v", hyperNodeScores)
 	return hyperNodeScores, nil
 }
 
@@ -415,14 +436,14 @@ func (nta *networkTopologyAwarePlugin) getSubJobHyperNodeBinPackingScore(subJob 
 			used := status.used.Get(resourceName)
 
 			if used+request > allocatable {
-				klog.V(4).InfoS("cannot binpack the hyperNode", "subJob", subJob.UID, "hyperNode", hyperNode,
-					"resource", resourceName, "allocatable", allocatable, "used", used, "request", request)
+				klog.V(4).Infof("cannot binpack the hyperNode, subJob=%s, hyperNode=%s, resource=%s, allocatable=%v, used=%v, request=%v",
+					subJob.UID, hyperNode, resourceName, allocatable, used, request)
 				overused = true
 				break
 			}
 			score := (used + request) / allocatable
-			klog.V(5).InfoS("hyperNode binpacking score calculation", "subJob", subJob.UID, "hyperNode", hyperNode,
-				"resource", resourceName, "allocatable", allocatable, "used", used, "request", request)
+			klog.V(5).Infof("hyperNode binpacking score calculation, subJob=%s, hyperNode=%s, resource=%s, allocatable=%v, used=%v, request=%v",
+				subJob.UID, hyperNode, resourceName, allocatable, used, request)
 
 			totalScore += float64(weight) * score
 			totalWeight += weight
@@ -535,14 +556,14 @@ func (nta *networkTopologyAwarePlugin) getPodHyperNodeBinPackingScore(task *api.
 
 		request := task.Resreq.Get(resource)
 		if used+request > allocatable {
-			klog.V(4).InfoS("cannot binpack the hyperNode", "task", task.UID, "hyperNode", hyperNode,
-				"resource", resource, "allocatable", allocatable, "used", used, "request", request)
+			klog.V(4).Infof("cannot binpack the hyperNode, task=%s, hyperNode=%s, resource=%s, allocatable=%v, used=%v, request=%v",
+				task.UID, hyperNode, resource, allocatable, used, request)
 			return ZeroScore
 		}
 
 		score := (used + request) / allocatable
-		klog.V(5).InfoS("hyperNode binpacking score calculation", "task", task.UID, "hyperNode", hyperNode,
-			"resource", resource, "allocatable", allocatable, "used", used, "request", request)
+		klog.V(5).Infof("hyperNode binpacking score calculation, task=%s, hyperNode=%s, resource=%s, allocatable=%v, used=%v, request=%v",
+			task.UID, hyperNode, resource, allocatable, used, request)
 
 		totalScore += float64(weight) * score
 		totalWeight += weight
@@ -667,6 +688,7 @@ func (nta *networkTopologyAwarePlugin) isEligibleHyperNode(hn *api.HyperNodeInfo
 	if minResource.LessEqual(hnResourceStatus.idle, api.Zero) || minResource.LessEqual(hnResourceStatus.futureIdle, api.Zero) {
 		return true
 	}
+
 	return false
 }
 
@@ -811,4 +833,14 @@ func (nta *networkTopologyAwarePlugin) scaleFinalScore(scores map[string]float64
 		scaledScores[name] = float64(fwk.MaxNodeScore) * float64(nta.weight.GlobalWeight) * score
 	}
 	return scaledScores
+}
+
+func maxHyperNodeTier(hyperNodesSetByTier map[int]sets.Set[string]) int {
+	maxTier := 0
+	for tier := range hyperNodesSetByTier {
+		if tier > maxTier {
+			maxTier = tier
+		}
+	}
+	return maxTier
 }

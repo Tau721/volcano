@@ -484,14 +484,14 @@ func (ni *NodeInfo) AddTask(task *TaskInfo) error {
 }
 
 // RemoveTask used to remove a task from nodeInfo object.
-func (ni *NodeInfo) RemoveTask(ti *TaskInfo) {
+func (ni *NodeInfo) RemoveTask(ti *TaskInfo) error {
 	key := PodKey(ti.Pod)
 
 	task, found := ni.Tasks[key]
 	if !found {
 		klog.Warningf("failed to find task <%v/%v> on host <%v>",
 			ti.Namespace, ti.Name, ni.Name)
-		return
+		return nil
 	}
 
 	if ni.Node != nil {
@@ -500,6 +500,7 @@ func (ni *NodeInfo) RemoveTask(ti *TaskInfo) {
 			ni.Releasing.Sub(task.Resreq)
 			ni.Idle.Add(task.Resreq)
 			ni.Used.Sub(task.Resreq)
+			ni.subResource(ti.Pod)
 		case Pipelined:
 			ni.Pipelined.Sub(task.Resreq)
 		default:
@@ -514,6 +515,7 @@ func (ni *NodeInfo) RemoveTask(ti *TaskInfo) {
 	}
 
 	delete(ni.Tasks, key)
+	return nil
 }
 
 // addResource is used to add sharable devices
@@ -590,14 +592,18 @@ func (ni *NodeInfo) subResource(pod *v1.Pod) {
 }
 
 // UpdateTask is used to update a task in nodeInfo object.
-func (ni *NodeInfo) UpdateTask(ti *TaskInfo) {
-	ni.RemoveTask(ti)
+func (ni *NodeInfo) UpdateTask(ti *TaskInfo) error {
+	if err := ni.RemoveTask(ti); err != nil {
+		return err
+	}
+
 	if err := ni.AddTask(ti); err != nil {
 		// This should never happen if task removal was successful,
 		// because only possible error during task addition is when task is still on a node.
 		klog.Fatalf("Failed to add Task <%s,%s> to Node <%s> during task update",
 			ti.Namespace, ti.Name, ni.Name)
 	}
+	return nil
 }
 
 // String returns nodeInfo details in string format

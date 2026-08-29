@@ -50,6 +50,7 @@ import (
 	"volcano.sh/volcano/pkg/scheduler/plugins/binpack"
 	"volcano.sh/volcano/pkg/scheduler/plugins/drf"
 	"volcano.sh/volcano/pkg/scheduler/plugins/gang"
+	grouptopologyaffinity "volcano.sh/volcano/pkg/scheduler/plugins/group-topology-affinity"
 	networktopologyaware "volcano.sh/volcano/pkg/scheduler/plugins/network-topology-aware"
 	"volcano.sh/volcano/pkg/scheduler/plugins/nodeorder"
 	"volcano.sh/volcano/pkg/scheduler/plugins/predicates"
@@ -2885,7 +2886,574 @@ func TestWorksheetClone(t *testing.T) {
 	}
 }
 
-func TestAllocateWithPartitionPolicyNetworkTopology(t *testing.T) {
+const jobSoftAffinityAcrossSubJobsTestPlugin = "job-soft-affinity-across-subjobs-test"
+
+// jobSoftAffinityAcrossSubJobsTestPluginImpl keeps the V1 fixture focused on
+// the candidate-selection boundary. It makes the Job search from the virtual
+// cluster root and gives the two partitions opposite preferred tier-1 leaves.
+// Without the Job-level filter, those preferences place the partitions under
+// different tier-3 roots deterministically.
+type jobSoftAffinityAcrossSubJobsTestPluginImpl struct{}
+
+func (*jobSoftAffinityAcrossSubJobsTestPluginImpl) Name() string {
+	return jobSoftAffinityAcrossSubJobsTestPlugin
+}
+
+func (*jobSoftAffinityAcrossSubJobsTestPluginImpl) OnSessionOpen(ssn *framework.Session) {
+	ssn.AddHyperNodeGradientForJobFn(jobSoftAffinityAcrossSubJobsTestPlugin, func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{ssn.HyperNodes[framework.ClusterTopHyperNode]}})
+	})
+	ssn.AddHyperNodeGradientForSubJobFn(jobSoftAffinityAcrossSubJobsTestPlugin, func(_ *api.SubJobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		candidates := make([]*api.HyperNodeInfo, 0, ssn.HyperNodesSetByTier[1].Len())
+		for hyperNode := range ssn.HyperNodesSetByTier[1] {
+			candidates = append(candidates, ssn.HyperNodes[hyperNode])
+		}
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{candidates})
+	})
+	ssn.AddHyperNodeOrderFn(jobSoftAffinityAcrossSubJobsTestPlugin, func(subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {
+		preferred := "a-t1-0"
+		if subJob.MatchIndex == 1 {
+			preferred = "b-t1-0"
+		}
+
+		scores := make(map[string]float64, len(hyperNodes))
+		if _, found := hyperNodes[preferred]; found {
+			scores[preferred] = 10000
+		}
+		return scores, nil
+	})
+}
+
+func (*jobSoftAffinityAcrossSubJobsTestPluginImpl) OnSessionClose(_ *framework.Session) {}
+
+func TestAllocateJobSoftAffinityAcrossSubJobs(t *testing.T) {
+	tier1HyperNodes := sets.New[string]()
+	tier2HyperNodes := sets.New[string]()
+	tier3HyperNodes := sets.New[string]()
+	hyperNodes := make(map[string]*api.HyperNodeInfo)
+	realNodes := make(map[string]sets.Set[string])
+	nodes := make([]*v1.Node, 0, 16)
+
+	for _, branch := range []string{"a", "b"} {
+		rootName := fmt.Sprintf("%s-root", branch)
+		rootMembers := make([]api.MemberConfig, 0, 2)
+		rootNodes := sets.New[string]()
+
+		for tier2Index := 0; tier2Index < 2; tier2Index++ {
+			tier2Name := fmt.Sprintf("%s-t2-%d", branch, tier2Index)
+			tier2Members := make([]api.MemberConfig, 0, 2)
+			tier2Nodes := sets.New[string]()
+
+			for tier1Offset := 0; tier1Offset < 2; tier1Offset++ {
+				tier1Index := tier2Index*2 + tier1Offset
+				tier1Name := fmt.Sprintf("%s-t1-%d", branch, tier1Index)
+				tier1Members := make([]api.MemberConfig, 0, 2)
+				tier1Nodes := sets.New[string]()
+
+				for nodeOffset := 0; nodeOffset < 2; nodeOffset++ {
+					nodeName := fmt.Sprintf("%s-n-%d", branch, tier1Index*2+nodeOffset)
+					nodes = append(nodes, util.BuildNode(nodeName,
+						api.BuildResourceList("1", "2Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil))
+					tier1Members = append(tier1Members, api.MemberConfig{
+						Name:     nodeName,
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					})
+					tier1Nodes.Insert(nodeName)
+					tier2Nodes.Insert(nodeName)
+					rootNodes.Insert(nodeName)
+				}
+
+				hyperNodes[tier1Name] = api.NewHyperNodeInfo(api.BuildHyperNode(tier1Name, 1, tier1Members))
+				realNodes[tier1Name] = tier1Nodes
+				tier1HyperNodes.Insert(tier1Name)
+				tier2Members = append(tier2Members, api.MemberConfig{
+					Name:     tier1Name,
+					Type:     topologyv1alpha1.MemberTypeHyperNode,
+					Selector: "exact",
+				})
+			}
+
+			hyperNodes[tier2Name] = api.NewHyperNodeInfo(api.BuildHyperNode(tier2Name, 2, tier2Members))
+			realNodes[tier2Name] = tier2Nodes
+			tier2HyperNodes.Insert(tier2Name)
+			rootMembers = append(rootMembers, api.MemberConfig{
+				Name:     tier2Name,
+				Type:     topologyv1alpha1.MemberTypeHyperNode,
+				Selector: "exact",
+			})
+		}
+
+		hyperNodes[rootName] = api.NewHyperNodeInfo(api.BuildHyperNode(rootName, 3, rootMembers))
+		realNodes[rootName] = rootNodes
+		tier3HyperNodes.Insert(rootName)
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{{
+		Plugins: []conf.PluginOption{
+			{
+				Name:                gang.PluginName,
+				EnabledJobOrder:     &trueValue,
+				EnabledJobReady:     &trueValue,
+				EnabledJobPipelined: &trueValue,
+				EnabledJobStarving:  &trueValue,
+				EnabledSubJobReady:  &trueValue,
+				EnabledSubJobOrder:  &trueValue,
+			},
+			{
+				Name:             predicates.PluginName,
+				EnabledPredicate: &trueValue,
+			},
+			{
+				Name:                     jobSoftAffinityAcrossSubJobsTestPlugin,
+				EnabledHyperNodeGradient: &trueValue,
+				EnabledHyperNodeOrder:    &trueValue,
+			},
+		},
+	}}
+
+	test := uthelper.TestCommonStruct{
+		Name: "job soft affinity keeps partitions in one tier-2 HyperNode",
+		Plugins: map[string]framework.PluginBuilder{
+			predicates.PluginName: predicates.New,
+			gang.PluginName:       gang.New,
+			jobSoftAffinityAcrossSubJobsTestPlugin: func(_ framework.Arguments) framework.Plugin {
+				return &jobSoftAffinityAcrossSubJobsTestPluginImpl{}
+			},
+		},
+		PodGroups: []*schedulingv1.PodGroup{
+			util.BuildPodGroupWithSubGroupPolicy("pg1", "c1", "", "q1", 4, nil, schedulingv1.PodGroupInqueue, "soft", 2,
+				[]schedulingv1.SubGroupPolicySpec{
+					util.BuildSubGroupPolicyWithMinSubGroups("ps", []string{"volcano.sh/partition-id"}, "soft", 1, 2, 2),
+				}),
+		},
+		Pods: []*v1.Pod{
+			util.BuildPod("c1", "p0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "0"}, nil),
+			util.BuildPod("c1", "p1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "0"}, nil),
+			util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "1"}, nil),
+			util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "1"}, nil),
+		},
+		Nodes:               nodes,
+		HyperNodesSetByTier: map[int]sets.Set[string]{1: tier1HyperNodes, 2: tier2HyperNodes, 3: tier3HyperNodes},
+		HyperNodesMap:       hyperNodes,
+		HyperNodes:          realNodes,
+		Queues:              []*schedulingv1.Queue{util.BuildQueue("q1", 1, nil)},
+		ExpectBindsNum:      4,
+		MinimalBindCheck:    true,
+	}
+
+	ssn := test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+
+	job := ssn.Jobs[api.JobID("c1/pg1")]
+	if job == nil {
+		t.Fatal("scheduled job c1/pg1 was not found")
+	}
+	if len(job.SubJobs) != 2 {
+		t.Fatalf("subJob count = %d, want 2", len(job.SubJobs))
+	}
+
+	subJobLCAs := make(map[int]string, 2)
+	for _, subJob := range job.SubJobs {
+		if len(subJob.Tasks) != 2 {
+			t.Fatalf("subJob %s task count = %d, want 2", subJob.UID, len(subJob.Tasks))
+		}
+		if subJob.MinAvailable != 2 {
+			t.Fatalf("subJob %s MinAvailable = %d, want 2", subJob.UID, subJob.MinAvailable)
+		}
+
+		lca := ""
+		for _, task := range subJob.Tasks {
+			if task.NodeName == "" {
+				t.Fatalf("task %s in subJob %s was not allocated", task.UID, subJob.UID)
+			}
+			leaf := util.FindHyperNodeForNode(task.NodeName, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
+			if leaf == "" {
+				t.Fatalf("no tier-1 HyperNode found for task %s on node %s", task.UID, task.NodeName)
+			}
+			lca = ssn.HyperNodes.GetLCAHyperNode(lca, leaf)
+		}
+
+		lcaHyperNode := ssn.HyperNodes[lca]
+		if lcaHyperNode == nil || lcaHyperNode.Tier() != 1 {
+			t.Fatalf("subJob %s pod LCA = %q (tier %v), want a tier-1 HyperNode", subJob.UID, lca, hyperNodeTier(lcaHyperNode))
+		}
+		subJobLCAs[subJob.MatchIndex] = lca
+	}
+
+	partitionZeroLCA, partitionZeroFound := subJobLCAs[0]
+	partitionOneLCA, partitionOneFound := subJobLCAs[1]
+	if !partitionZeroFound || !partitionOneFound {
+		t.Fatalf("partition subJob LCAs = %#v, want entries for partitions 0 and 1", subJobLCAs)
+	}
+	jobLCA := ssn.HyperNodes.GetLCAHyperNode(partitionZeroLCA, partitionOneLCA)
+	jobLCAHyperNode := ssn.HyperNodes[jobLCA]
+	if jobLCAHyperNode == nil || jobLCAHyperNode.Tier() != 2 {
+		t.Fatalf("all partition pods LCA = %q (tier %v), want one tier-2 HyperNode", jobLCA, hyperNodeTier(jobLCAHyperNode))
+	}
+}
+
+func TestAllocatePreferredSubGroupAffinityAndAntiAffinity(t *testing.T) {
+	tier1HyperNodes := sets.New[string]()
+	tier2HyperNodes := sets.New[string]()
+	tier3HyperNodes := sets.New[string]("root")
+	hyperNodes := make(map[string]*api.HyperNodeInfo)
+	realNodes := make(map[string]sets.Set[string])
+	nodes := make([]*v1.Node, 0, 4)
+
+	rootMembers := make([]api.MemberConfig, 0, 2)
+	allNodes := sets.New[string]()
+	for _, pair := range []struct {
+		name   string
+		leaves []string
+	}{
+		{name: "pair-ab", leaves: []string{"a", "b"}},
+		{name: "pair-cd", leaves: []string{"c", "d"}},
+	} {
+		pairMembers := make([]api.MemberConfig, 0, len(pair.leaves))
+		pairNodes := sets.New[string]()
+		for _, leaf := range pair.leaves {
+			nodeName := "node-" + leaf
+			nodes = append(nodes, util.BuildNode(nodeName,
+				api.BuildResourceList("8", "16Gi", []api.ScalarResource{{Name: "pods", Value: "20"}}...), nil))
+			hyperNodes[leaf] = api.NewHyperNodeInfo(api.BuildHyperNode(leaf, 1, []api.MemberConfig{{
+				Name: nodeName, Type: topologyv1alpha1.MemberTypeNode, Selector: "exact",
+			}}))
+			realNodes[leaf] = sets.New[string](nodeName)
+			tier1HyperNodes.Insert(leaf)
+			pairNodes.Insert(nodeName)
+			allNodes.Insert(nodeName)
+			pairMembers = append(pairMembers, api.MemberConfig{
+				Name: leaf, Type: topologyv1alpha1.MemberTypeHyperNode, Selector: "exact",
+			})
+		}
+		hyperNodes[pair.name] = api.NewHyperNodeInfo(api.BuildHyperNode(pair.name, 2, pairMembers))
+		realNodes[pair.name] = pairNodes
+		tier2HyperNodes.Insert(pair.name)
+		rootMembers = append(rootMembers, api.MemberConfig{
+			Name: pair.name, Type: topologyv1alpha1.MemberTypeHyperNode, Selector: "exact",
+		})
+	}
+	hyperNodes["root"] = api.NewHyperNodeInfo(api.BuildHyperNode("root", 3, rootMembers))
+	realNodes["root"] = allNodes
+
+	one := int32(1)
+	two := int32(2)
+	pg := util.BuildPodGroupWithSubGroupPolicy(
+		"pg1", "c1", "", "q1", 4, nil, schedulingv1.PodGroupInqueue, "", 0,
+		[]schedulingv1.SubGroupPolicySpec{
+			{
+				Name: "prefill", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "prefill"}},
+				MatchLabelKeys: []string{"shard"}, SubGroupSize: &one, MinSubGroups: &two,
+			},
+			{
+				Name: "decode", LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{"role": "decode"}},
+				MatchLabelKeys: []string{"shard"}, SubGroupSize: &one, MinSubGroups: &two,
+			},
+		},
+	)
+	pg.Spec.TopologyAffinity = &schedulingv1.TopologyAffinitySpec{
+		SubGroupAffinity: &schedulingv1.SubGroupAffinity{Preferred: []schedulingv1.SubGroupAffinityTerm{{
+			SubGroups: []string{"prefill", "decode"}, TopologyTier: ptr.To(int32(2)), Weight: 100,
+		}}},
+		SubGroupAntiAffinity: &schedulingv1.SubGroupAntiAffinity{Preferred: []schedulingv1.SubGroupAffinityTerm{
+			{SubGroups: []string{"prefill"}, TopologyTier: ptr.To(int32(1)), Weight: 100},
+			{SubGroups: []string{"decode"}, TopologyTier: ptr.To(int32(1)), Weight: 100},
+		}},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{{Plugins: []conf.PluginOption{
+		{
+			Name: gang.PluginName, EnabledJobOrder: &trueValue, EnabledJobReady: &trueValue,
+			EnabledJobPipelined: &trueValue, EnabledJobStarving: &trueValue,
+			EnabledSubJobReady: &trueValue, EnabledSubJobOrder: &trueValue,
+		},
+		{Name: predicates.PluginName, EnabledPredicate: &trueValue},
+		{
+			Name: grouptopologyaffinity.PluginName, EnabledHyperNodeGradient: &trueValue,
+			EnabledHyperNodeOrder: &trueValue,
+		},
+	}}}
+
+	test := uthelper.TestCommonStruct{
+		Name: "preferred subgroup affinity keeps one pair and anti-affinity spreads each role",
+		Plugins: map[string]framework.PluginBuilder{
+			predicates.PluginName:            predicates.New,
+			gang.PluginName:                  gang.New,
+			grouptopologyaffinity.PluginName: grouptopologyaffinity.New,
+		},
+		PodGroups: []*schedulingv1.PodGroup{pg},
+		Pods: []*v1.Pod{
+			util.BuildPod("c1", "prefill-0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "prefill", "shard": "0"}, nil),
+			util.BuildPod("c1", "prefill-1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "prefill", "shard": "1"}, nil),
+			util.BuildPod("c1", "decode-0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "decode", "shard": "0"}, nil),
+			util.BuildPod("c1", "decode-1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"role": "decode", "shard": "1"}, nil),
+		},
+		Nodes:                     nodes,
+		HyperNodesSetByTier:       map[int]sets.Set[string]{1: tier1HyperNodes, 2: tier2HyperNodes, 3: tier3HyperNodes},
+		HyperNodesMap:             hyperNodes,
+		HyperNodes:                realNodes,
+		Queues:                    []*schedulingv1.Queue{util.BuildQueue("q1", 1, nil)},
+		ExpectBindsNum:            4,
+		MinimalBindCheck:          true,
+		HyperNodesReadyToSchedule: true,
+	}
+
+	ssn := test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+
+	job := ssn.Jobs[api.JobID("c1/pg1")]
+	if job == nil {
+		t.Fatal("scheduled job c1/pg1 was not found")
+	}
+	selectedPair := ""
+	rolesByLeaf := make(map[string]map[string]int)
+	for _, task := range job.Tasks {
+		if task.NodeName == "" {
+			t.Fatalf("task %s was not allocated", task.UID)
+		}
+		leaf := util.FindHyperNodeForNode(task.NodeName, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
+		pair := ssn.HyperNodes.GetAncestorHyperNode(leaf, 2)
+		if selectedPair == "" {
+			selectedPair = pair
+		} else if pair != selectedPair {
+			t.Fatalf("tasks crossed instance groups: first=%s task=%s pair=%s", selectedPair, task.UID, pair)
+		}
+		if rolesByLeaf[leaf] == nil {
+			rolesByLeaf[leaf] = make(map[string]int)
+		}
+		rolesByLeaf[leaf][task.Pod.Labels["role"]]++
+	}
+	if len(rolesByLeaf) != 2 {
+		t.Fatalf("roles were placed on %d tier-1 HyperNodes, want 2: %#v", len(rolesByLeaf), rolesByLeaf)
+	}
+	for leaf, roles := range rolesByLeaf {
+		if roles["prefill"] != 1 || roles["decode"] != 1 {
+			t.Fatalf("tier-1 HyperNode %s roles = %#v, want one prefill and one decode", leaf, roles)
+		}
+	}
+	if job.AllocatedHyperNode != selectedPair {
+		t.Fatalf("job placement = %q, want selected instance group %q", job.AllocatedHyperNode, selectedPair)
+	}
+}
+
+const jobSoftAffinityAcrossOuterCandidatesTestPlugin = "job-soft-affinity-across-outer-candidates-test"
+
+// jobSoftAffinityAcrossOuterCandidatesTestPluginImpl models the case where the
+// two SubJobs are allocated in separate allocateForJob calls. Each outer
+// candidate is presented as a singleton to the SubJob, so a remote candidate
+// can only be rejected by the outer Job-level selection.
+type jobSoftAffinityAcrossOuterCandidatesTestPluginImpl struct {
+	jobGradientAnchors []string
+}
+
+func (*jobSoftAffinityAcrossOuterCandidatesTestPluginImpl) Name() string {
+	return jobSoftAffinityAcrossOuterCandidatesTestPlugin
+}
+
+func (p *jobSoftAffinityAcrossOuterCandidatesTestPluginImpl) OnSessionOpen(ssn *framework.Session) {
+	outerCandidates := []string{"a-t1-0", "a-t1-1", "b-t1-0", "b-t1-1"}
+	ssn.AddHyperNodeGradientForJobFn(jobSoftAffinityAcrossOuterCandidatesTestPlugin, func(job *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		p.jobGradientAnchors = append(p.jobGradientAnchors, job.AllocatedHyperNode)
+		candidates := make([]*api.HyperNodeInfo, 0, len(outerCandidates))
+		for _, name := range outerCandidates {
+			candidates = append(candidates, ssn.HyperNodes[name])
+		}
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{candidates})
+	})
+	ssn.AddHyperNodeGradientForSubJobFn(jobSoftAffinityAcrossOuterCandidatesTestPlugin, func(_ *api.SubJobInfo, hyperNodeForJob *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{hyperNodeForJob}})
+	})
+	ssn.AddHyperNodeOrderFn(jobSoftAffinityAcrossOuterCandidatesTestPlugin, func(subJob *api.SubJobInfo, hyperNodes map[string][]*api.NodeInfo) (map[string]float64, error) {
+		scores := make(map[string]float64)
+		setScore := func(name string, score float64) {
+			if _, found := hyperNodes[name]; found {
+				scores[name] = score
+			}
+		}
+
+		switch subJob.MatchIndex {
+		case 0:
+			setScore("a-t1-0", 30)
+		case 1:
+			// The remote branch deliberately scores higher. Before the outer
+			// candidate filter, this makes the second SubJob leave a-tier2.
+			setScore("a-t1-1", 10)
+			setScore("b-t1-0", 100)
+			setScore("b-t1-1", 90)
+		}
+		return scores, nil
+	})
+}
+
+func (*jobSoftAffinityAcrossOuterCandidatesTestPluginImpl) OnSessionClose(_ *framework.Session) {}
+
+func TestAllocateJobSoftAffinityAcrossSeparateOuterCandidates(t *testing.T) {
+	tier1HyperNodes := sets.New[string]()
+	tier2HyperNodes := sets.New[string]()
+	tier3HyperNodes := sets.New[string]()
+	hyperNodes := make(map[string]*api.HyperNodeInfo)
+	realNodes := make(map[string]sets.Set[string])
+	nodes := make([]*v1.Node, 0, 4)
+
+	for _, branch := range []string{"a", "b"} {
+		rootName := fmt.Sprintf("%s-root", branch)
+		tier2Name := fmt.Sprintf("%s-t2", branch)
+		rootMembers := []api.MemberConfig{{
+			Name:     tier2Name,
+			Type:     topologyv1alpha1.MemberTypeHyperNode,
+			Selector: "exact",
+		}}
+		tier2Members := make([]api.MemberConfig, 0, 2)
+		branchNodes := sets.New[string]()
+
+		for tier1Index := 0; tier1Index < 2; tier1Index++ {
+			tier1Name := fmt.Sprintf("%s-t1-%d", branch, tier1Index)
+			nodeName := fmt.Sprintf("%s-n-%d", branch, tier1Index)
+			nodes = append(nodes, util.BuildNode(nodeName,
+				api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil))
+			hyperNodes[tier1Name] = api.NewHyperNodeInfo(api.BuildHyperNode(tier1Name, 1, []api.MemberConfig{{
+				Name:     nodeName,
+				Type:     topologyv1alpha1.MemberTypeNode,
+				Selector: "exact",
+			}}))
+			realNodes[tier1Name] = sets.New[string](nodeName)
+			tier1HyperNodes.Insert(tier1Name)
+			branchNodes.Insert(nodeName)
+			tier2Members = append(tier2Members, api.MemberConfig{
+				Name:     tier1Name,
+				Type:     topologyv1alpha1.MemberTypeHyperNode,
+				Selector: "exact",
+			})
+		}
+
+		hyperNodes[tier2Name] = api.NewHyperNodeInfo(api.BuildHyperNode(tier2Name, 2, tier2Members))
+		realNodes[tier2Name] = branchNodes
+		tier2HyperNodes.Insert(tier2Name)
+		hyperNodes[rootName] = api.NewHyperNodeInfo(api.BuildHyperNode(rootName, 3, rootMembers))
+		realNodes[rootName] = branchNodes
+		tier3HyperNodes.Insert(rootName)
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{{
+		Plugins: []conf.PluginOption{
+			{
+				Name:                gang.PluginName,
+				EnabledJobOrder:     &trueValue,
+				EnabledJobReady:     &trueValue,
+				EnabledJobPipelined: &trueValue,
+				EnabledJobStarving:  &trueValue,
+				EnabledSubJobReady:  &trueValue,
+				EnabledSubJobOrder:  &trueValue,
+			},
+			{
+				Name:             predicates.PluginName,
+				EnabledPredicate: &trueValue,
+			},
+			{
+				Name:                     jobSoftAffinityAcrossOuterCandidatesTestPlugin,
+				EnabledHyperNodeGradient: &trueValue,
+				EnabledHyperNodeOrder:    &trueValue,
+			},
+		},
+	}}
+
+	plugin := &jobSoftAffinityAcrossOuterCandidatesTestPluginImpl{}
+	test := uthelper.TestCommonStruct{
+		Name: "job soft affinity keeps a later subjob in the prior outer topology domain",
+		Plugins: map[string]framework.PluginBuilder{
+			predicates.PluginName: predicates.New,
+			gang.PluginName:       gang.New,
+			jobSoftAffinityAcrossOuterCandidatesTestPlugin: func(_ framework.Arguments) framework.Plugin {
+				return plugin
+			},
+		},
+		// MinMember and MinSubGroups are intentionally zero. This makes the
+		// first ready partition commit before the next partition enters a new
+		// allocateForJob call, matching the reported vcjob with minPartitions
+		// omitted.
+		PodGroups: []*schedulingv1.PodGroup{
+			util.BuildPodGroupWithSubGroupPolicy("pg1", "c1", "", "q1", 0, nil, schedulingv1.PodGroupInqueue, "soft", 2,
+				[]schedulingv1.SubGroupPolicySpec{
+					util.BuildSubGroupPolicyWithMinSubGroups("ps", []string{"volcano.sh/partition-id"}, "soft", 1, 2, 0),
+				}),
+		},
+		Pods: []*v1.Pod{
+			util.BuildPod("c1", "p0", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "0"}, nil),
+			util.BuildPod("c1", "p1", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "0"}, nil),
+			util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "1"}, nil),
+			util.BuildPod("c1", "p3", "", v1.PodPending, api.BuildResourceList("1", "1Gi"), "pg1", map[string]string{"volcano.sh/task-spec": "ps", "volcano.sh/partition-id": "1"}, nil),
+		},
+		Nodes:               nodes,
+		HyperNodesSetByTier: map[int]sets.Set[string]{1: tier1HyperNodes, 2: tier2HyperNodes, 3: tier3HyperNodes},
+		HyperNodesMap:       hyperNodes,
+		HyperNodes:          realNodes,
+		Queues:              []*schedulingv1.Queue{util.BuildQueue("q1", 1, nil)},
+		ExpectBindsNum:      4,
+		MinimalBindCheck:    true,
+	}
+
+	ssn := test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(plugin.jobGradientAnchors) != 2 {
+		t.Fatalf("job gradient calls = %#v, want exactly two calls", plugin.jobGradientAnchors)
+	}
+	if plugin.jobGradientAnchors[0] != "" || plugin.jobGradientAnchors[1] != "a-t1-0" {
+		t.Fatalf("job gradient anchors = %#v, want [\"\" \"a-t1-0\"]", plugin.jobGradientAnchors)
+	}
+
+	job := ssn.Jobs[api.JobID("c1/pg1")]
+	if job == nil {
+		t.Fatal("scheduled job c1/pg1 was not found")
+	}
+	if job.AllocatedHyperNode != "a-t2" {
+		t.Fatalf("job AllocatedHyperNode = %q, want a-t2", job.AllocatedHyperNode)
+	}
+
+	subJobLeafs := make(map[int]string, 2)
+	for _, subJob := range job.SubJobs {
+		leaf := ""
+		for _, task := range subJob.Tasks {
+			taskLeaf := util.FindHyperNodeForNode(task.NodeName, ssn.RealNodesList, ssn.HyperNodesTiers, ssn.HyperNodesSetByTier)
+			if taskLeaf == "" {
+				t.Fatalf("no tier-1 HyperNode found for task %s on node %s", task.UID, task.NodeName)
+			}
+			if leaf != "" && leaf != taskLeaf {
+				t.Fatalf("subJob %s spans tier-1 HyperNodes %q and %q", subJob.UID, leaf, taskLeaf)
+			}
+			leaf = taskLeaf
+		}
+		subJobLeafs[subJob.MatchIndex] = leaf
+	}
+	if subJobLeafs[0] != "a-t1-0" || subJobLeafs[1] != "a-t1-1" {
+		t.Fatalf("subJob tier-1 placements = %#v, want partition 0 on a-t1-0 and partition 1 on a-t1-1", subJobLeafs)
+	}
+}
+
+func hyperNodeTier(hyperNode *api.HyperNodeInfo) interface{} {
+	if hyperNode == nil {
+		return "missing"
+	}
+	return hyperNode.Tier()
+}
+
+func TestMixedNetworkTopologyAllocationWithPartitionPolicy(t *testing.T) {
 	plugins := map[string]framework.PluginBuilder{
 		predicates.PluginName:           predicates.New,
 		gang.PluginName:                 gang.New,

@@ -953,3 +953,22 @@ func TestConvertToHardTopology(t *testing.T) {
 		})
 	}
 }
+
+func TestSubJobSoftTopologyModeAndPreferredTierArePreserved(t *testing.T) {
+	tier := 2
+	policy := &scheduling.SubGroupPolicySpec{
+		SubGroupSize: ptr.To(int32(4)),
+		NetworkTopology: &scheduling.NetworkTopologySpec{
+			Mode:               scheduling.SoftNetworkTopologyMode,
+			HighestTierAllowed: &tier,
+		},
+	}
+
+	sji := NewSubJobInfo("gid", "uid", "job", policy, nil)
+	hard, _ := sji.IsHardTopologyMode()
+
+	assert.True(t, sji.IsSoftTopologyMode())
+	assert.False(t, hard)
+	assert.Equal(t, ptr.To(tier), sji.NetworkTopology.HighestTierAllowed)
+	assert.NotSame(t, policy.NetworkTopology, sji.NetworkTopology)
+}

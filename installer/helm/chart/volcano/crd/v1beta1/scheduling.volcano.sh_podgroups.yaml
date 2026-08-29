@@ -92,6 +92,11 @@ spec:
                 if queue does not exist, the PodGroup will not be scheduled. Defaults
                 to `default` Queue with the lowest weight.
               type: string
+            topologyAffinity:
+              description: TopologyAffinity expresses inter-group topology affinity
+                and anti-affinity on the HyperNode tree.
+              type: object
+              x-kubernetes-preserve-unknown-fields: true
           type: object
         status:
           description: Status represents the current information about a pod group.

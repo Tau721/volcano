@@ -1,7 +1,6 @@
 package framework
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -307,280 +306,22 @@ func TestAdjustNetworkTopologySpec_DoesNotMutatePodGroupSpec(t *testing.T) {
 
 	assert.Equal(t, originalJobTopology, job.PodGroup.Spec.NetworkTopology)
 	assert.Equal(t, originalSubGroupTopology, job.PodGroup.Spec.SubGroupPolicy[0].NetworkTopology)
+	assert.Equal(t, scheduling.SoftNetworkTopologyMode, job.NetworkTopology.Mode)
+	assert.Equal(t, ptr.To(2), job.NetworkTopology.HighestTierAllowed)
+	assert.Equal(t, scheduling.SoftNetworkTopologyMode, job.SubJobs["test-job/worker/0"].NetworkTopology.Mode)
+	assert.Equal(t, ptr.To(1), job.SubJobs["test-job/worker/0"].NetworkTopology.HighestTierAllowed)
 }
 
-func TestConvertSoftToHardTopology(t *testing.T) {
-	maxTier := 4
-
-	tests := []struct {
-		name                     string
-		jobNetworkTopology       *scheduling.NetworkTopologySpec
-		subGroupPolicies         []scheduling.SubGroupPolicySpec
-		wantJobMode              scheduling.NetworkTopologyMode
-		wantJobTier              *int
-		wantSubGroupPolicyModes  []scheduling.NetworkTopologyMode
-		wantSubGroupPolicyTiers  []*int
-		wantContainsHardTopology bool
-	}{
-		{
-			name: "job-level soft topology is converted to hard",
-			jobNetworkTopology: &scheduling.NetworkTopologySpec{
-				Mode: scheduling.SoftNetworkTopologyMode,
-			},
-			wantJobMode:              scheduling.HardNetworkTopologyMode,
-			wantJobTier:              ptr.To(maxTier),
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "job-level hard topology is unchanged",
-			jobNetworkTopology: &scheduling.NetworkTopologySpec{
-				Mode:               scheduling.HardNetworkTopologyMode,
-				HighestTierAllowed: ptr.To(2),
-			},
-			wantJobMode:              scheduling.HardNetworkTopologyMode,
-			wantJobTier:              ptr.To(2),
-			wantContainsHardTopology: true,
-		},
-		{
-			name:                     "nil job topology remains nil",
-			jobNetworkTopology:       nil,
-			wantContainsHardTopology: false,
-		},
-		{
-			name: "subGroupPolicy-level soft topology is converted to hard",
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-			},
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(maxTier)},
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "subGroupPolicy-level hard topology is unchanged",
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode:               scheduling.HardNetworkTopologyMode,
-						HighestTierAllowed: ptr.To(2),
-					},
-				},
-			},
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(2)},
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "mixed: job soft + subGroupPolicy soft both converted",
-			jobNetworkTopology: &scheduling.NetworkTopologySpec{
-				Mode: scheduling.SoftNetworkTopologyMode,
-			},
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-			},
-			wantJobMode:              scheduling.HardNetworkTopologyMode,
-			wantJobTier:              ptr.To(maxTier),
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(maxTier)},
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "mixed: job hard + subGroupPolicy soft (subgroup bounded by job tier)",
-			jobNetworkTopology: &scheduling.NetworkTopologySpec{
-				Mode:               scheduling.HardNetworkTopologyMode,
-				HighestTierAllowed: ptr.To(2),
-			},
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-			},
-			wantJobMode:              scheduling.HardNetworkTopologyMode,
-			wantJobTier:              ptr.To(2),
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(2)}, // bounded by job's HighestTierAllowed=2
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "mixed: job hard tier=3 + multiple subGroupPolicies soft (all bounded by job tier)",
-			jobNetworkTopology: &scheduling.NetworkTopologySpec{
-				Mode:               scheduling.HardNetworkTopologyMode,
-				HighestTierAllowed: ptr.To(3),
-			},
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-				{
-					Name:         "ps",
-					SubGroupSize: ptr.To(int32(2)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-			},
-			wantJobMode:              scheduling.HardNetworkTopologyMode,
-			wantJobTier:              ptr.To(3),
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode, scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(3), ptr.To(3)}, // both bounded by job's HighestTierAllowed=3
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "multiple subGroupPolicies: some soft some hard",
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:         "worker",
-					SubGroupSize: ptr.To(int32(4)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode: scheduling.SoftNetworkTopologyMode,
-					},
-				},
-				{
-					Name:         "ps",
-					SubGroupSize: ptr.To(int32(2)),
-					NetworkTopology: &scheduling.NetworkTopologySpec{
-						Mode:               scheduling.HardNetworkTopologyMode,
-						HighestTierAllowed: ptr.To(1),
-					},
-				},
-			},
-			wantSubGroupPolicyModes:  []scheduling.NetworkTopologyMode{scheduling.HardNetworkTopologyMode, scheduling.HardNetworkTopologyMode},
-			wantSubGroupPolicyTiers:  []*int{ptr.To(maxTier), ptr.To(1)},
-			wantContainsHardTopology: true,
-		},
-		{
-			name: "subGroupPolicy with nil NetworkTopology is unchanged",
-			subGroupPolicies: []scheduling.SubGroupPolicySpec{
-				{
-					Name:            "worker",
-					SubGroupSize:    ptr.To(int32(4)),
-					NetworkTopology: nil,
-				},
-			},
-			wantContainsHardTopology: false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Build JobInfo with PodGroup
-			job := api.NewJobInfo("test-job")
-			pg := &api.PodGroup{
-				PodGroup: scheduling.PodGroup{
-					Spec: scheduling.PodGroupSpec{
-						MinMember:       4,
-						NetworkTopology: tt.jobNetworkTopology,
-						SubGroupPolicy:  tt.subGroupPolicies,
-					},
-				},
-			}
-			job.SetPodGroup(pg)
-
-			// Create SubJobs based on SubGroupPolicy
-			for _, policy := range tt.subGroupPolicies {
-				policyCopy := policy
-				subJobID := api.SubJobID(fmt.Sprintf("test-job/%s/0", policy.Name))
-				gid := api.SubJobGID(fmt.Sprintf("test-job/%s", policy.Name))
-				job.SubJobs[subJobID] = api.NewSubJobInfo(gid, subJobID, "test-job", &policyCopy, []string{"0"})
-			}
-			// Create default SubJob if no SubGroupPolicy
-			if len(tt.subGroupPolicies) == 0 {
-				defaultSubJobID := job.DefaultSubJobID()
-				defaultPolicy := &scheduling.SubGroupPolicySpec{
-					SubGroupSize: ptr.To(int32(4)),
-				}
-				if tt.jobNetworkTopology != nil {
-					defaultPolicy.NetworkTopology = tt.jobNetworkTopology.DeepCopy()
-				}
-				gid := api.SubJobGID(string(job.UID))
-				job.SubJobs[defaultSubJobID] = api.NewSubJobInfo(gid, defaultSubJobID, job.UID, defaultPolicy, nil)
-			}
-
-			// Call the function under test
-			convertSoftToHardTopology(job, maxTier)
-
-			// Verify job-level NetworkTopology
-			if tt.jobNetworkTopology != nil {
-				assert.NotNil(t, job.NetworkTopology)
-				assert.Equal(t, tt.wantJobMode, job.NetworkTopology.Mode,
-					"job-level mode mismatch")
-				if tt.wantJobTier != nil {
-					assert.NotNil(t, job.NetworkTopology.HighestTierAllowed)
-					assert.Equal(t, *tt.wantJobTier, *job.NetworkTopology.HighestTierAllowed,
-						"job-level tier mismatch")
-				}
-			} else {
-				assert.Nil(t, job.NetworkTopology,
-					"job-level topology should remain nil")
-			}
-
-			// Verify SubJob-level NetworkTopology derived from SubGroupPolicy.
-			for i, policy := range tt.subGroupPolicies {
-				if i < len(tt.wantSubGroupPolicyModes) && policy.NetworkTopology != nil {
-					subJobID := api.SubJobID(fmt.Sprintf("test-job/%s/0", policy.Name))
-					subJob := job.SubJobs[subJobID]
-					assert.NotNil(t, subJob)
-					assert.Equal(t, tt.wantSubGroupPolicyModes[i], subJob.NetworkTopology.Mode,
-						"SubJob derived from SubGroupPolicy[%d] mode mismatch", i)
-					if tt.wantSubGroupPolicyTiers[i] != nil {
-						assert.NotNil(t, subJob.NetworkTopology.HighestTierAllowed)
-						assert.Equal(t, *tt.wantSubGroupPolicyTiers[i], *subJob.NetworkTopology.HighestTierAllowed,
-							"SubJob derived from SubGroupPolicy[%d] tier mismatch", i)
-					}
-				}
-			}
-
-			// Verify ContainsHardTopology
-			assert.Equal(t, tt.wantContainsHardTopology, job.ContainsHardTopology(),
-				"ContainsHardTopology mismatch")
-
-			// Verify SubJob-level topology conversion
-			for _, subJob := range job.SubJobs {
-				if subJob.WithNetworkTopology() {
-					isHard, tier := subJob.IsHardTopologyMode()
-					assert.True(t, isHard,
-						"SubJob %s should be hard mode after conversion", subJob.UID)
-					assert.True(t, tier > 0,
-						"SubJob %s should have a valid tier", subJob.UID)
-					assert.False(t, subJob.IsSoftTopologyMode(),
-						"SubJob %s should not be soft mode after conversion", subJob.UID)
-				}
-			}
-		})
-	}
-}
-
-func TestConvertSoftToHardTopology_NilPodGroup(t *testing.T) {
+func TestAdjustNetworkTopologySpec_NilPodGroup(t *testing.T) {
 	job := api.NewJobInfo("test-job")
-	// PodGroup is nil, should not panic
-	convertSoftToHardTopology(job, 4)
+	ssn := &Session{Jobs: map[api.JobID]*api.JobInfo{job.UID: job}}
+	// A nil PodGroup should not panic.
+	ssn.adjustNetworkTopologySpec()
 	assert.Nil(t, job.PodGroup, "PodGroup should remain nil")
 }
 
-func TestAdjustNetworkTopologySpec_SoftToHardConversion(t *testing.T) {
-	// This test verifies that adjustNetworkTopologySpec performs both tier name translation
-	// and soft→hard conversion in the same place.
+func TestAdjustNetworkTopologySpec_PreservesTopologyMode(t *testing.T) {
+	// Tier-name translation must not alter the declared hard/soft mode.
 	maxTier := 4 // ClusterTopHyperNode tier will be max(existing tiers) + 1 = 3 + 1 = 4
 
 	topHn := &topologyv1alpha1.HyperNode{}
@@ -596,7 +337,7 @@ func TestAdjustNetworkTopologySpec_SoftToHardConversion(t *testing.T) {
 		wantJobTier *int
 	}{
 		{
-			name: "soft topology with tierName: both translated and converted",
+			name: "soft topology with tierName is translated and remains soft",
 			jobs: map[api.JobID]*api.JobInfo{
 				"test-uid": {
 					PodGroup: &api.PodGroup{
@@ -619,12 +360,11 @@ func TestAdjustNetworkTopologySpec_SoftToHardConversion(t *testing.T) {
 			hyperNodes: api.HyperNodeInfoMap{
 				ClusterTopHyperNode: api.NewHyperNodeInfo(topHn),
 			},
-			// tierName is translated first (HighestTierAllowed=2), then soft→hard uses that tier
-			wantJobMode: scheduling.HardNetworkTopologyMode,
-			wantJobTier: ptr.To(maxTier),
+			wantJobMode: scheduling.SoftNetworkTopologyMode,
+			wantJobTier: ptr.To(2),
 		},
 		{
-			name: "pure soft topology without tierName: converted with maxTier",
+			name: "pure soft topology without tierName remains unchanged",
 			jobs: map[api.JobID]*api.JobInfo{
 				"test-uid": {
 					PodGroup: &api.PodGroup{
@@ -643,8 +383,8 @@ func TestAdjustNetworkTopologySpec_SoftToHardConversion(t *testing.T) {
 			hyperNodes: api.HyperNodeInfoMap{
 				ClusterTopHyperNode: api.NewHyperNodeInfo(topHn),
 			},
-			wantJobMode: scheduling.HardNetworkTopologyMode,
-			wantJobTier: ptr.To(maxTier),
+			wantJobMode: scheduling.SoftNetworkTopologyMode,
+			wantJobTier: nil,
 		},
 		{
 			name: "hard topology with tierName: only translated, not re-converted",

@@ -3404,8 +3404,9 @@ func Test_batchNodeOrderFnForNormalPods(t *testing.T) {
 	}
 }
 
-// TestHyperNodeGradientPreFiltering tests the pre-filtering logic in hyperNodeGradientFn.
-// It verifies HyperNodes are correctly filtered for allocation and eviction purposes.
+// TestHyperNodeGradientPreFiltering verifies the purpose-aware resource pre-filtering
+// performed inside hyperNodeGradientFn via isEligibleHyperNode (idle/futureIdle for
+// allocation, allocatable for eviction).
 func TestHyperNodeGradientPreFiltering(t *testing.T) {
 	const (
 		nodeCount       = 1000
@@ -3708,15 +3709,13 @@ func TestHyperNodeGradientPreFiltering(t *testing.T) {
 				HyperNodesTiers:     []int{1, 2},
 			}
 
-			// Initialize hyperNodeResourceCache
-			plugin.initHyperNodeResourceCache(ssn)
-
-			// Override resource status for the first tier-1 HyperNode
+			// Initialize the resource cache, then override the first tier-1 HyperNode's
+			// idle/futureIdle so isEligibleHyperNode pre-filters per test case.
 			testHN := "hn-1-0"
+			plugin.initHyperNodeResourceCache(ssn)
 			plugin.hyperNodeResourceCache[testHN].idle = tt.idleResource
 			plugin.hyperNodeResourceCache[testHN].futureIdle = tt.futureIdleResource
 
-			// Call hyperNodeGradientFn
 			result, err := plugin.hyperNodeGradientFn(
 				ssn,
 				hyperNodesMap[tier2HNName],
@@ -3725,7 +3724,6 @@ func TestHyperNodeGradientPreFiltering(t *testing.T) {
 				tt.minResource,
 				tt.purpose,
 			)
-
 			assert.NoError(t, err)
 
 			// Check if the test HyperNode is in the result
@@ -3885,6 +3883,60 @@ func TestHyperNodeGradientForSubJobFn_NoSubJobPolicyRespectsHardTopology(t *test
 	}
 	plugin.OnSessionOpen(ssn)
 
-	gradients := ssn.HyperNodeGradientForSubJobFn(subJob, ssn.HyperNodes[rootName], api.PurposeEvict)
+	gradients, _ := ssn.HyperNodeGradientForSubJobFn(subJob, ssn.HyperNodes[rootName], api.PurposeEvict)
 	assert.Empty(t, gradients, "hard topology without feasible tier-1 domain should not fallback to root")
+}
+
+func TestSoftNetworkTopologyGradientAbstains(t *testing.T) {
+	plugin := &networkTopologyAwarePlugin{}
+	highestTierAllowed := 2
+	softTopology := &scheduling.NetworkTopologySpec{
+		Mode:               scheduling.SoftNetworkTopologyMode,
+		HighestTierAllowed: &highestTierAllowed,
+	}
+
+	jobResult := plugin.hyperNodeGradientForJob(nil, &api.JobInfo{
+		UID:             "soft-job",
+		NetworkTopology: softTopology.DeepCopy(),
+	}, nil, api.PurposeAllocate)
+	assert.False(t, jobResult.Applied)
+	assert.Nil(t, jobResult.Gradients)
+
+	subJobResult := plugin.hyperNodeGradientForSubJob(nil, &api.SubJobInfo{
+		UID:             "soft-subjob",
+		NetworkTopology: softTopology.DeepCopy(),
+	}, nil, api.PurposeAllocate)
+	assert.False(t, subJobResult.Applied)
+	assert.Nil(t, subJobResult.Gradients)
+}
+
+// setHyperNodeAggregateResources configures per-node idle/futureIdle so their sum matches targets.
+func setHyperNodeAggregateResources(nodes map[string]*api.NodeInfo, nodeNames sets.Set[string], idle, futureIdle *api.Resource) {
+	count := float64(nodeNames.Len())
+	if count == 0 {
+		return
+	}
+
+	perIdleCPU := idle.MilliCPU / count
+	perIdleMem := float64(idle.Memory) / count
+	perFutureCPU := futureIdle.MilliCPU / count
+	perFutureMem := float64(futureIdle.Memory) / count
+
+	for name := range nodeNames {
+		node := nodes[name]
+		node.Idle = &api.Resource{MilliCPU: perIdleCPU, Memory: perIdleMem}
+		node.Releasing = api.EmptyResource()
+		node.Pipelined = api.EmptyResource()
+		if perFutureCPU <= perIdleCPU {
+			node.Pipelined = &api.Resource{
+				MilliCPU: perIdleCPU - perFutureCPU,
+				Memory:   perIdleMem - perFutureMem,
+			}
+		} else {
+			node.Releasing = &api.Resource{
+				MilliCPU: perFutureCPU - perIdleCPU,
+				Memory:   perFutureMem - perIdleMem,
+			}
+		}
+	}
 }

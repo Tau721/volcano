@@ -883,6 +883,54 @@ func TestSchedulerCache_AddHyperNode(t *testing.T) {
 	}
 }
 
+func TestSyncJobAllocatedHyperNodeWidensOnScaleUp(t *testing.T) {
+	exactSelector := "exact"
+	// Topology: root(tier2) over leafA(tier1, node-a) and leafB(tier1, node-b).
+	leafA := schedulingapi.BuildHyperNode("leafA", 1, []schedulingapi.MemberConfig{
+		{"node-a", topologyv1alpha1.MemberTypeNode, exactSelector, nil},
+	})
+	leafB := schedulingapi.BuildHyperNode("leafB", 1, []schedulingapi.MemberConfig{
+		{"node-b", topologyv1alpha1.MemberTypeNode, exactSelector, nil},
+	})
+	root := schedulingapi.BuildHyperNode("root", 2, []schedulingapi.MemberConfig{
+		{"leafA", topologyv1alpha1.MemberTypeHyperNode, exactSelector, nil},
+		{"leafB", topologyv1alpha1.MemberTypeHyperNode, exactSelector, nil},
+	})
+
+	sc := NewDefaultMockSchedulerCache("volcano")
+	for _, hn := range []*topologyv1alpha1.HyperNode{leafA, leafB, root} {
+		assert.NoError(t, sc.updateHyperNode(hn))
+	}
+
+	subJobID := schedulingapi.SubJobID("default")
+	// task1 is the existing pod on leafA; task2 is the scale-up pod that landed on leafB.
+	task1 := &schedulingapi.TaskInfo{UID: "task-1"}
+	task1.Status = schedulingapi.Allocated
+	task1.NodeName = "node-a"
+	task2 := &schedulingapi.TaskInfo{UID: "task-2"}
+	task2.Status = schedulingapi.Allocated
+	task2.NodeName = "node-b"
+
+	job := &schedulingapi.JobInfo{
+		UID:                schedulingapi.JobID("job-1"),
+		AllocatedHyperNode: "leafA", // stale value recorded before scale-up
+		SubJobs: map[schedulingapi.SubJobID]*schedulingapi.SubJobInfo{
+			subJobID: {
+				UID:                subJobID,
+				AllocatedHyperNode: "leafA",
+				TaskStatusIndex: map[schedulingapi.TaskStatus]schedulingapi.TasksMap{
+					schedulingapi.Allocated: {task1.UID: task1, task2.UID: task2},
+				},
+			},
+		},
+	}
+
+	sc.syncJobAllocatedHyperNode(job)
+
+	assert.Equal(t, "root", job.AllocatedHyperNode, "job AllocatedHyperNode should widen to common ancestor")
+	assert.Equal(t, "root", job.SubJobs[subJobID].AllocatedHyperNode, "subJob AllocatedHyperNode should widen to common ancestor")
+}
+
 func TestSchedulerCache_Delete_Then_AddBack(t *testing.T) {
 	exactSelector := "exact"
 

@@ -980,10 +980,23 @@ func (sc *SchedulerCache) Evict(taskInfo *schedulingapi.TaskInfo, reason string)
 		return err
 	}
 
-	job.UpdateTaskStatus(task, schedulingapi.Releasing)
+	originalStatus := task.Status
+	if err := job.UpdateTaskStatus(task, schedulingapi.Releasing); err != nil {
+		return err
+	}
 
 	// Add new task to node.
-	node.UpdateTask(task)
+	if err := node.UpdateTask(task); err != nil {
+		// After failing to update task to a node we need to revert task status from Releasing,
+		// otherwise task might be stuck in the Releasing state indefinitely.
+		if err := job.UpdateTaskStatus(task, originalStatus); err != nil {
+			klog.Errorf("Task <%s/%s> will be resynchronized after failing to revert status "+
+				"from %s to %s after failing to update Task on Node <%s>: %v",
+				task.Namespace, task.Name, task.Status, originalStatus, node.Name, err)
+			sc.resyncTask(task)
+		}
+		return err
+	}
 
 	p := task.Pod
 
@@ -1599,7 +1612,7 @@ func (sc *SchedulerCache) Snapshot() *schedulingapi.ClusterInfo {
 	klog.V(3).InfoS("SnapShot for scheduling", "jobNum", len(snapshot.Jobs), "QueueNum",
 		len(snapshot.Queues), "NodeNum", len(snapshot.Nodes))
 	if klog.V(4).Enabled() {
-		klog.InfoS("HyperNode snapShot for scheduling", "tiers", snapshot.HyperNodesSetByTier, "realNodesSet", snapshot.RealNodesSet, "hyperNodesReadyToSchedule", snapshot.HyperNodesReadyToSchedule)
+		klog.Infof("HyperNode snapShot for scheduling, tiers=%v, realNodesSet=%v, hyperNodesReadyToSchedule=%t", snapshot.HyperNodesSetByTier, snapshot.RealNodesSet, snapshot.HyperNodesReadyToSchedule)
 	}
 	return snapshot
 }

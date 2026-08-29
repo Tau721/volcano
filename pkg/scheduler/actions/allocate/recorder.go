@@ -26,7 +26,8 @@ type Recorder struct {
 	jobDecisions    map[api.JobID]string
 	subJobDecisions map[api.JobID]map[string]map[api.SubJobID]string
 
-	subJobStatusSnapshot map[api.JobID]map[api.SubJobID]*SubJobStatus
+	jobAllocatedHyperNodeSnapshot map[api.JobID]string
+	subJobStatusSnapshot          map[api.JobID]map[api.SubJobID]*SubJobStatus
 }
 
 type SubJobStatus struct {
@@ -35,9 +36,10 @@ type SubJobStatus struct {
 
 func NewRecorder() *Recorder {
 	return &Recorder{
-		jobDecisions:         make(map[api.JobID]string),
-		subJobDecisions:      make(map[api.JobID]map[string]map[api.SubJobID]string),
-		subJobStatusSnapshot: make(map[api.JobID]map[api.SubJobID]*SubJobStatus),
+		jobDecisions:                  make(map[api.JobID]string),
+		subJobDecisions:               make(map[api.JobID]map[string]map[api.SubJobID]string),
+		jobAllocatedHyperNodeSnapshot: make(map[api.JobID]string),
+		subJobStatusSnapshot:          make(map[api.JobID]map[api.SubJobID]*SubJobStatus),
 	}
 }
 
@@ -63,8 +65,8 @@ func (d *Recorder) UpdateDecisionToJob(job *api.JobInfo, hyperNodes api.HyperNod
 
 	jobAllocatedHyperNode := hyperNodes.GetLCAHyperNode(job.AllocatedHyperNode, hyperNodeForJob)
 	if job.AllocatedHyperNode != jobAllocatedHyperNode {
-		klog.V(3).InfoS("update allocated hyperNode for job", "job", job.UID,
-			"old", job.AllocatedHyperNode, "new", jobAllocatedHyperNode)
+		klog.V(3).Infof("update allocated hyperNode for job, job=%s, old=%s, new=%s",
+			job.UID, job.AllocatedHyperNode, jobAllocatedHyperNode)
 		job.AllocatedHyperNode = jobAllocatedHyperNode
 	}
 
@@ -76,8 +78,8 @@ func (d *Recorder) UpdateDecisionToJob(job *api.JobInfo, hyperNodes api.HyperNod
 		}
 		allocatedHyperNode := hyperNodes.GetLCAHyperNode(subJob.AllocatedHyperNode, hyperNode)
 		if subJob.AllocatedHyperNode != allocatedHyperNode {
-			klog.V(3).InfoS("update allocated hyperNode for subJob", "subJob", subJob.UID,
-				"old", subJob.AllocatedHyperNode, "new", allocatedHyperNode)
+			klog.V(3).Infof("update allocated hyperNode for subJob, subJob=%s, old=%s, new=%s",
+				subJob.UID, subJob.AllocatedHyperNode, allocatedHyperNode)
 			subJob.AllocatedHyperNode = allocatedHyperNode
 		}
 		// The nomination's promise has been redeemed by this commit.
@@ -98,10 +100,13 @@ func (d *Recorder) SnapshotSubJobStatus(job *api.JobInfo, worksheet *JobWorkshee
 			result[subJobID] = &SubJobStatus{AllocatedHyperNode: subJob.AllocatedHyperNode}
 		}
 	}
+	d.jobAllocatedHyperNodeSnapshot[job.UID] = job.AllocatedHyperNode
 	d.subJobStatusSnapshot[job.UID] = result
 }
 
 func (d *Recorder) RecoverSubJobStatus(job *api.JobInfo) {
+	d.recoverJobAllocatedHyperNode(job)
+
 	snapshot, ok := d.subJobStatusSnapshot[job.UID]
 	if !ok {
 		return
@@ -110,5 +115,11 @@ func (d *Recorder) RecoverSubJobStatus(job *api.JobInfo) {
 		if subJob, found := job.SubJobs[subJobID]; found {
 			subJob.AllocatedHyperNode = status.AllocatedHyperNode
 		}
+	}
+}
+
+func (d *Recorder) recoverJobAllocatedHyperNode(job *api.JobInfo) {
+	if hyperNode, ok := d.jobAllocatedHyperNodeSnapshot[job.UID]; ok {
+		job.AllocatedHyperNode = hyperNode
 	}
 }

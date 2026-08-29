@@ -260,7 +260,7 @@ func openSession(cache cache.Cache) *Session {
 
 	if klog.V(5).Enabled() {
 		for _, hn := range ssn.HyperNodes {
-			klog.InfoS("hyperNode in session", "name", hn.Name, "tier", hn.Tier(), "parent", hn.Parent, "children", hn.Children)
+			klog.Infof("hyperNode in session, name=%s, tier=%d, parent=%s, children=%v", hn.Name, hn.Tier(), hn.Parent, hn.Children)
 		}
 	}
 
@@ -331,7 +331,7 @@ func (ssn *Session) removeInvalidAllocatedHyperNode(job *api.JobInfo, hyperNodes
 		if remove {
 			job.AllocatedHyperNode = ""
 			ssn.MarkJobDirty(job.UID)
-			klog.V(3).InfoS("remove allocated hyperNode for job", "job", job.UID, "AllocatedHyperNode", job.AllocatedHyperNode, "reason", reason)
+			klog.V(3).Infof("remove allocated hyperNode for job, job=%s, AllocatedHyperNode=%s, reason=%s", job.UID, job.AllocatedHyperNode, reason)
 		}
 	}
 
@@ -351,7 +351,7 @@ func (ssn *Session) removeInvalidAllocatedHyperNode(job *api.JobInfo, hyperNodes
 			if remove {
 				subJob.AllocatedHyperNode = ""
 				ssn.MarkJobDirty(subJob.Job)
-				klog.V(3).InfoS("remove allocated hyperNode for subJob", "subJob", subJob.UID, "AllocatedHyperNode", subJob.AllocatedHyperNode, "reason", reason)
+				klog.V(3).Infof("remove allocated hyperNode for subJob, subJob=%s, AllocatedHyperNode=%s, reason=%s", subJob.UID, subJob.AllocatedHyperNode, reason)
 			}
 		}
 	}
@@ -361,111 +361,33 @@ func (ssn *Session) removeInvalidAllocatedHyperNode(job *api.JobInfo, hyperNodes
 // When the scheduler reboot, the allocated hyperNode of job will be lost.
 // We recover this information through the nodes that tasks are running on.
 func (ssn *Session) recoverAllocatedHyperNode(job *api.JobInfo, hyperNodeSet sets.Set[string], hyperNodes api.HyperNodeInfoMap, nodesByHyperNode map[string]sets.Set[string]) {
-	if !job.ContainsNetworkTopology() {
-		return
-	}
-
 	subJobUpdated := false
 
-	// update subJob AllocatedHyperNode based on allocated nodes
 	for _, subJob := range job.SubJobs {
-		if !subJob.WithNetworkTopology() || subJob.AllocatedHyperNode != "" {
+		if subJob.AllocatedHyperNode != "" {
 			continue
 		}
-
-		// pick up allocated tasks in the subJob
-		allocatedTasks := make([]*api.TaskInfo, 0, subJob.AllocatedTaskNum())
-		for status, tasks := range subJob.TaskStatusIndex {
-			if !api.AllocatedStatus(status) {
-				continue
-			}
-			for _, task := range tasks {
-				allocatedTasks = append(allocatedTasks, task)
-			}
+		if subJob.AllocatedTaskNum() == 0 {
+			continue
 		}
-
-		// find the allocated hyperNode through the nodes that tasks are running on
-		var subJobAllocatedHyperNode sets.Set[string]
-		for _, task := range allocatedTasks {
-			if task.NodeName == "" {
-				klog.Warningf("task %s/%s in allocated status %s with empty nodeName", task.Namespace, task.Name, task.Status)
-				continue
-			}
-
-			// For the first task, we search among all the hyperNodes.
-			// For the other tasks, we search from the hyperNodes that previous tasks were allocated to.
-			var search sets.Set[string]
-			if subJobAllocatedHyperNode == nil {
-				search = hyperNodeSet
-			} else {
-				search = subJobAllocatedHyperNode
-			}
-
-			taskAllocatedHyperNode := sets.New[string]()
-			for hn := range search {
-				if nodes, found := nodesByHyperNode[hn]; found && nodes.Has(task.NodeName) {
-					taskAllocatedHyperNode.Insert(hn)
-				}
-			}
-			klog.V(4).Infof("find allocated hyperNode %v for task %s/%s by node %s", taskAllocatedHyperNode, task.Namespace, task.Name, task.NodeName)
-
-			subJobAllocatedHyperNode = taskAllocatedHyperNode
-			if subJobAllocatedHyperNode.Len() == 0 {
-				klog.Errorf("failed to find allocated hyperNode for subJob %s by allocated nodes", subJob.UID)
-				break
-			}
+		minimumHyperNode := api.ComputeSubJobAllocatedHyperNode(subJob, hyperNodes, nodesByHyperNode)
+		if minimumHyperNode == "" {
+			continue
 		}
-		minimumHyperNode := getLowestTierHyperNode(subJobAllocatedHyperNode, hyperNodes)
-
-		if subJob.AllocatedHyperNode != minimumHyperNode {
-			subJobUpdated = true
-			subJob.AllocatedHyperNode = minimumHyperNode
-			ssn.MarkJobDirty(subJob.Job)
-			klog.V(3).InfoS("update subJob allocated hyperNode", "subJob", subJob.UID, "AllocatedHyperNode", minimumHyperNode)
-		}
+		subJobUpdated = true
+		subJob.AllocatedHyperNode = minimumHyperNode
+		ssn.MarkJobDirty(subJob.Job)
+		klog.V(3).Infof("update subJob allocated hyperNode, subJob=%s, AllocatedHyperNode=%s", subJob.UID, minimumHyperNode)
 	}
 
-	// update job AllocatedHyperNode based on subJob allocated hyperNode
 	if job.AllocatedHyperNode == "" || subJobUpdated {
-		var lca string
-		for _, subJob := range job.SubJobs {
-			if subJob.AllocatedHyperNode == "" {
-				continue
-			}
-			lca = hyperNodes.GetLCAHyperNode(lca, subJob.AllocatedHyperNode)
-			if lca == "" {
-				klog.Errorf("failed to find allocated hyperNode for job %s by subJob allocated hyperNodes", job.UID)
-				break
-			}
-		}
-		if job.AllocatedHyperNode != lca {
-			job.AllocatedHyperNode = lca
+		jobHyperNode := api.ComputeJobAllocatedHyperNode(job, hyperNodes, nodesByHyperNode)
+		if jobHyperNode != "" && job.AllocatedHyperNode != jobHyperNode {
+			job.AllocatedHyperNode = jobHyperNode
 			ssn.MarkJobDirty(job.UID)
-			klog.V(3).InfoS("update job allocated hyperNode", "job", job.UID, "AllocatedHyperNode", lca)
+			klog.V(3).Infof("update job allocated hyperNode, job=%s, AllocatedHyperNode=%s", job.UID, jobHyperNode)
 		}
 	}
-}
-
-func getLowestTierHyperNode(hyperNodes sets.Set[string], hyperNodeInfos api.HyperNodeInfoMap) string {
-	if hyperNodes == nil || hyperNodes.Len() == 0 {
-		return ""
-	}
-
-	var lowestTierHyperNode *api.HyperNodeInfo
-	for name := range hyperNodes {
-		if hn, found := hyperNodeInfos[name]; found {
-			if lowestTierHyperNode == nil || hn.Tier() < lowestTierHyperNode.Tier() {
-				lowestTierHyperNode = hn
-			}
-		}
-	}
-
-	if lowestTierHyperNode == nil {
-		klog.Warningf("No valid hypernodes found in hyperNodeInfos for the given set: %v", hyperNodes.UnsortedList())
-		return ""
-	}
-
-	return lowestTierHyperNode.Name
 }
 
 func (ssn *Session) parseHyperNodesTiers() {
@@ -984,7 +906,7 @@ func (ssn *Session) InformerFactory() informers.SharedInformerFactory {
 
 // RecordPodGroupEvent records podGroup events
 func (ssn *Session) RecordPodGroupEvent(podGroup *api.PodGroup, eventType, reason, msg string) {
-	if podGroup == nil {
+	if podGroup == nil || ssn.recorder == nil {
 		return
 	}
 
@@ -1037,9 +959,9 @@ func (ssn *Session) IsJobTerminated(jobId api.JobID) bool {
 	return ssn.cache.IsJobTerminated(jobId)
 }
 
-// adjustNetworkTopologySpec translates highestTierName in scheduler-internal network topology copies into highestTierAllowed,
-// and converts soft topology mode to hard mode with ClusterTopHyperNode tier as maxTier.
-// As a result, once adjustNetworkTopologySpec is invoked, it is no need to consider highestTierName or soft mode anymore.
+// adjustNetworkTopologySpec translates highestTierName in scheduler-internal
+// network topology copies into highestTierAllowed while preserving the
+// user-configured hard or soft mode.
 func (ssn *Session) adjustNetworkTopologySpec() {
 	klog.V(3).Infof("Start adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
 	defer klog.V(3).Infof("Finish adjusting jobs' network topology spec according to hyperNodeTierNameMap %v", ssn.HyperNodeTierNameMap)
@@ -1069,59 +991,6 @@ func (ssn *Session) adjustNetworkTopologySpec() {
 					subJob.UID, job.Namespace, job.Name, *subJob.NetworkTopology.HighestTierAllowed)
 			}
 		}
-	}
-
-	// Convert soft topology to hard topology with ClusterTopHyperNode tier as maxTier,
-	// so that soft-mode jobs reuse the hard-mode scheduling path without any HyperNode filtering.
-	clusterTopHyperNode, exists := ssn.HyperNodes[ClusterTopHyperNode]
-	if !exists {
-		return
-	}
-	maxTier := clusterTopHyperNode.Tier()
-	for _, job := range ssn.Jobs {
-		if !job.ContainsNetworkTopology() {
-			continue
-		}
-		convertSoftToHardTopology(job, maxTier)
-	}
-}
-
-// convertSoftToHardTopology converts all soft network topology constraints in the job to hard mode.
-// Conversion strategy:
-//   - Job-level soft: converted with maxTier (ClusterTopHyperNode tier), achieving no HyperNode
-//     filtering (full soft affinity across the cluster).
-//   - SubJob-level soft: converted with the effective job-level tier (subJobMaxTier).
-//     If the job has a hard tier limit (either user-specified or from the job-level conversion above),
-//     subgroup soft affinity is bounded by that limit. This properly handles the mixed-mode scenario
-//     where job is hard but subgroup is soft: the subgroup prefers lower tiers but never exceeds
-//     the job's hard tier constraint.
-func convertSoftToHardTopology(job *api.JobInfo, maxTier int) {
-	if job.PodGroup == nil {
-		return
-	}
-
-	// Convert job-level soft topology to hard mode with maxTier.
-	if job.NetworkTopology != nil &&
-		job.NetworkTopology.Mode == scheduling.SoftNetworkTopologyMode {
-		klog.V(3).InfoS("Converting job-level soft topology to hard mode",
-			"job", job.UID, "maxTier", maxTier)
-		job.NetworkTopology.Mode = scheduling.HardNetworkTopologyMode
-		job.NetworkTopology.HighestTierAllowed = &maxTier
-		job.NetworkTopology.HighestTierName = ""
-	}
-
-	// Determine the effective maxTier for SubJob conversion.
-	// If the job has an effective tier limit (from hard mode or job-level soft→hard conversion above),
-	// subgroup soft affinity must be bounded by it. Otherwise, fall back to the cluster-wide maxTier.
-	subJobMaxTier := maxTier
-	if job.NetworkTopology != nil &&
-		job.NetworkTopology.HighestTierAllowed != nil {
-		subJobMaxTier = *job.NetworkTopology.HighestTierAllowed
-	}
-
-	// Convert SubJob-level topology (SubJobInfo has its own deep-copied networkTopology).
-	for _, subJob := range job.SubJobs {
-		subJob.ConvertToHardTopology(subJobMaxTier)
 	}
 }
 

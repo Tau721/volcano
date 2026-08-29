@@ -929,3 +929,65 @@ func TestGetMembers(t *testing.T) {
 		})
 	}
 }
+
+func TestGetAncestorHyperNode(t *testing.T) {
+	hn := HyperNodeInfoMap{
+		"root":  newTestHyperNodeWithParent("root", 3, "cluster", ""),
+		"sn-a":  newTestHyperNodeWithParent("sn-a", 2, "supernode", "root"),
+		"cab-a": newTestHyperNodeWithParent("cab-a", 1, "rack", "sn-a"),
+	}
+
+	if got := hn.GetAncestorHyperNode("cab-a", 2); got != "sn-a" {
+		t.Fatalf("expected sn-a, got %s", got)
+	}
+	if got := hn.GetAncestorHyperNodeByTierName("cab-a", "rack"); got != "cab-a" {
+		t.Fatalf("expected cab-a, got %s", got)
+	}
+}
+
+func TestResolveHyperNodesAtTier(t *testing.T) {
+	hn := HyperNodeInfoMap{
+		"root":  newTestHyperNodeWithParent("root", 3, "cluster", ""),
+		"sn-a":  newTestHyperNodeWithParent("sn-a", 2, "supernode", "root"),
+		"sn-b":  newTestHyperNodeWithParent("sn-b", 2, "supernode", "root"),
+		"cab-a": newTestHyperNodeWithParent("cab-a", 1, "rack", "sn-a"),
+		"cab-b": newTestHyperNodeWithParent("cab-b", 1, "rack", "sn-a"),
+		"cab-c": newTestHyperNodeWithParent("cab-c", 1, "rack", "sn-b"),
+	}
+
+	tests := []struct {
+		name      string
+		hyperNode string
+		tier      int
+		want      []string
+	}{
+		{name: "finer placement resolves ancestor at coarser tier", hyperNode: "cab-a", tier: 2, want: []string{"sn-a"}},
+		{name: "same tier returns self", hyperNode: "cab-a", tier: 1, want: []string{"cab-a"}},
+		{name: "coarser placement expands to descendants at finer tier", hyperNode: "sn-a", tier: 1, want: []string{"cab-a", "cab-b"}},
+		{name: "coarser placement ignores siblings", hyperNode: "sn-a", tier: 2, want: []string{"sn-a"}},
+		{name: "unknown hyperNode", hyperNode: "missing", tier: 1, want: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := hn.ResolveHyperNodesAtTier(tt.hyperNode, tt.tier)
+			if len(got) != len(tt.want) {
+				t.Fatalf("ResolveHyperNodesAtTier() = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("ResolveHyperNodesAtTier() = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func newTestHyperNodeWithParent(name string, tier int, tierName, parent string) *HyperNodeInfo {
+	return &HyperNodeInfo{
+		Name:     name,
+		tier:     tier,
+		tierName: tierName,
+		Parent:   parent,
+		Children: sets.New[string](),
+	}
+}

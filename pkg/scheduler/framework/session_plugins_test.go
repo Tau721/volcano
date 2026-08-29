@@ -22,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
+	topologyv1alpha1 "volcano.sh/apis/pkg/apis/topology/v1alpha1"
 
 	schedulingv1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -275,8 +277,13 @@ func TestUnifiedEvictable_ContextPassedThrough(t *testing.T) {
 	assert.Equal(t, "hn1", receivedCtx.HyperNode)
 }
 
-func TestHyperNodeGradientForJobFn_ForwardsPurposeAndKeepsWinnerTakesAll(t *testing.T) {
+func TestHyperNodeGradientForJobFn_ForwardsPurposeAndIntersectsGradients(t *testing.T) {
 	enabled := true
+	root := &api.HyperNodeInfo{Name: "root"}
+	hn1 := &api.HyperNodeInfo{Name: "hn1"}
+	hn2 := &api.HyperNodeInfo{Name: "hn2"}
+	root.Children = sets.New[string](hn1.Name, hn2.Name)
+
 	ssn := &Session{
 		Tiers: []conf.Tier{
 			{
@@ -286,23 +293,24 @@ func TestHyperNodeGradientForJobFn_ForwardsPurposeAndKeepsWinnerTakesAll(t *test
 				},
 			},
 		},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name: root,
+			hn1.Name:  hn1,
+			hn2.Name:  hn2,
+		},
 		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
 	}
 
-	root := &api.HyperNodeInfo{Name: "root"}
-	hn1 := &api.HyperNodeInfo{Name: "hn1"}
-	hn2 := &api.HyperNodeInfo{Name: "hn2"}
-
 	var gotPurpose api.SearchPurpose
-	ssn.AddHyperNodeGradientForJobFn("p1", func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
+	ssn.AddHyperNodeGradientForJobFn("p1", func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) api.HyperNodeGradientResult {
 		gotPurpose = purpose
-		return [][]*api.HyperNodeInfo{{hn1}}
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{hn1}})
 	})
-	ssn.AddHyperNodeGradientForJobFn("p2", func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) [][]*api.HyperNodeInfo {
-		return [][]*api.HyperNodeInfo{{hn2}}
+	ssn.AddHyperNodeGradientForJobFn("p2", func(job *api.JobInfo, hyperNode *api.HyperNodeInfo, purpose api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{hn1, hn2}})
 	})
 
-	result := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeEvict)
+	result, _ := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeEvict)
 	assert.Equal(t, api.PurposeEvict, gotPurpose)
 	assert.Equal(t, [][]*api.HyperNodeInfo{{hn1}}, result)
 }
@@ -312,6 +320,364 @@ func TestHyperNodeGradientForJobFn_NoPluginKeepsCurrentFallback(t *testing.T) {
 		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
 	}
 	root := &api.HyperNodeInfo{Name: "root"}
-	result := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeEvict)
+	result, _ := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeEvict)
 	assert.Equal(t, [][]*api.HyperNodeInfo{{root}}, result)
+}
+
+func testHyperNodeInfo(name string, tier int) *api.HyperNodeInfo {
+	return api.NewHyperNodeInfo(api.BuildHyperNode(name, tier, nil))
+}
+
+func gradientByPluginOnly(gradients ...[][]*api.HyperNodeInfo) []api.HyperNodePluginGradient {
+	gradientByPlugin := make([]api.HyperNodePluginGradient, len(gradients))
+	for index, g := range gradients {
+		gradientByPlugin[index] = api.HyperNodePluginGradient{Applied: true, Gradients: g}
+	}
+	return gradientByPlugin
+}
+
+func TestIntersectHyperNodeGradients(t *testing.T) {
+	pluginA := [][]*api.HyperNodeInfo{
+		{testHyperNodeInfo("a1", 1), testHyperNodeInfo("a2", 1)},
+		{testHyperNodeInfo("a3", 2)},
+	}
+	pluginB := [][]*api.HyperNodeInfo{
+		{testHyperNodeInfo("a2", 1), testHyperNodeInfo("b1", 1)},
+		{testHyperNodeInfo("a3", 2), testHyperNodeInfo("b2", 2)},
+	}
+
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "plugin-a", Applied: true, Gradients: pluginA},
+		{PluginName: "plugin-b", Applied: true, Gradients: pluginB},
+	})
+	assert.Len(t, result, 2)
+	assert.Equal(t, []string{"a2"}, hyperNodeNamesAtTier(result, 0))
+	assert.Equal(t, []string{"a3"}, hyperNodeNamesAtTier(result, 1))
+	assert.Equal(t, map[int]int{1: 2, 2: 1}, stats.PluginEligibleByTier["plugin-a"])
+	assert.Equal(t, map[int]int{1: 2, 2: 2}, stats.PluginEligibleByTier["plugin-b"])
+	assert.Equal(t, map[int]int{1: 1, 2: 1}, stats.IntersectedByTier)
+	assert.Equal(t, map[string]string{
+		"a1": "plugin-b",
+		"b1": "plugin-a",
+		"b2": "plugin-a",
+	}, stats.ExcludedByReason)
+
+	empty, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "only-a", Applied: true, Gradients: [][]*api.HyperNodeInfo{{testHyperNodeInfo("only-a", 1)}}},
+		{PluginName: "only-b", Applied: true, Gradients: [][]*api.HyperNodeInfo{{testHyperNodeInfo("only-b", 1)}}},
+	})
+	assert.Nil(t, empty)
+	assert.Equal(t, map[int]int{1: 1}, stats.PluginEligibleByTier["only-a"])
+	assert.Equal(t, map[int]int{1: 1}, stats.PluginEligibleByTier["only-b"])
+	assert.Empty(t, stats.IntersectedByTier)
+	assert.Equal(t, map[string]string{
+		"only-a": "only-b",
+		"only-b": "only-a",
+	}, stats.ExcludedByReason)
+}
+
+func TestIntersectHyperNodeGradientsPreservesFirstApplicableHardOrder(t *testing.T) {
+	tier1A := testHyperNodeInfo("tier1-a", 1)
+	tier1B := testHyperNodeInfo("tier1-b", 1)
+	tier2 := testHyperNodeInfo("tier2", 2)
+	normalOrder := [][]*api.HyperNodeInfo{
+		{tier1A, tier1B},
+		{tier2},
+	}
+	preferredOrder := [][]*api.HyperNodeInfo{
+		{tier2},
+		{tier1A, tier1B},
+	}
+
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "soft", Applied: false, Gradients: normalOrder},
+		{PluginName: "hard", Applied: true, Gradients: preferredOrder},
+	})
+	assert.Equal(t, []string{"tier2"}, hyperNodeNamesAtTier(result, 0))
+	assert.Equal(t, []string{"tier1-a", "tier1-b"}, hyperNodeNamesAtTier(result, 1))
+	assert.Equal(t, map[int]int{1: 2, 2: 1}, stats.IntersectedByTier)
+
+	// A hard plugin may remove the preferred container. The retained fine-tier
+	// candidate must remain available as soft fallback.
+	result, stats = intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "ordered-hard", Applied: true, Gradients: preferredOrder},
+		{PluginName: "narrow-hard", Applied: true, Gradients: [][]*api.HyperNodeInfo{{tier1B}}},
+	})
+	assert.Equal(t, [][]*api.HyperNodeInfo{{tier1B}}, result)
+	assert.Equal(t, map[int]int{1: 1}, stats.IntersectedByTier)
+}
+
+func TestIntersectHyperNodeGradientsSinglePlugin(t *testing.T) {
+	gradients := [][]*api.HyperNodeInfo{{testHyperNodeInfo("x", 1)}}
+	result, stats := intersectHyperNodeGradients(gradientByPluginOnly(gradients))
+	assert.Equal(t, gradients, result)
+	assert.Equal(t, map[int]int{1: 1}, stats.IntersectedByTier)
+
+	empty := [][]*api.HyperNodeInfo{}
+	result, stats = intersectHyperNodeGradients(gradientByPluginOnly(empty))
+	assert.Empty(t, result)
+	assert.Empty(t, stats.IntersectedByTier)
+}
+
+func TestIntersectHyperNodeGradientsWithEmptyPluginResult(t *testing.T) {
+	full := [][]*api.HyperNodeInfo{{testHyperNodeInfo("a", 1)}}
+	empty := [][]*api.HyperNodeInfo{}
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "full", Applied: true, Gradients: full},
+		{PluginName: "empty", Applied: true, Gradients: empty},
+	})
+	assert.Nil(t, result)
+	assert.Equal(t, map[int]int{1: 1}, stats.PluginEligibleByTier["full"])
+	assert.Empty(t, stats.PluginEligibleByTier["empty"])
+	assert.Empty(t, stats.IntersectedByTier)
+	assert.Equal(t, map[string]string{"a": "empty"}, stats.ExcludedByReason)
+}
+
+func TestIntersectHyperNodeGradientsFullCandidatePlugin(t *testing.T) {
+	a := testHyperNodeInfo("a", 1)
+	b := testHyperNodeInfo("b", 2)
+	fullCandidates := [][]*api.HyperNodeInfo{{a}, {b}}
+
+	result, stats := intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "full-candidate", Applied: true, Gradients: fullCandidates},
+		{PluginName: "constraint", Applied: true, Gradients: [][]*api.HyperNodeInfo{{b}}},
+	})
+	assert.Equal(t, []string{"b"}, hyperNodeNamesAtTier(result, 0))
+	assert.Equal(t, map[int]int{1: 1, 2: 1}, stats.PluginEligibleByTier["full-candidate"])
+	assert.Equal(t, map[int]int{2: 1}, stats.PluginEligibleByTier["constraint"])
+
+	result, stats = intersectHyperNodeGradients([]api.HyperNodePluginGradient{
+		{PluginName: "full-candidate-a", Applied: true, Gradients: fullCandidates},
+		{PluginName: "full-candidate-b", Applied: true, Gradients: fullCandidates},
+	})
+	assert.Equal(t, fullCandidates, result)
+	assert.Equal(t, map[int]int{1: 1, 2: 1}, stats.IntersectedByTier)
+}
+
+func TestHyperNodeGradientForJobFnEmptyGradient(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	job := &api.JobInfo{UID: "job-1"}
+
+	ssn := &Session{
+		Tiers: []conf.Tier{
+			{Plugins: []conf.PluginOption{{Name: "test-plugin", EnabledHyperNodeGradient: &enabled}}},
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("test-plugin", func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{})
+	})
+
+	result, stats := ssn.HyperNodeGradientForJobFn(job, root, api.PurposeAllocate)
+	assert.Empty(t, result)
+	assert.Empty(t, stats.IntersectedByTier)
+}
+
+func TestHyperNodeGradientAbstentionUsesDeterministicCandidateUniverse(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	pair := testHyperNodeInfo("pair", 2)
+	leafA := testHyperNodeInfo("leaf-a", 1)
+	leafB := testHyperNodeInfo("leaf-b", 1)
+	root.Children.Insert(pair.Name)
+	pair.Children.Insert(leafB.Name, leafA.Name)
+
+	ssn := &Session{
+		Tiers: []conf.Tier{{Plugins: []conf.PluginOption{
+			{Name: "soft", EnabledHyperNodeGradient: &enabled},
+		}}},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name:  root,
+			pair.Name:  pair,
+			leafA.Name: leafA,
+			leafB.Name: leafB,
+		},
+		hyperNodeGradientForJobFns:    map[string]api.HyperNodeGradientForJobFn{},
+		hyperNodeGradientForSubJobFns: map[string]api.HyperNodeGradientForSubJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("soft", func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientAbstain()
+	})
+	ssn.AddHyperNodeGradientForSubJobFn("soft", func(_ *api.SubJobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientAbstain()
+	})
+
+	want := [][]*api.HyperNodeInfo{{leafA, leafB}, {pair}, {root}}
+	jobResult, jobStats := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeAllocate)
+	subJobResult, subJobStats := ssn.HyperNodeGradientForSubJobFn(&api.SubJobInfo{}, root, api.PurposeAllocate)
+
+	assert.Equal(t, want, jobResult)
+	assert.Equal(t, want, subJobResult)
+	assert.Equal(t, map[int]int{1: 2, 2: 1, 3: 1}, jobStats.IntersectedByTier)
+	assert.Equal(t, map[int]int{1: 2, 2: 1, 3: 1}, subJobStats.IntersectedByTier)
+}
+
+func TestHyperNodeGradientPreferredOrderAfterHardIntersection(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	pairAB := testHyperNodeInfo("pair-ab", 2)
+	pairCD := testHyperNodeInfo("pair-cd", 2)
+	leafA := testHyperNodeInfo("leaf-a", 1)
+	leafB := testHyperNodeInfo("leaf-b", 1)
+	leafC := testHyperNodeInfo("leaf-c", 1)
+	leafD := testHyperNodeInfo("leaf-d", 1)
+	root.Children.Insert(pairAB.Name, pairCD.Name)
+	pairAB.Children.Insert(leafA.Name, leafB.Name)
+	pairCD.Children.Insert(leafC.Name, leafD.Name)
+
+	ssn := &Session{
+		Tiers: []conf.Tier{{Plugins: []conf.PluginOption{
+			{Name: "hard", EnabledHyperNodeGradient: &enabled},
+			{Name: "soft-order", EnabledHyperNodeGradient: &enabled},
+		}}},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name: root, pairAB.Name: pairAB, pairCD.Name: pairCD,
+			leafA.Name: leafA, leafB.Name: leafB, leafC.Name: leafC, leafD.Name: leafD,
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("hard", func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientConstrain([][]*api.HyperNodeInfo{{leafC, leafD}, {pairCD}})
+	})
+	ssn.AddHyperNodeGradientForJobFn("soft-order", func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		return api.HyperNodeGradientPrefer([][]*api.HyperNodeInfo{
+			{pairAB, pairCD}, {root}, {leafA, leafB, leafC, leafD},
+		})
+	})
+
+	result, stats := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeAllocate)
+	assert.Equal(t, [][]*api.HyperNodeInfo{{pairCD}, {leafC, leafD}}, result)
+	assert.Equal(t, map[int]int{1: 2, 2: 1}, stats.PluginEligibleByTier["hard"])
+	_, softRecordedAsHard := stats.PluginEligibleByTier["soft-order"]
+	assert.False(t, softRecordedAsHard)
+	for _, reason := range stats.ExcludedByReason {
+		assert.NotContains(t, reason, "soft-order")
+	}
+}
+
+func TestHyperNodeGradientPreferredOrderKeepsCompleteUniverseFallback(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	pair := testHyperNodeInfo("pair", 2)
+	leafA := testHyperNodeInfo("leaf-a", 1)
+	leafB := testHyperNodeInfo("leaf-b", 1)
+	root.Children.Insert(pair.Name)
+	pair.Children.Insert(leafA.Name, leafB.Name)
+
+	ssn := &Session{
+		Tiers: []conf.Tier{{Plugins: []conf.PluginOption{
+			{Name: "soft-order", EnabledHyperNodeGradient: &enabled},
+		}}},
+		HyperNodes: api.HyperNodeInfoMap{
+			root.Name: root, pair.Name: pair, leafA.Name: leafA, leafB.Name: leafB,
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	ssn.AddHyperNodeGradientForJobFn("soft-order", func(_ *api.JobInfo, _ *api.HyperNodeInfo, _ api.SearchPurpose) api.HyperNodeGradientResult {
+		// Deliberately omit root. It must be appended from the universe as a
+		// fallback instead of being filtered by this soft opinion.
+		return api.HyperNodeGradientPrefer([][]*api.HyperNodeInfo{{pair}, {leafA, leafB}})
+	})
+
+	result, stats := ssn.HyperNodeGradientForJobFn(&api.JobInfo{}, root, api.PurposeAllocate)
+	assert.Equal(t, [][]*api.HyperNodeInfo{{pair}, {leafA, leafB}, {root}}, result)
+	assert.Equal(t, map[int]int{1: 2, 2: 1, 3: 1}, stats.IntersectedByTier)
+}
+
+func TestHyperNodeGradientForJobFnUnregisteredPlugin(t *testing.T) {
+	enabled := true
+	root := testHyperNodeInfo("root", 3)
+	job := &api.JobInfo{UID: "job-1"}
+
+	ssn := &Session{
+		Tiers: []conf.Tier{
+			{Plugins: []conf.PluginOption{{Name: "missing-plugin", EnabledHyperNodeGradient: &enabled}}},
+		},
+		hyperNodeGradientForJobFns: map[string]api.HyperNodeGradientForJobFn{},
+	}
+	result, stats := ssn.HyperNodeGradientForJobFn(job, root, api.PurposeAllocate)
+	assert.Equal(t, [][]*api.HyperNodeInfo{{root}}, result)
+	assert.Nil(t, stats)
+}
+
+func hyperNodeNamesAtTier(gradients [][]*api.HyperNodeInfo, tierIdx int) []string {
+	if tierIdx >= len(gradients) {
+		return nil
+	}
+	names := make([]string, 0, len(gradients[tierIdx]))
+	for _, h := range gradients[tierIdx] {
+		names = append(names, h.Name)
+	}
+	return names
+}
+
+func TestRebuildGradientsByTierPreservesTierOrder(t *testing.T) {
+	members := []api.MemberConfig{{Name: "child", Type: topologyv1alpha1.MemberTypeHyperNode, Selector: "exact"}}
+	parent := api.NewHyperNodeInfo(api.BuildHyperNode("parent", 2, members))
+	child := api.NewHyperNodeInfo(api.BuildHyperNode("child", 1, nil))
+	parent.Children.Insert("child")
+
+	byName := map[string]*api.HyperNodeInfo{"parent": parent, "child": child}
+	eligible := sets.New("parent", "child")
+
+	result := rebuildGradientsByTier(byName, eligible)
+	assert.Len(t, result, 2)
+	assert.Equal(t, 1, result[0][0].Tier())
+	assert.Equal(t, 2, result[1][0].Tier())
+}
+
+// buildBenchmarkPluginGradients builds plugin inputs for intersection benchmarks.
+// Each plugin exposes tier-1 HyperNodes hn-1-0..hn-1-(numTier1-1) plus one tier-2 root.
+// pluginOffset skips the first N tier-1 HyperNodes to simulate partial overlap across plugins.
+func buildBenchmarkGradientByPlugin(numPlugins, numTier1, pluginOffset int) []api.HyperNodePluginGradient {
+	tier1 := make([]*api.HyperNodeInfo, 0, numTier1)
+	for index := 0; index < numTier1; index++ {
+		tier1 = append(tier1, testHyperNodeInfo(fmt.Sprintf("hn-1-%d", index), 1))
+	}
+	tier2 := testHyperNodeInfo("hn-2-0", 2)
+
+	gradientByPlugin := make([]api.HyperNodePluginGradient, 0, numPlugins)
+	for pluginIndex := 0; pluginIndex < numPlugins; pluginIndex++ {
+		offset := pluginIndex * pluginOffset
+		pluginTier1 := tier1
+		if offset > 0 && offset < len(tier1) {
+			pluginTier1 = tier1[offset:]
+		}
+		gradientByPlugin = append(gradientByPlugin, api.HyperNodePluginGradient{
+			PluginName: fmt.Sprintf("plugin-%d", pluginIndex),
+			Applied:    true,
+			Gradients:  [][]*api.HyperNodeInfo{pluginTier1, {tier2}},
+		})
+	}
+	return gradientByPlugin
+}
+
+func BenchmarkIntersectHyperNodeGradients(b *testing.B) {
+	// Typical production shape: 2 plugins, 100 tier-1 HyperNodes, partial overlap.
+	gradientByPlugin := buildBenchmarkGradientByPlugin(2, 100, 10)
+
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		intersectHyperNodeGradients(gradientByPlugin)
+	}
+}
+
+func BenchmarkIntersectHyperNodeGradients_ManyPlugins(b *testing.B) {
+	gradientByPlugin := buildBenchmarkGradientByPlugin(5, 100, 5)
+
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		intersectHyperNodeGradients(gradientByPlugin)
+	}
+}
+
+func BenchmarkIntersectHyperNodeGradients_LargeCluster(b *testing.B) {
+	// 1000 tier-1 HyperNodes to stress nested loops in phase 2.
+	gradientByPlugin := buildBenchmarkGradientByPlugin(2, 1000, 50)
+
+	b.ResetTimer()
+	for index := 0; index < b.N; index++ {
+		intersectHyperNodeGradients(gradientByPlugin)
+	}
 }
