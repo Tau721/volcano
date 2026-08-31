@@ -40,6 +40,12 @@ type RepackRunSpecApplyConfiguration struct {
 	// Goals is the per-resource fragmentation target: exactly one entry
 	// (a run defragments a single accelerator resource); multi-resource is reserved.
 	Goals []RepackGoalApplyConfiguration `json:"goals,omitempty"`
+	// NetworkTopology optionally enables HyperNode-level fragmentation
+	// optimization. When set, the run frees at least RequiredNodeBlocks blocks of
+	// NodeBlockSize nodes within the target HyperNode tier, so topology-constrained
+	// AI workloads can schedule. When omitted, no HyperNode-level optimization is
+	// performed and the run keeps the existing Node-level semantics.
+	NetworkTopology *NetworkTopologyApplyConfiguration `json:"networkTopology,omitempty"`
 	// MaxPerRun caps the blast radius of a single run.
 	MaxPerRun *MaxPerRunApplyConfiguration `json:"maxPerRun,omitempty"`
 	// Eviction configures how Execute issues Kubernetes Eviction requests. It is
@@ -82,6 +88,14 @@ func (b *RepackRunSpecApplyConfiguration) WithGoals(values ...*RepackGoalApplyCo
 		}
 		b.Goals = append(b.Goals, *values[i])
 	}
+	return b
+}
+
+// WithNetworkTopology sets the NetworkTopology field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the NetworkTopology field is set to the value of the last call.
+func (b *RepackRunSpecApplyConfiguration) WithNetworkTopology(value *NetworkTopologyApplyConfiguration) *RepackRunSpecApplyConfiguration {
+	b.NetworkTopology = value
 	return b
 }
 

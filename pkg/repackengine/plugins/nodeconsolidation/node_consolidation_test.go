@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
@@ -42,6 +43,15 @@ func (consolidationSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView {
 }
 func (consolidationSnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
+}
+func (consolidationSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (consolidationSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (consolidationSnapshot) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 func consolidationNode(name string, capacity, used int64) *schedapi.NodeInfo {

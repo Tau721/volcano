@@ -17,7 +17,7 @@ limitations under the License.
 // Package gangdisruption is the gang-awareness plugin: it registers the gang-semantics
 // disruption plan scores so the planner prefers plans that don't shatter PodGroups —
 // gangBreaches (gangs pushed below minAvailable) and damagedResource (a breached gang
-// counts its WHOLE footprint as lost, capturing "突破 minAvailable 即整组受损").
+// counts its WHOLE footprint as lost, capturing "breaching minAvailable damages the whole group").
 package gangdisruption
 
 import (

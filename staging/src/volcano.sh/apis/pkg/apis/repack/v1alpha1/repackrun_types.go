@@ -130,6 +130,14 @@ type RepackRunSpec struct {
 	// +kubebuilder:validation:MaxItems=1
 	Goals []RepackGoal `json:"goals,omitempty"`
 
+	// NetworkTopology optionally enables HyperNode-level fragmentation
+	// optimization. When set, the run frees at least RequiredNodeBlocks blocks of
+	// NodeBlockSize nodes within the target HyperNode tier, so topology-constrained
+	// AI workloads can schedule. When omitted, no HyperNode-level optimization is
+	// performed and the run keeps the existing Node-level semantics.
+	// +optional
+	NetworkTopology *NetworkTopology `json:"networkTopology,omitempty"`
+
 	// MaxPerRun caps the blast radius of a single run.
 	// +optional
 	MaxPerRun *MaxPerRun `json:"maxPerRun,omitempty"`
@@ -213,6 +221,68 @@ type RepackGoal struct {
 	// +kubebuilder:validation:Maximum=100
 	MinFragImprovementPercent int32 `json:"minFragImprovementPercent,omitempty"`
 }
+
+// NetworkTopology specifies the HyperNode-tier fragmentation optimization target
+// of one RepackRun: free at least RequiredNodeBlocks blocks of NodeBlockSize
+// nodes within exactly one HyperNode tier.
+//
+// The tier identifier is mutually exclusive by construction: configure exactly
+// one of HyperNodeTier (numeric, matching HyperNode.Spec.Tier) or
+// HyperNodeTierName (matching HyperNode.Spec.TierName). The exclusivity is
+// enforced at the apiserver with a CEL XValidation on this struct (there is no
+// repo precedent for struct-level XValidation; verify via make manifests + e2e).
+//
+// +kubebuilder:validation:XValidation:rule="(has(self.hyperNodeTier) && !has(self.hyperNodeTierName)) || (!has(self.hyperNodeTier) && has(self.hyperNodeTierName))",message="hyperNodeTier and hyperNodeTierName are mutually exclusive; configure exactly one"
+type NetworkTopology struct {
+	// HyperNodeTier is the target HyperNode tier (numeric), matching
+	// HyperNode.Spec.Tier. Mutually exclusive with HyperNodeTierName; exactly one
+	// must be configured (enforced by CEL).
+	// +optional
+	HyperNodeTier *int `json:"hyperNodeTier,omitempty"`
+	// HyperNodeTierName is the target HyperNode tier name, matching
+	// HyperNode.Spec.TierName. Mutually exclusive with HyperNodeTier; exactly one
+	// must be configured (enforced by CEL).
+	// +optional
+	HyperNodeTierName *string `json:"hyperNodeTierName,omitempty"`
+	// NodeBlockSize is the number of nodes in one block. A block must lie entirely
+	// inside a single HyperNode of the target tier: nodes from different HyperNodes
+	// cannot be combined into one block. It is a pointer so that an explicit 0 is
+	// distinguishable from "omitted": 0 is rejected by the minimum:1 rule (a block
+	// must hold at least one node), while omitting the field applies the default 1
+	// (each node is a block).
+	// +optional
+	// +kubebuilder:default=1
+	// +kubebuilder:validation:Minimum=1
+	NodeBlockSize *int `json:"nodeBlockSize,omitempty"`
+	// RequiredNodeBlocks is the minimum number of blocks the defragmentation must
+	// free. The target is met only when at least RequiredNodeBlocks blocks are
+	// freed; if it cannot be met, the plan is infeasible and no defragmentation is
+	// performed. 0 (default) relaxes the gate entirely: the block semantics degrade
+	// to pure soft guidance. Must be non-negative.
+	// +optional
+	// +kubebuilder:default=0
+	// +kubebuilder:validation:Minimum=0
+	RequiredNodeBlocks int `json:"requiredNodeBlocks,omitempty"`
+	// Mode expresses how blocks should be distributed across HyperNodes: binpack
+	// concentrates blocks onto as few HyperNodes as possible; spread disperses
+	// them. Omitted = no distribution preference.
+	// +optional
+	// +kubebuilder:validation:Enum=binpack;spread
+	Mode RepackBlockMode `json:"mode,omitempty"`
+}
+
+// RepackBlockMode expresses the preferred distribution of blocks across
+// HyperNodes at the target tier.
+type RepackBlockMode string
+
+const (
+	// RepackBlockModeBinpack concentrates blocks onto as few HyperNodes as
+	// possible: new freed nodes favor HyperNodes that already hold complete blocks.
+	RepackBlockModeBinpack RepackBlockMode = "binpack"
+	// RepackBlockModeSpread disperses blocks across different HyperNodes: new
+	// freed nodes favor HyperNodes that hold few complete blocks.
+	RepackBlockModeSpread RepackBlockMode = "spread"
+)
 
 // MaxPerRun caps a single run's blast radius (distinct from K8s resource limits).
 type MaxPerRun struct {

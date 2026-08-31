@@ -24,6 +24,7 @@ data:
       - name: workloadscope
       - name: repackbudget
       - name: nodeconsolidation
+      - name: networktopologyaware
       - name: workloaddisruption
         arguments:
           affectedPodGroupsWeight: 10

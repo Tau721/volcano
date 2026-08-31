@@ -394,6 +394,10 @@ func (b *runBuilder) maxPerRun(m *repackv1alpha1.MaxPerRun) *runBuilder {
 	b.run.Spec.MaxPerRun = m
 	return b
 }
+func (b *runBuilder) networkTopology(t *repackv1alpha1.NetworkTopology) *runBuilder {
+	b.run.Spec.NetworkTopology = t
+	return b
+}
 
 // create submits the RepackRun and immediately registers best-effort cleanup.
 // Registration here, before a fixture performs any further assertions, keeps a

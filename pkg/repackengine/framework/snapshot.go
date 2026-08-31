@@ -26,6 +26,7 @@ package framework
 import (
 	"context"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -54,4 +55,23 @@ type Snapshot interface {
 	// implementation must be non-destructive (no shared-state mutation) and stop
 	// promptly when ctx is cancelled.
 	FeasibleRelocation(ctx context.Context, committed []*api.Move, victims []*schedapi.TaskInfo, receivers []*schedapi.NodeInfo) ([]*api.Move, bool)
+	// HyperNodesSetByTier returns the HyperNode tier topology: tier -> set of
+	// HyperNode names at that tier, from down to top. The map and each inner set
+	// are deep copies; callers may freely read, index and iterate them without
+	// aliasing the snapshot's internal state. HyperNode-aware plugins consume this
+	// to build their own node->HyperNode index at the tier they plan against —
+	// the node->HyperNode relationship itself lives in RealNodesSet, and building
+	// it from the tier maps (instead of a dedicated node->HyperNode accessor) keeps
+	// the adapter a thin copy of the scheduler Session fields.
+	HyperNodesSetByTier() map[int]sets.Set[string]
+	// RealNodesSet returns the membership of every HyperNode: HyperNode name ->
+	// set of real node names under it (direct and inherited members). The map and
+	// each inner set are deep copies. HyperNode-aware plugins use it together with
+	// HyperNodesSetByTier to classify nodes per HyperNode at the target tier.
+	RealNodesSet() map[string]sets.Set[string]
+	// HyperNodeTierNameMap returns the tier-name index: tierName -> tier number.
+	// RepackRun may name the target tier by HyperNode.Spec.TierName instead of the
+	// numeric Spec.Tier; plugins resolve that name through this map. The returned
+	// map is a copy (the values are immutable integers).
+	HyperNodeTierNameMap() map[string]int
 }

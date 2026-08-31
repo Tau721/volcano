@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
@@ -37,6 +38,15 @@ func (budgetSnapshot) NodeInScope(*schedapi.NodeInfo) bool          { return tru
 func (budgetSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView { return api.PodGroupView{} }
 func (budgetSnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
+}
+func (budgetSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (budgetSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (budgetSnapshot) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 func budgetMove(name string, job schedapi.JobID, cards int64) *api.Move {

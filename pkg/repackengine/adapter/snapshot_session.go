@@ -24,6 +24,7 @@ import (
 	"context"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	fwk "k8s.io/kube-scheduler/framework"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
@@ -67,6 +68,45 @@ func (s *SessionSnapshot) Nodes() []*schedapi.NodeInfo {
 // NodeInScope reports whether a node may be a drain target (nil scope = all).
 func (s *SessionSnapshot) NodeInScope(n *schedapi.NodeInfo) bool {
 	return s.scope == nil || s.scope.NodeInScope(n)
+}
+
+// HyperNodesSetByTier is a thin pass-through of the scheduler Session's
+// HyperNode tier topology: tier -> set of HyperNode names, from down to top.
+// Each inner set is cloned so the caller cannot alias the session's mutable
+// storage; the Snapshot stays read-only for the whole pass. The standalone
+// engine's own Snapshot implementation would build the same view from its
+// informers; no conversion or maintenance layer is inserted here on purpose
+// (the scheduler storage shape is pinned into the Snapshot contract, see the
+// design doc §4.1.3.4).
+func (s *SessionSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	out := make(map[int]sets.Set[string], len(s.ssn.HyperNodesSetByTier))
+	for tier, row := range s.ssn.HyperNodesSetByTier {
+		out[tier] = row.Clone()
+	}
+	return out
+}
+
+// RealNodesSet is a thin pass-through of the scheduler Session's HyperNode
+// membership: HyperNode name -> set of real node names under it (direct and
+// inherited members). Each inner set is cloned, keeping the Snapshot read-only
+// for the whole pass.
+func (s *SessionSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	out := make(map[string]sets.Set[string], len(s.ssn.RealNodesSet))
+	for name, row := range s.ssn.RealNodesSet {
+		out[name] = row.Clone()
+	}
+	return out
+}
+
+// HyperNodeTierNameMap is a thin pass-through of the scheduler Session's
+// tierName -> tier index (values are immutable integers; the map itself is
+// copied so callers cannot alias the session's storage).
+func (s *SessionSnapshot) HyperNodeTierNameMap() map[string]int {
+	out := make(map[string]int, len(s.ssn.HyperNodeTierNameMap))
+	for name, tier := range s.ssn.HyperNodeTierNameMap {
+		out[name] = tier
+	}
+	return out
 }
 
 // FeasibleRelocation simulates evicting `victims` and greedily relocating them

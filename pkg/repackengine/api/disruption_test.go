@@ -17,6 +17,7 @@ limitations under the License.
 package api
 
 import (
+	"reflect"
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
@@ -95,6 +96,34 @@ func TestAggregateDoesNotInventPodGroupForUnownedTask(t *testing.T) {
 		MoveAggregate(&PlanContext{TargetResource: gpu})
 	if aggregate.MovedPods != 1 || aggregate.MovedResource != 2 || aggregate.AffectedPodGroups != 0 || len(aggregate.ByPodGroup) != 0 {
 		t.Fatalf("aggregate=%+v, want moved Pod/resource without a synthetic empty PodGroup", aggregate)
+	}
+}
+
+// A To==From move is not actually a relocation (the pod stays on its source
+// node), so its From must not be counted as a freed node — consistent with
+// PlanMoveAggregate.addMove. This is defensive: drain unit moves never produce
+// To==From today.
+func TestIncrementalFromNodesExcludesNoopMoves(t *testing.T) {
+	plan := NewCandidatePlan(nil, []*Move{
+		{Task: gpuJobTask("a", "g1", 2), From: "n0", To: "n1"}, // real relocation, frees n0
+		{Task: gpuJobTask("b", "g1", 2), From: "n2", To: "n2"}, // no-op: must not free n2
+		{Task: gpuJobTask("c", "g1", 2), From: "n0", To: "n0"}, // no-op
+	})
+	if got, want := plan.IncrementalFromNodes(), []string{"n0"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("IncrementalFromNodes=%v, want %v (no-op moves must not count as freed nodes)", got, want)
+	}
+}
+
+func TestFreedNodesExcludesNoopMoves(t *testing.T) {
+	plan := NewCandidatePlan(
+		[]*Move{{Task: gpuJobTask("committed", "g1", 2), From: "n0", To: "n1"}},
+		[]*Move{
+			{Task: gpuJobTask("candidate", "g2", 3), From: "n2", To: "n3"},
+			{Task: gpuJobTask("noop", "g2", 1), From: "n0", To: "n0"}, // no-op: must not free n0 again / on its own
+		},
+	)
+	if got, want := plan.FreedNodes(), []string{"n0", "n2"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("FreedNodes=%v, want %v (no-op move must not add its From)", got, want)
 	}
 }
 

@@ -48,6 +48,7 @@ import (
 	_ "volcano.sh/volcano/pkg/repackengine/actions/repack"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/binpack"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/gangdisruption"
+	_ "volcano.sh/volcano/pkg/repackengine/plugins/networktopologyaware"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/nodeconsolidation"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/repackbudget"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloaddisruption"

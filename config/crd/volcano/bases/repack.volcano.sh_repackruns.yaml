@@ -137,6 +137,62 @@ spec:
                 - DryRun
                 - Execute
                 type: string
+              networkTopology:
+                description: |-
+                  NetworkTopology optionally enables HyperNode-level fragmentation
+                  optimization. When set, the run frees at least RequiredNodeBlocks blocks of
+                  NodeBlockSize nodes within the target HyperNode tier, so topology-constrained
+                  AI workloads can schedule. When omitted, no HyperNode-level optimization is
+                  performed and the run keeps the existing Node-level semantics.
+                properties:
+                  hyperNodeTier:
+                    description: |-
+                      HyperNodeTier is the target HyperNode tier (numeric), matching
+                      HyperNode.Spec.Tier. Mutually exclusive with HyperNodeTierName; exactly one
+                      must be configured (enforced by CEL).
+                    type: integer
+                  hyperNodeTierName:
+                    description: |-
+                      HyperNodeTierName is the target HyperNode tier name, matching
+                      HyperNode.Spec.TierName. Mutually exclusive with HyperNodeTier; exactly one
+                      must be configured (enforced by CEL).
+                    type: string
+                  mode:
+                    description: |-
+                      Mode expresses how blocks should be distributed across HyperNodes: binpack
+                      concentrates blocks onto as few HyperNodes as possible; spread disperses
+                      them. Omitted = no distribution preference.
+                    enum:
+                    - binpack
+                    - spread
+                    type: string
+                  nodeBlockSize:
+                    default: 1
+                    description: |-
+                      NodeBlockSize is the number of nodes in one block. A block must lie entirely
+                      inside a single HyperNode of the target tier: nodes from different HyperNodes
+                      cannot be combined into one block. It is a pointer so that an explicit 0 is
+                      distinguishable from "omitted": 0 is rejected by the minimum:1 rule (a block
+                      must hold at least one node), while omitting the field applies the default 1
+                      (each node is a block).
+                    minimum: 1
+                    type: integer
+                  requiredNodeBlocks:
+                    default: 0
+                    description: |-
+                      RequiredNodeBlocks is the minimum number of blocks the defragmentation must
+                      free. The target is met only when at least RequiredNodeBlocks blocks are
+                      freed; if it cannot be met, the plan is infeasible and no defragmentation is
+                      performed. 0 (default) relaxes the gate entirely: the block semantics degrade
+                      to pure soft guidance. Must be non-negative.
+                    minimum: 0
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: hyperNodeTier and hyperNodeTierName are mutually exclusive;
+                    configure exactly one
+                  rule: (has(self.hyperNodeTier) && !has(self.hyperNodeTierName))
+                    || (!has(self.hyperNodeTier) && has(self.hyperNodeTierName))
               scope:
                 description: Scope bounds which PodGroups may move and which nodes
                   participate.

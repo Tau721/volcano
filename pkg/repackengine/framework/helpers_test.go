@@ -21,6 +21,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
@@ -45,6 +46,13 @@ func (f *fakeSnap) PodGroupView(id schedapi.JobID) api.PodGroupView { return f.v
 func (f *fakeSnap) FeasibleRelocation(ctx context.Context, _ []*api.Move, _ []*schedapi.TaskInfo, _ []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
 }
+
+// HyperNodesSetByTier / RealNodesSet / HyperNodeTierNameMap are stubs required
+// by the extended Snapshot interface: framework-level tests do not plan against
+// HyperNode topology, so they all return empty views.
+func (f *fakeSnap) HyperNodesSetByTier() map[int]sets.Set[string] { return map[int]sets.Set[string]{} }
+func (f *fakeSnap) RealNodesSet() map[string]sets.Set[string]     { return map[string]sets.Set[string]{} }
+func (f *fakeSnap) HyperNodeTierNameMap() map[string]int          { return map[string]int{} }
 
 func node(name string, labels map[string]string) *schedapi.NodeInfo {
 	return &schedapi.NodeInfo{Name: name, Node: &v1.Node{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: labels}}}

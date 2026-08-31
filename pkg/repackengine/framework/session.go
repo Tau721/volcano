@@ -21,6 +21,7 @@ import (
 	"sort"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
@@ -106,8 +107,18 @@ func OpenSession(configuration SessionConfig, pluginOptions []PluginOption) *Ses
 		}
 		p.OnSessionOpen(ssn)
 		ssn.plugins = append(ssn.plugins, p)
+		klog.V(4).InfoS("repack: session opened plugin", "run", runNameOf(configuration), "plugin", option.Name)
 	}
 	return ssn
+}
+
+// runNameOf returns the RepackRun name for log correlation, or "" for
+// sessions opened outside a run (engine bootstrap, unit tests).
+func runNameOf(configuration SessionConfig) string {
+	if configuration.Run != nil {
+		return configuration.Run.Name
+	}
+	return ""
 }
 
 // CloseSession runs OnSessionClose on the plugins opened by OpenSession.

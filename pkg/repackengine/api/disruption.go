@@ -18,6 +18,7 @@ package api
 
 import (
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
 )
@@ -65,11 +66,21 @@ func (context *PlanContext) Resource() v1.ResourceName {
 // incremental moves. Keeping the slices separate avoids copying the growing
 // committed prefix for every candidate during disruption scoring. Aggregates are
 // computed once and cached.
+//
+// The freed-node accessors (IncrementalFromNodes / FreedNodes) cache their
+// deduplicated results on the same lazily-filled pattern as MoveAggregate, but
+// with a single field each: the node set is independent of the target resource,
+// so no resource key is needed in the cache.
 type CandidatePlan struct {
 	committedMoves    []*Move
 	moves             []*Move
 	aggregateResource v1.ResourceName
 	aggregate         *PlanMoveAggregate
+	// incrementalFromNodes / freedNodes cache the deduplicated source-node
+	// views; nil means "not computed yet" (a nil result never overwrites the
+	// cached value, so they are only assigned non-nil slices).
+	incrementalFromNodes []string
+	freedNodes           []string
 }
 
 // NewCandidatePlan creates an immutable candidate view for plugins. The private,
@@ -118,6 +129,61 @@ func (plan *CandidatePlan) MoveAggregate(context *PlanContext) *PlanMoveAggregat
 	plan.aggregateResource = resource
 	plan.aggregate = moveAggregate
 	return moveAggregate
+}
+
+// IncrementalFromNodes returns the distinct source nodes freed by THIS
+// candidate's own incremental moves (moves, excluding committedMoves). It is the
+// per-candidate anchor of the HyperNode block scores: the consolidation domain
+// unit is a single node, so the incremental moves share exactly one From (the
+// design doc pins this single-node-unit constraint — see §4.1.3). FreedNodes
+// must NOT be used as this anchor: it includes nodes freed by earlier committed
+// moves, which would make the anchor ambiguous.
+//
+// To==From (non-relocation) moves are excluded, consistent with addMove.
+// Returns nil when nothing freed; deduplicated, sorted, cached.
+func (plan *CandidatePlan) IncrementalFromNodes() []string {
+	if plan == nil {
+		return nil
+	}
+	if plan.incrementalFromNodes != nil {
+		return plan.incrementalFromNodes
+	}
+	plan.incrementalFromNodes = plan.distinctFromNodes(plan.moves)
+	return plan.incrementalFromNodes
+}
+
+// FreedNodes returns the distinct source nodes freed by the whole prospective
+// plan — committedMoves plus the candidate's incremental moves, deduplicated.
+// This is the "freeInH counts the nodes freed so far, including this candidate"
+// view the block scores use, and is consistent in meaning with
+// RepackPlan.FreedNodes (the finished plan's field). Superset of
+// IncrementalFromNodes. To==From (non-relocation) moves are excluded, as in
+// addMove. Cached on first call; nil when nothing freed.
+func (plan *CandidatePlan) FreedNodes() []string {
+	if plan == nil {
+		return nil
+	}
+	if plan.freedNodes != nil {
+		return plan.freedNodes
+	}
+	plan.freedNodes = plan.distinctFromNodes(plan.committedMoves, plan.moves)
+	return plan.freedNodes
+}
+
+// distinctFromNodes deduplicates the From of every relocation across the given
+// move sets, sorted for determinism. Empty From (not yet placed) and To==From
+// (not actually relocated) moves are not freed-node evidence — the To==From
+// exclusion matches addMove and is defensive: drain unit moves never produce it.
+func (plan *CandidatePlan) distinctFromNodes(moveSets ...[]*Move) []string {
+	set := sets.New[string]()
+	for _, moves := range moveSets {
+		for _, move := range moves {
+			if move != nil && move.From != "" && move.To != move.From {
+				set.Insert(move.From)
+			}
+		}
+	}
+	return sets.List(set)
 }
 
 func (moveAggregate *PlanMoveAggregate) addMove(context *PlanContext, move *Move) {

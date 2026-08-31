@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
@@ -37,6 +38,15 @@ func (binpackSnapshot) NodeInScope(*schedapi.NodeInfo) bool          { return tr
 func (binpackSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView { return api.PodGroupView{} }
 func (binpackSnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
+}
+func (binpackSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (binpackSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (binpackSnapshot) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 func binpackNode(name string, used int64) *schedapi.NodeInfo {

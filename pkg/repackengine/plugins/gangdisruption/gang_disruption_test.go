@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
@@ -53,6 +54,15 @@ func (*gangSnapshot) NodeInScope(*schedapi.NodeInfo) bool          { return true
 func (*gangSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView { return api.PodGroupView{} }
 func (*gangSnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
+}
+func (*gangSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (*gangSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (*gangSnapshot) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 // gang g: Running=4, MinAvailable=3 → slack=1, Footprint=8.

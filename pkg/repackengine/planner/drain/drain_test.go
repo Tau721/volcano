@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
@@ -91,6 +92,18 @@ func (f *fakeSnap) FeasibleRelocation(_ context.Context, committed []*api.Move, 
 		}
 	}
 	return placeByCapacity(victims, receivers, res, placed)
+}
+
+// HyperNodesSetByTier / RealNodesSet are stubs required by the extended
+// Snapshot interface: the solver tests plan without HyperNode topology.
+func (f *fakeSnap) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (f *fakeSnap) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (f *fakeSnap) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 // placeByCapacity is a small test double for the production scheduler-faithful

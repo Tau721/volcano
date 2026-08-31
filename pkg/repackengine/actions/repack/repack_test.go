@@ -25,6 +25,7 @@ import (
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	state "volcano.sh/repack-controller/pkg/state"
@@ -127,6 +128,18 @@ func (*actionSnapshot) FeasibleRelocation(_ context.Context, _ []*api.Move, vict
 		moves = append(moves, &api.Move{Task: victim, From: victim.NodeName, To: receivers[0].Name})
 	}
 	return moves, true
+}
+
+// HyperNodesSetByTier / RealNodesSet are stubs required by the extended
+// Snapshot interface: the action tests plan without HyperNode topology.
+func (*actionSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] {
+	return map[int]sets.Set[string]{}
+}
+func (*actionSnapshot) RealNodesSet() map[string]sets.Set[string] {
+	return map[string]sets.Set[string]{}
+}
+func (*actionSnapshot) HyperNodeTierNameMap() map[string]int {
+	return map[string]int{}
 }
 
 func actionResource(value int64) *schedapi.Resource {
