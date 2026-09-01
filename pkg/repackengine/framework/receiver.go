@@ -48,7 +48,11 @@ type ReceiverPreferencePhase int
 const (
 	// ReceiverPreferencePhaseStability evaluates placement stability first.
 	ReceiverPreferencePhaseStability ReceiverPreferencePhase = iota
-	// ReceiverPreferencePhaseDisruption evaluates workload impact after stability.
+	// ReceiverPreferencePhaseTopology evaluates HyperNode-block placement after
+	// stability: it may only ever lose to stability policies (which prefer
+	// sacrificial, non-drainable receivers), never to disruption or packing.
+	ReceiverPreferencePhaseTopology
+	// ReceiverPreferencePhaseDisruption evaluates workload impact after topology.
 	ReceiverPreferencePhaseDisruption
 	// ReceiverPreferencePhasePacking evaluates packing preferences last.
 	ReceiverPreferencePhasePacking

@@ -32,6 +32,9 @@ import (
 
 	// init() registers the cost score terms used by TestDistributionScoreDominatesDisruptionCost.
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloaddisruption"
+	// init() registers the binpack receiver preferences (staysOccupied/bestFit) used
+	// by TestNodeBlockReceiverPreferenceSitsAfterStaysOccupied.
+	_ "volcano.sh/volcano/pkg/repackengine/plugins/binpack"
 )
 
 // These unit tests pin the §4.1.3 block-score semantics and the invariants R1–R17
@@ -705,5 +708,205 @@ func TestZeroWeightsDisableScoreTerms(t *testing.T) {
 	scores := scoreFor(ssn, []*api.CandidatePlan{candidate("a1")})
 	if len(scores[0].Terms) != 0 {
 		t.Errorf("all weights zero -> terms=%v, want none", scores[0].Terms)
+	}
+}
+
+// ---- 4.1.3.4 node-block receiver preference ----
+
+// planningCandidate wraps a plan into the read-only candidate view plugins receive.
+func planningCandidate(plan *api.CandidatePlan) *framework.PlanningCandidate {
+	return &framework.PlanningCandidate{Plan: plan}
+}
+
+// receiver builds a receiver candidate over a node of the anchorSnapshot fixture.
+// The block preference reads only the node's HyperNode membership; StaysOccupied
+// is set when testing cross-plugin key order.
+func receiver(name string, staysOccupied bool) *framework.ReceiverCandidate {
+	return &framework.ReceiverCandidate{
+		Node:              topoNode(name, 8, 4),
+		StaysOccupied:     staysOccupied,
+		AvailableResource: 4,
+	}
+}
+
+// preserveTerm extracts the nodeBlockPreserve term, failing when the session did
+// not register it.
+func preserveTerm(t *testing.T, ordered framework.OrderedReceiver) framework.ReceiverPreference {
+	t.Helper()
+	for _, term := range ordered.Terms {
+		if term.Name == "nodeBlockPreserve" {
+			return term.Values
+		}
+	}
+	t.Fatalf("receiver %s has no nodeBlockPreserve term (terms=%v)", ordered.Receiver.Node.Name, ordered.Terms)
+	return framework.ReceiverPreference{}
+}
+
+func orderedNames(ordered []framework.OrderedReceiver) []string {
+	names := make([]string, len(ordered))
+	for i, r := range ordered {
+		names[i] = r.Receiver.Node.Name
+	}
+	return names
+}
+
+// The three preference classes order no-HyperNode > other HyperNode > own
+// HyperNode, keyed off the candidate's anchor (a1 -> hnA).
+func TestNodeBlockReceiverPreferenceOrdersByHyperNode(t *testing.T) {
+	snapshot := anchorSnapshot()
+	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
+	defer framework.CloseSession(ssn)
+
+	ordered := ssn.OrderReceivers(
+		planningCandidate(candidate("a1")),
+		[]*framework.ReceiverCandidate{receiver("a2", false), receiver("b1", false), receiver("outside", false)},
+	)
+	wantOrder := []string{"outside", "b1", "a2"}
+	wantValues := []framework.ReceiverPreference{{3}, {2}, {1}}
+	if len(ordered) != len(wantOrder) {
+		t.Fatalf("ordered=%d receivers, want %d", len(ordered), len(wantOrder))
+	}
+	for i, want := range wantOrder {
+		if ordered[i].Receiver.Node.Name != want {
+			t.Errorf("position %d receiver=%s, want %s (order=%v)", i, ordered[i].Receiver.Node.Name, want, orderedNames(ordered))
+		}
+		if got := preserveTerm(t, ordered[i]); got != wantValues[i] {
+			t.Errorf("receiver %s preference=%v, want %v", want, got, wantValues[i])
+		}
+	}
+}
+
+// An empty incremental move set makes every receiver abstain ({}), so the sort is
+// stable and the input order is preserved — never a mis-ordering.
+func TestNodeBlockReceiverPreferenceAbstainsWithoutAnchor(t *testing.T) {
+	snapshot := anchorSnapshot()
+	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
+	defer framework.CloseSession(ssn)
+
+	receivers := []*framework.ReceiverCandidate{receiver("a2", false), receiver("outside", false)}
+	ordered := ssn.OrderReceivers(planningCandidate(api.NewCandidatePlan(nil, nil)), receivers)
+	if len(ordered) != len(receivers) {
+		t.Fatalf("ordered=%d receivers, want %d", len(ordered), len(receivers))
+	}
+	for i, r := range ordered {
+		if r.Receiver.Node.Name != receivers[i].Node.Name {
+			t.Errorf("position %d receiver=%s, want stable input %s", i, r.Receiver.Node.Name, receivers[i].Node.Name)
+		}
+		if got := preserveTerm(t, r); got != (framework.ReceiverPreference{}) {
+			t.Errorf("receiver %s preference=%v, want abstain {}", r.Receiver.Node.Name, got)
+		}
+	}
+}
+
+// An anchor outside the tier has no "own HyperNode" to protect, so every in-tier
+// receiver is "another HyperNode" ({2}); a no-H receiver still exports the load
+// ({3}) and is preferred over any in-tier node.
+func TestNodeBlockReceiverPreferenceAnchorOutsideTier(t *testing.T) {
+	snapshot := anchorSnapshot()
+	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
+	defer framework.CloseSession(ssn)
+
+	ordered := ssn.OrderReceivers(
+		planningCandidate(candidate("outside")),
+		[]*framework.ReceiverCandidate{receiver("a2", false), receiver("outside", false)},
+	)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered=%d receivers, want 2", len(ordered))
+	}
+	if ordered[0].Receiver.Node.Name != "outside" {
+		t.Errorf("first receiver=%s, want outside", ordered[0].Receiver.Node.Name)
+	}
+	if got := preserveTerm(t, ordered[0]); got != (framework.ReceiverPreference{3}) {
+		t.Errorf("outside preference=%v, want {3}", got)
+	}
+	if got := preserveTerm(t, ordered[1]); got != (framework.ReceiverPreference{2}) {
+		t.Errorf("in-tier receiver preference=%v, want {2} (anchor outside tier)", got)
+	}
+}
+
+// R1 dormancy: without networkTopology the plugin registers nothing, so no
+// receiver preference is evaluated.
+func TestNodeBlockReceiverPreferenceRegistersOnlyWithTopology(t *testing.T) {
+	snapshot := anchorSnapshot()
+	ssn := openSession(snapshot, &repackv1alpha1.RepackRun{}, framework.PluginOptions(Name))
+	defer framework.CloseSession(ssn)
+
+	ordered := ssn.OrderReceivers(
+		planningCandidate(candidate("a1")),
+		[]*framework.ReceiverCandidate{receiver("outside", false)},
+	)
+	if len(ordered) != 1 {
+		t.Fatalf("ordered=%d receivers, want 1", len(ordered))
+	}
+	if len(ordered[0].Terms) != 0 {
+		t.Errorf("no topology -> terms=%v, want none (R1)", ordered[0].Terms)
+	}
+}
+
+// The key order is staysOccupied (Stability) before nodeBlockPreserve (Topology):
+// a stays-occupied own-H receiver wins over a drainable no-H receiver even though
+// the block preference alone would choose the no-H node. This pins the design's
+// "only loses to staysOccupied" invariant (design §4.1.3.4, hard guarantee).
+func TestNodeBlockReceiverPreferenceSitsAfterStaysOccupied(t *testing.T) {
+	snapshot := anchorSnapshot()
+	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	ssn := openSession(snapshot, run, framework.PluginOptions(Name, "binpack"))
+	defer framework.CloseSession(ssn)
+
+	ownStays := receiver("a2", true)      // hnA own-H, stays-occupied
+	noHFree := receiver("outside", false) // no-H, drainable
+	ordered := ssn.OrderReceivers(
+		planningCandidate(candidate("a1")),
+		[]*framework.ReceiverCandidate{ownStays, noHFree},
+	)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered=%d receivers, want 2", len(ordered))
+	}
+	if ordered[0].Receiver.Node.Name != "a2" {
+		t.Errorf("first receiver=%s, want stays-occupied a2: staysOccupied must precede the block preference", ordered[0].Receiver.Node.Name)
+	}
+	// The block preference alone would pick the no-H node — prove both values so
+	// the ordering above is attributable to the Stability key, not a tie.
+	if got := preserveTerm(t, ordered[0]); got != (framework.ReceiverPreference{1}) {
+		t.Errorf("a2 block preference=%v, want {1}", got)
+	}
+	if got := preserveTerm(t, ordered[1]); got != (framework.ReceiverPreference{3}) {
+		t.Errorf("outside block preference=%v, want {3}", got)
+	}
+}
+
+// A co-placement group's victims can span several HyperNodes: the anchor-H set
+// treats every member's HyperNode as "own", so a receiver in hnB is {1}, not {2}
+// — anchor[0] alone would only protect the first member's HyperNode.
+func TestNodeBlockReceiverPreferenceMultiAnchorSet(t *testing.T) {
+	snapshot := anchorSnapshot()
+	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
+	defer framework.CloseSession(ssn)
+
+	plan := api.NewCandidatePlan(nil, []*api.Move{{From: "a1"}, {From: "b1"}})
+	ordered := ssn.OrderReceivers(
+		planningCandidate(plan),
+		[]*framework.ReceiverCandidate{receiver("b1", false), receiver("outside", false)},
+	)
+	if len(ordered) != 2 {
+		t.Fatalf("ordered=%d receivers, want 2", len(ordered))
+	}
+	var b1Pref framework.ReceiverPreference
+	for _, r := range ordered {
+		switch r.Receiver.Node.Name {
+		case "b1":
+			b1Pref = preserveTerm(t, r)
+		case "outside":
+			if got := preserveTerm(t, r); got != (framework.ReceiverPreference{3}) {
+				t.Errorf("outside preference=%v, want {3}", got)
+			}
+		}
+	}
+	if b1Pref != (framework.ReceiverPreference{1}) {
+		t.Errorf("hnB receiver (group member) preference=%v, want {1}: the anchor-H set must protect every member H, not anchor[0] only", b1Pref)
 	}
 }

@@ -21,7 +21,10 @@ limitations under the License.
 // E1/E7 Execute main path + post-repack scheduling, E2/E5 the two rejection
 // gates (blocks-infeasible, frag-improvement), E3 the R1 no-op without the
 // field, E4 the R16 apiserver CEL/enum/minimum rejection, E6 the spread-mode
-// preference for HyperNode members over unmanaged nodes.
+// preference for HyperNode members over unmanaged nodes. A second Describe at
+// the bottom (custom tree) hosts E-RS, the §4.1.3.4 receiver steering: the
+// drained pod must land on a no-H receiver rather than the tight own-H receiver
+// (which the standard 4-node tree cannot express).
 package repack
 
 import (
@@ -459,6 +462,94 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 			Expect(freed.Has(pods[0].Spec.NodeName)).To(BeTrue(),
 				"topology job pod %q must land on a freed node, got %q (freed: %v)",
 				pods[0].Name, pods[0].Spec.NodeName, got.Status.Result.FreedNodes)
+		})
+	})
+})
+
+// E-RS: receiver steering (design §4.1.3.4). US-01's block shaping constrains
+// which node to free (candidate scoring + block-count gate) but, before this
+// enhancement, NOT where the freed pod lands: the receiver choice was
+// block-agnostic, so the drained pod could fall back onto the same HyperNode's
+// other Partial node (filling it Full, shrinking that H's future freeable
+// pool) or into another HyperNode. nodeBlockPreserve now steers relocations
+// away from the target tier's HyperNodes: no-H ({3}) > other-H ({2}) > own-H
+// ({1}), decided at the Topology key before bestFit. This spec needs a tree
+// the shared 4-node setup cannot express (a no-H receiver alongside an
+// own-H receiver), so it builds its own.
+var _ = Describe("Repack HyperNode-aware receiver steering (custom tree)", Serial, func() {
+	var ctx *e2eutil.TestContext
+	var nodes []string
+
+	BeforeEach(func() {
+		ctx = e2eutil.InitTestContext(e2eutil.Options{})
+		nodes = npuFixture(ctx, 4)
+		// One tier-1 HyperNode over nodes[0..2]; nodes[3] belongs to no
+		// tier-1 HyperNode -> the no-H receiver the standard tree cannot give.
+		setupRepackTopologyCustom(ctx, []hyperNodeFixture{
+			{name: "e8-hna", tier: 1, members: []string{nodes[0], nodes[1], nodes[2]}, memberIsNode: true},
+		})
+	})
+	AfterEach(func() {
+		recordSpecFailureDiagnostics(ctx)
+		e2eutil.CleanupTestContext(ctx) // also wipes this spec's HyperNodes
+		for _, n := range nodes {
+			clearNPU(ctx, n)
+		}
+	})
+
+	Context("E-RS: drained pod steers to the no-H receiver, not the own-H one (US-01)", func() {
+		It("relocates onto the no-H node while the tight own-H receiver stays Partial", func() {
+			// Layout (tier 1, size 2, requiredNodeBlocks 1):
+			//   nodes[0] (a1): 1 movable card  -> the only feasible victim
+			//   nodes[1] (a2): 7 movable cards -> own-H receiver, slack=1
+			//   nodes[2] (a3): idle            -> completes the block with a1
+			//   nodes[3] (out1): 1 movable card -> no-H receiver, slack=7
+			//
+			// maxPerRun.resources[npu]=1 prunes a2 (7 cards > 1) and out1's
+			// later drain (cumulative 2 > 1), so exactly a1 drains: idle a3 +
+			// freed a1 = 2 -> 1 complete block (the R10 gate counts idleInH,
+			// so a3's pre-existing idle completes the block; freedBlocksAtTier
+			// over FreedNodes alone would read 0 and is deliberately not
+			// asserted here). The drained pod must then land on out1 (no-H,
+			// {3}), NOT a2 (own-H, {1}) — bestFit would reverse that (a2
+			// slack=1 -> {-1} > out1 slack=7 -> {-7}), so this is decisive
+			// proof the Topology-key preference steers the relocation.
+			occupyMovableVCJob(ctx, "e8-a1", nodes[0], 1)
+			occupyMovableVCJob(ctx, "e8-a2", nodes[1], 7)
+			occupyMovableVCJob(ctx, "e8-out1", nodes[3], 1)
+			// nodes[2] deliberately left idle.
+
+			run, err := newRun("e8-rs", repackv1alpha1.RepackModeDryRun).
+				goal(npuResource).
+				networkTopology(&repackv1alpha1.NetworkTopology{
+					HyperNodeTier:      ptr.To(1),
+					NodeBlockSize:      ptr.To(2),
+					RequiredNodeBlocks: 1,
+					Mode:               repackv1alpha1.RepackBlockModeBinpack,
+				}).
+				maxPerRun(&repackv1alpha1.MaxPerRun{
+					Resources: v1.ResourceList{npuResource: resource.MustParse("1")},
+				}).
+				create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("RepackRecommended"))
+			Expect(got.Status.Plan).NotTo(BeNil())
+
+			// Exactly a1 drains (budget-pruned a2, and out1 scores 0 as a no-H
+			// victim): the own-H tight receiver a2 must survive untouched.
+			Expect(got.Status.Plan.FreedNodes).To(Equal([]string{nodes[0]}),
+				"only a1 (nodes[0]) may be freed; the own-H receiver a2 must stay Partial")
+			Expect(sets.New[string](got.Status.Plan.FreedNodes...).Has(nodes[1])).To(BeFalse(),
+				"the tight own-H receiver a2 must not be drained")
+
+			// The single relocation's plan-time target is the no-H receiver.
+			Expect(len(got.Status.Plan.Moves)).To(Equal(1))
+			Expect(len(got.Status.Plan.Moves[0].Pods)).To(Equal(1))
+			Expect(got.Status.Plan.Moves[0].Pods[0].ToNode).To(Equal(nodes[3]),
+				"the drained pod must be steered to the no-H receiver out1, not the own-H receiver a2")
 		})
 	})
 })

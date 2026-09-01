@@ -17,10 +17,12 @@ limitations under the License.
 // Package networktopologyaware turns RepackRun.spec.networkTopology into
 // HyperNode-block shaping: when a run names a target HyperNode tier and block
 // size, it registers two plan-score terms (node-block progress, node-block
-// distribution) and one hard block-count constraint. It does NOT contribute a
-// new freeable unit — it reuses nodeconsolidation's single-node unit (design doc
-// §4.1.3): every candidate frees exactly one node, and "block" semantics are
-// expressed as constraints rather than units.
+// distribution), one hard block-count constraint, and one receiver preference
+// (nodeBlockPreserve) that steers relocated pods away from the target tier's
+// HyperNodes (no-H > other HyperNode > own HyperNode, design §4.1.3.4). It does
+// NOT contribute a new freeable unit — it reuses nodeconsolidation's single-node
+// unit (design doc §4.1.3): every candidate frees exactly one node, and "block"
+// semantics are expressed as constraints rather than units.
 //
 // The package is dormant by default: when networkTopology is unset (R1) it
 // registers nothing and the engine behaves exactly as before.
@@ -112,7 +114,7 @@ func validateArguments(arguments framework.Arguments) error {
 
 func (*networkTopologyAwarePlugin) Name() string { return Name }
 
-// nodeBlockSession holds the per-session topology precompute shared by the three
+// nodeBlockSession holds the per-session topology precompute shared by the four
 // callbacks. It is built once in OnSessionOpen and captured by value in the
 // closures; it must not change during the pass.
 type nodeBlockSession struct {
@@ -173,7 +175,8 @@ func (p *networkTopologyAwarePlugin) OnSessionOpen(ssn *framework.Session) {
 	if bsn.mode == repackv1alpha1.RepackBlockModeBinpack || bsn.mode == repackv1alpha1.RepackBlockModeSpread {
 		p.registerNodeBlockDistributionScore(ssn, bsn) // 4.1.3.2, binpack/spread only
 	}
-	p.registerBlockCountConstraint(ssn, bsn) // 4.1.3.3, always registered
+	p.registerBlockCountConstraint(ssn, bsn)        // 4.1.3.3, always registered
+	p.registerNodeBlockReceiverPreference(ssn, bsn) // 4.1.3.4, always registered
 }
 
 // tierString / tierNameString render the pointer tier identifiers for logs
@@ -441,6 +444,56 @@ func (p *networkTopologyAwarePlugin) registerBlockCountConstraint(ssn *framework
 			"completeBlocks", total, "admitted", admitted)
 		return admitted
 	})
+}
+
+// ---- 4.1.3.4 node-block receiver preference (receiver steering) ----
+
+// registerNodeBlockReceiverPreference steers relocated pods away from the target
+// tier's HyperNodes, closing the receiver side of block shaping (design §4.1.3.4).
+// The preference is lexicographic per receiver, ordered no-HyperNode ({3}) >
+// another HyperNode ({2}) > own HyperNode ({1}); abstain ({}) when the candidate
+// frees no node, letting later keys decide. Registering unconditionally is
+// deliberate: it preserves block progress (mode-independent), orthogonal to the
+// binpack/spread distribution score; R1 dormancy (networkTopology unset) already
+// prevents registration entirely.
+//
+// Only ever reorders the receiver list — firstFeasibleReceiver still takes the
+// first *feasible* receiver, so no new infeasibility is introduced and the
+// 4.1.3.3 block-count gate is unaffected (it counts freed nodes, not destinations).
+//
+// The Topology phase guarantees the key order staysOccupied -> nodeBlockPreserve
+// -> futureGangImpact -> bestFit independent of the plugin list: stability
+// policies (which prefer sacrificial non-drainable receivers — filled, immovable,
+// scope-excluded, proven stuck) always win, and filling those never hurts the
+// block pool since they could not be drained anyway.
+func (p *networkTopologyAwarePlugin) registerNodeBlockReceiverPreference(ssn *framework.Session, bsn *nodeBlockSession) {
+	ssn.AddReceiverPreferenceFn("nodeBlockPreserve", framework.ReceiverPreferencePhaseTopology,
+		func(_ *api.PlanContext, candidate *framework.PlanningCandidate, receiver *framework.ReceiverCandidate) framework.ReceiverPreference {
+			anchors := candidate.Plan.IncrementalFromNodes()
+			if len(anchors) == 0 {
+				return framework.ReceiverPreference{} // no anchor: abstain, let later keys decide
+			}
+			// Anchor HyperNode set: a single-node unit (R4) collapses to one element,
+			// identical to the scoring fns' [0] convention; a co-placement group's
+			// members can span several HyperNodes (drain.go builds the group plan from
+			// every member's victims), and all of them are "own HyperNode" — preserve
+			// each, not just the first.
+			ownHs := make(map[string]bool, len(anchors))
+			for _, n := range anchors {
+				if h, ok := bsn.nodeToHyperNode[n]; ok {
+					ownHs[h] = true
+				}
+			}
+			recvH, inTier := bsn.nodeToHyperNode[receiver.Node.Name]
+			switch {
+			case !inTier:
+				return framework.ReceiverPreference{3} // export the load outside the tier
+			case ownHs[recvH]:
+				return framework.ReceiverPreference{1} // own HyperNode: last resort
+			default:
+				return framework.ReceiverPreference{2} // another HyperNode
+			}
+		})
 }
 
 func (*networkTopologyAwarePlugin) OnSessionClose(*framework.Session) {}
