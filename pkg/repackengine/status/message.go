@@ -62,9 +62,36 @@ func CompletionMessage(run *repackv1alpha1.RepackRun, targetResource v1.Resource
 		return fmt.Sprintf(
 			"No repack performed for %s: cluster fragmentation is %d%%, but no feasible plan within the resolved scope met the required %d percentage-point improvement.",
 			resource, summary.FragBefore, engineconf.MinFragImprovement(run))
+	case state.ReasonRequiredNodeBlocksNotMet:
+		required, size, tier := blockRequirement(run)
+		return fmt.Sprintf(
+			"No repack performed for %s: the resolved scope cannot form the required %d HyperNode node-block(s) of size %d in tier %s; cluster fragmentation is %d%%, so no migration was planned.",
+			resource, required, size, tier, summary.FragBefore)
 	default:
 		return fmt.Sprintf("Repack for %s completed with outcome %s.", resource, reason)
 	}
+}
+
+// blockRequirement reads the node-block admission target (required count, block
+// size, tier) from the run's networkTopology.
+func blockRequirement(run *repackv1alpha1.RepackRun) (required, size int, tier string) {
+	size = 1
+	tier = "<unset>"
+	if run == nil || run.Spec.NetworkTopology == nil {
+		return
+	}
+	topo := run.Spec.NetworkTopology
+	required = topo.RequiredNodeBlocks
+	if topo.NodeBlockSize != nil {
+		size = *topo.NodeBlockSize
+	}
+	switch {
+	case topo.HyperNodeTier != nil:
+		tier = fmt.Sprintf("%d", *topo.HyperNodeTier)
+	case topo.HyperNodeTierName != nil:
+		tier = *topo.HyperNodeTierName
+	}
+	return
 }
 
 func PlacementMessage(run *repackv1alpha1.RepackRun, targetResource v1.ResourceName, decision placementexecutor.TerminalDecision) string {

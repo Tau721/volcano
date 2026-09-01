@@ -273,8 +273,10 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 
 	Context("E2: required blocks unmet -> no defragmentation (R10 reject, R11)", func() {
 		It("leaves the cluster untouched when the block target is infeasible", func() {
+			// Movable workloads (no spec.nodeName), so the planner produces a
+			// plan freeing nodes; the block-count gate must reject it.
 			for i := 0; i < 4; i++ {
-				occupy(ctx, fmt.Sprintf("e2-w%d", i), nodes[i], 1)
+				occupyMovableVCJob(ctx, fmt.Sprintf("e2-w%d", i), nodes[i], 1)
 			}
 			before := runningPodCount(ctx)
 
@@ -292,7 +294,9 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 
 			got := waitTerminal(ctx, run.Name)
 			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
-			Expect(completeReason(got)).To(Equal("InsufficientImprovement"))
+			// The block-count gate (R10) rejects with its own reason, not the
+			// fragmentation-improvement InsufficientImprovement (design §4.1.3.3).
+			Expect(completeReason(got)).To(Equal("RequiredNodeBlocksNotMet"))
 			Expect(got.Status.Plan).NotTo(BeNil())
 			Expect(len(got.Status.Plan.FreedNodes)).To(Equal(0), "no block can be formed -> nothing freed")
 			Expect(len(got.Status.Plan.Moves)).To(Equal(0), "no migration may be planned")

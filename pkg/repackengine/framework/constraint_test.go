@@ -48,8 +48,13 @@ func TestPlanAdmissible_PluginConstraintVetoes(t *testing.T) {
 	if !ssn.PlanAdmissible(plan) {
 		t.Fatal("plan should be admissible before adding a vetoing constraint")
 	}
-	ssn.AddConstraintFn(func(_ *api.PlanContext, _ *api.RepackPlan) bool { return false })
+	ssn.AddConstraintFn(func(_ *api.PlanContext, _ *api.RepackPlan) (bool, string) { return false, "TestVeto" })
 	if ssn.PlanAdmissible(plan) {
 		t.Error("a PlanConstraintFn returning false must reject the plan")
+	}
+	// The first failing constraint's reason is recorded on the session so the
+	// action can report the binding gate, not a generic fallback.
+	if got := ssn.ConstraintRejection(); got != "TestVeto" {
+		t.Errorf("constraintRejection=%q, want %q", got, "TestVeto")
 	}
 }

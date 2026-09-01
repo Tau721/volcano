@@ -78,8 +78,9 @@ type Session struct {
 	receiverPreferenceFns []namedReceiverPreference
 
 	// results filled by the action, read by the Engine runtime
-	plan   *api.RepackPlan
-	report api.Report
+	plan                *api.RepackPlan
+	report              api.Report
+	constraintRejection string // terminal reason of the first failing plan constraint
 }
 
 // OpenSession builds a Session and runs each configured plugin's OnSessionOpen

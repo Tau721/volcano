@@ -24,6 +24,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
+	state "volcano.sh/repack-controller/pkg/state"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -469,6 +470,13 @@ func TestBlockCountConstraintAdmission(t *testing.T) {
 	for _, tc := range cases {
 		if got := ssn.PlanAdmissible(&api.RepackPlan{FreedNodes: tc.freed}); got != tc.want {
 			t.Errorf("%s: admissible=%v, want %v", tc.name, got, tc.want)
+		}
+		wantReason := ""
+		if !tc.want {
+			wantReason = state.ReasonRequiredNodeBlocksNotMet
+		}
+		if got := ssn.ConstraintRejection(); got != wantReason {
+			t.Errorf("%s: constraintRejection=%q, want %q", tc.name, got, wantReason)
 		}
 	}
 

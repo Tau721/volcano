@@ -131,7 +131,7 @@ func (a *repackAction) plan(actionCtx *framework.ActionContext) framework.Action
 	if run.Spec.Mode == repackv1alpha1.RepackModeExecute {
 		enginestatus.InitializeNoopExecuteResult(run)
 	}
-	return complete(actionCtx, report, worthwhile, resource, processingStartTime)
+	return complete(actionCtx, report, worthwhile, resource, processingStartTime, cycle.Session.ConstraintRejection())
 }
 
 func executionResult(result framework.RuntimeResult) framework.ActionResult {
@@ -143,10 +143,12 @@ func executionResult(result framework.RuntimeResult) framework.ActionResult {
 	}
 }
 
-func complete(actionCtx *framework.ActionContext, report api.Report, worthwhile bool, resource v1.ResourceName, started time.Time) framework.ActionResult {
+func complete(actionCtx *framework.ActionContext, report api.Report, worthwhile bool, resource v1.ResourceName, started time.Time, constraintRejection string) framework.ActionResult {
 	run := actionCtx.Run
 	var reason string
 	switch {
+	case constraintRejection != "":
+		reason = constraintRejection // a hard constraint rejected the plan
 	case !worthwhile && report.FragmentationRateBefore > 0:
 		reason = state.ReasonInsufficientImprovement
 	case !worthwhile:

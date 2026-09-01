@@ -45,3 +45,29 @@ func TestCompletionStatusMessageIncludesOperationalResult(t *testing.T) {
 		}
 	}
 }
+
+// The node-block gate rejection must read the block target from the run's
+// networkTopology and describe the block infeasibility, not the fragmentation
+// improvement.
+func TestCompletionMessageRequiredNodeBlocksNotMet(t *testing.T) {
+	ptr := func(v int) *int { return &v }
+	run := &repackv1alpha1.RepackRun{
+		Spec: repackv1alpha1.RepackRunSpec{NetworkTopology: &repackv1alpha1.NetworkTopology{
+			HyperNodeTier:      ptr(1),
+			NodeBlockSize:      ptr(2),
+			RequiredNodeBlocks: 3,
+		}},
+		Status: repackv1alpha1.RepackRunStatus{Plan: &repackv1alpha1.RepackPlan{
+			Summary: &repackv1alpha1.RepackSummary{FragBeforePercent: 63},
+		}},
+	}
+	message := enginestatus.CompletionMessage(run, gpuResource, state.ReasonRequiredNodeBlocksNotMet)
+	for _, want := range []string{"nvidia.com/gpu", "3 HyperNode node-block(s)", "size 2", "tier 1", "63%"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message %q does not contain %q", message, want)
+		}
+	}
+	if strings.Contains(message, "percentage-point improvement") {
+		t.Errorf("block-gate message %q must not claim a fragmentation-improvement shortfall", message)
+	}
+}

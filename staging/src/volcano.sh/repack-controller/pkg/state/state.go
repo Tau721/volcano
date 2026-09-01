@@ -59,6 +59,9 @@ const (
 	ReasonExecutionCompletedWithAlternativePlacement = "ExecutionCompletedWithAlternativePlacement"
 	ReasonNoFragmentation                            = "NoFragmentation"
 	ReasonInsufficientImprovement                    = "InsufficientImprovement"
+	// ReasonRequiredNodeBlocksNotMet is the node-block gate rejection: the plan
+	// cannot form the required number of HyperNode node-blocks.
+	ReasonRequiredNodeBlocksNotMet = "RequiredNodeBlocksNotMet"
 	// Terminal-Failed Execute result reasons.
 	ReasonInvalidConfiguration       = "InvalidConfiguration"
 	ReasonScopeResolutionFailed      = "ScopeResolutionFailed"

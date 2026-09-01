@@ -19,12 +19,14 @@ package framework
 import (
 	"k8s.io/klog/v2"
 
+	state "volcano.sh/repack-controller/pkg/state"
 	"volcano.sh/volcano/pkg/repackengine/api"
 )
 
-// PlanConstraintFn is a hard admissibility gate on a finished plan. Constraints
-// are AND-aggregated; one false result rejects the plan.
-type PlanConstraintFn func(ctx *api.PlanContext, plan *api.RepackPlan) bool
+// PlanConstraintFn is a hard admissibility gate on a finished plan. It returns
+// admitted plus the terminal rejectionReason; the first failing constraint's
+// reason becomes the Run's outcome.
+type PlanConstraintFn func(ctx *api.PlanContext, plan *api.RepackPlan) (admitted bool, rejectionReason string)
 
 // registerBuiltinConstraints exposes the run's benefit gates through the same
 // seam used by plugin-provided plan constraints.
@@ -34,14 +36,17 @@ func (s *Session) registerBuiltinConstraints() {
 	if minFreed < 1 {
 		minFreed = 1
 	}
-	s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) bool {
+	s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) (bool, string) {
 		admitted := plan != nil && plan.Benefit() >= float64(minFreed)
 		klog.V(4).InfoS("repack: min-nodes-freed constraint", "run", run,
 			"benefit", benefitOf(plan), "minFreed", minFreed, "admitted", admitted)
-		return admitted
+		if admitted {
+			return true, ""
+		}
+		return false, state.ReasonInsufficientImprovement
 	})
 	if minImprove := s.configuration.MinFragImprovementPercent; minImprove > 0 {
-		s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) bool {
+		s.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) (bool, string) {
 			admitted, improvePct := false, 0
 			if plan != nil {
 				improvePct = int(-plan.FragmentationRateDelta()*100 + 0.5)
@@ -49,7 +54,10 @@ func (s *Session) registerBuiltinConstraints() {
 			}
 			klog.V(4).InfoS("repack: frag-improvement constraint", "run", run,
 				"improvePct", improvePct, "minImprove", minImprove, "admitted", admitted)
-			return admitted
+			if admitted {
+				return true, ""
+			}
+			return false, state.ReasonInsufficientImprovement
 		})
 	}
 }
@@ -69,13 +77,25 @@ func (s *Session) AddConstraintFn(fn PlanConstraintFn) {
 }
 
 // PlanAdmissible reports whether a finished plan passes every built-in and
-// plugin-provided hard constraint.
+// plugin-provided hard constraint, recording the first failing constraint's
+// reason on the session.
 func (s *Session) PlanAdmissible(plan *api.RepackPlan) bool {
 	ctx := s.PlanContext()
 	for _, fn := range s.constraintFns {
-		if !fn(ctx, plan) {
+		if admitted, reason := fn(ctx, plan); !admitted {
+			s.constraintRejection = reason
 			return false
 		}
 	}
+	s.constraintRejection = ""
 	return true
+}
+
+// ConstraintRejection returns the reason recorded by the first failing plan
+// constraint, or "" when none failed.
+func (s *Session) ConstraintRejection() string {
+	if s == nil {
+		return ""
+	}
+	return s.constraintRejection
 }

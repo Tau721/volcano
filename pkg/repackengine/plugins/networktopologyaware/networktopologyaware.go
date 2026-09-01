@@ -41,6 +41,7 @@ import (
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
+	state "volcano.sh/repack-controller/pkg/state"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -423,12 +424,12 @@ func (p *networkTopologyAwarePlugin) registerBlockCountConstraint(ssn *framework
 	if run := ssn.Run(); run != nil {
 		runName = run.Name
 	}
-	ssn.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) bool {
+	ssn.AddConstraintFn(func(_ *api.PlanContext, plan *api.RepackPlan) (bool, string) {
 		if plan == nil {
-			return false
+			return false, ""
 		}
 		if bsn.requiredBlocks == 0 {
-			return true // R10: 0 (default) always passes — degrades to pure soft guidance
+			return true, "" // R10: 0 (default) always passes — degrades to pure soft guidance
 		}
 		freedByH := make(map[string]int, len(bsn.hyperNodesInTier))
 		for _, node := range plan.FreedNodes {
@@ -442,7 +443,12 @@ func (p *networkTopologyAwarePlugin) registerBlockCountConstraint(ssn *framework
 			"requiredBlocks", bsn.requiredBlocks, "blockSize", bsn.size,
 			"freedNodeCount", len(plan.FreedNodes), "freedByH", freedByH,
 			"completeBlocks", total, "admitted", admitted)
-		return admitted
+		if admitted {
+			return true, ""
+		}
+		// Not enough complete blocks formed: report the block-specific reason,
+		// not the fragmentation-improvement one.
+		return false, state.ReasonRequiredNodeBlocksNotMet
 	})
 }
 
