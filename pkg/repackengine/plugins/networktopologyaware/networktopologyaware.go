@@ -479,11 +479,10 @@ func (p *networkTopologyAwarePlugin) registerNodeBlockReceiverPreference(ssn *fr
 			if len(anchors) == 0 {
 				return framework.ReceiverPreference{} // no anchor: abstain, let later keys decide
 			}
-			// Anchor HyperNode set: a single-node unit (R4) collapses to one element,
-			// identical to the scoring fns' [0] convention; a co-placement group's
-			// members can span several HyperNodes (drain.go builds the group plan from
-			// every member's victims), and all of them are "own HyperNode" — preserve
-			// each, not just the first.
+			// Anchor HyperNode set: the drain unit is single-node, so this collapses
+			// to one HyperNode, identical to the scoring fns' [0] convention; the set
+			// form is kept for generality — preserve every anchor HyperNode, not just
+			// the first.
 			ownHs := make(map[string]bool, len(anchors))
 			for _, n := range anchors {
 				if h, ok := bsn.nodeToHyperNode[n]; ok {

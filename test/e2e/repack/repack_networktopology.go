@@ -307,7 +307,9 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 	Context("E3: no networkTopology -> node-level semantics (R1)", func() {
 		It("defragments at node granularity when networkTopology is absent", func() {
 			for i := 0; i < 4; i++ {
-				occupy(ctx, fmt.Sprintf("e3-w%d", i), nodes[i], 1)
+				// Movable fixture: a nodeName-pinned vcjob template is treated as
+				// immovable by the engine and can never consolidate (E1 does the same).
+				occupyMovableVCJob(ctx, fmt.Sprintf("e3-w%d", i), nodes[i], 1)
 			}
 
 			// The same fragmented 4x1-card cluster as E1/E2, but WITHOUT
@@ -383,10 +385,12 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 			// {nodes[0], nodes[1]}: whatever the first receiver tie (nodes[2] or
 			// nodes[3]), the second H member then absorbs the remaining slack and
 			// the unmanaged victims are left with no receiver -> stuck.
-			occupy(ctx, "e6-w0", nodes[0], 4)
-			occupy(ctx, "e6-w1", nodes[1], 5)
-			occupy(ctx, "e6-w2", nodes[2], 3)
-			occupy(ctx, "e6-w3", nodes[3], 3)
+			// Movable fixtures (see E1): nodeName-pinned templates are immovable,
+			// so the spread planner must be able to drain these victims.
+			occupyMovableVCJob(ctx, "e6-w0", nodes[0], 4)
+			occupyMovableVCJob(ctx, "e6-w1", nodes[1], 5)
+			occupyMovableVCJob(ctx, "e6-w2", nodes[2], 3)
+			occupyMovableVCJob(ctx, "e6-w3", nodes[3], 3)
 
 			run, err := newRun("e6", repackv1alpha1.RepackModeDryRun).
 				goal(npuResource).

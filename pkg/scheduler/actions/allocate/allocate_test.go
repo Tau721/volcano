@@ -6400,6 +6400,112 @@ func TestInvalidateSubJobNomination(t *testing.T) {
 	})
 }
 
+// TestDeriveNominatedHyperNode covers the derivation that seeds
+// SubJobInfo.NominatedHyperNode from the pending tasks' nominatedNodeName so a
+// repack placement nomination (written before the gate is opened) pins the
+// subJob to the receiver's HyperNode instead of letting binpack re-pick the
+// vacated source domain.
+func TestDeriveNominatedHyperNode(t *testing.T) {
+	node := func(name string) *api.NodeInfo {
+		ni := api.NewNodeInfo(nil)
+		ni.Name = name
+		return ni
+	}
+	n0, n1, n2, n3 := node("n0"), node("n1"), node("n2"), node("n3")
+	// Standard overlapping-leaf tree: rt-s0 (tier-1) and rt-s3 (tier-3) both hold
+	// {n0,n1} but sit on different branches; rt-s1={n2,n3}; rt-s2 is the tier-2
+	// ancestor of rt-s0/rt-s1.
+	ssn := &framework.Session{
+		RealNodesList: map[string][]*api.NodeInfo{
+			"rt-s0":                       {n0, n1},
+			"rt-s1":                       {n2, n3},
+			"rt-s2":                       {n0, n1, n2, n3},
+			"rt-s3":                       {n0, n1},
+			framework.ClusterTopHyperNode: {n0, n1, n2, n3},
+		},
+	}
+	hn := func(name string, tier int, parent string) *api.HyperNodeInfo {
+		h := api.NewHyperNodeInfo(api.BuildHyperNode(name, tier, nil))
+		h.Parent = parent
+		return h
+	}
+	ssn.HyperNodes = api.HyperNodeInfoMap{
+		"rt-s0":                       hn("rt-s0", 1, "rt-s2"),
+		"rt-s1":                       hn("rt-s1", 1, "rt-s2"),
+		"rt-s2":                       hn("rt-s2", 2, framework.ClusterTopHyperNode),
+		"rt-s3":                       hn("rt-s3", 3, framework.ClusterTopHyperNode),
+		framework.ClusterTopHyperNode: hn(framework.ClusterTopHyperNode, 4, ""),
+	}
+	alloc := New()
+
+	t.Run("pins to the leaf-most domain of a single nomination", func(t *testing.T) {
+		task := newPendingTask("ns/j", "t", "n2", 1000)
+		assert.Equal(t, "rt-s1", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("all nominated tasks must agree on the same domain", func(t *testing.T) {
+		t1 := newPendingTask("ns/j", "t1", "n2", 1000)
+		t2 := newPendingTask("ns/j", "t2", "n3", 1000)
+		assert.Equal(t, "rt-s1", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(t1, t2)))
+	})
+
+	t.Run("inconsistent nominations across tasks yield empty", func(t *testing.T) {
+		t1 := newPendingTask("ns/j", "t1", "n1", 1000) // rt-s0
+		t2 := newPendingTask("ns/j", "t2", "n2", 1000) // rt-s1
+		assert.Equal(t, "", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(t1, t2)))
+	})
+
+	t.Run("nominated node outside the topology yields empty", func(t *testing.T) {
+		task := newPendingTask("ns/j", "t", "n-ghost", 1000)
+		assert.Equal(t, "", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("tasks without a nomination do not pin the subJob", func(t *testing.T) {
+		task := newPendingTask("ns/j", "t", "", 1000)
+		assert.Equal(t, "", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("nil worksheet yields empty", func(t *testing.T) {
+		assert.Equal(t, "", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, nil))
+	})
+
+	t.Run("overlapping equal-size leaves resolve deterministically to the deepest tier", func(t *testing.T) {
+		// n0 is in both rt-s0 (tier-1) and rt-s3 (tier-3); size alone cannot
+		// separate them, so the deepest tier must win.
+		task := newPendingTask("ns/j", "t", "n0", 1000)
+		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("two replicas on overlapping leaves still agree on one domain", func(t *testing.T) {
+		// The F1 defect: rt-s0 and rt-s3 overlap on {n0,n1}; map iteration made
+		// n0 and n1 resolve to different domains, so the multi-replica
+		// nomination yielded "" and the replacement was never pinned.
+		t1 := newPendingTask("ns/j", "t1", "n0", 1000)
+		t2 := newPendingTask("ns/j", "t2", "n1", 1000)
+		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(t1, t2)))
+	})
+
+	t.Run("a partially-evacuated tier-3 subJob resolves receivers inside its own anchor", func(t *testing.T) {
+		// Residual anchors the subJob to rt-s3; n0 is shared with rt-s0, but
+		// resolving to rt-s0 would inflate AllocatedHyperNode to the cluster top
+		// via LCA. Anchor-aware resolution must stay in rt-s3.
+		task := newPendingTask("ns/j", "t", "n0", 1000)
+		assert.Equal(t, "rt-s3", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{AllocatedHyperNode: "rt-s3"}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("a tier-2 anchor resolves to its leaf-most descendant", func(t *testing.T) {
+		task := newPendingTask("ns/j", "t", "n0", 1000)
+		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{AllocatedHyperNode: "rt-s2"}, newSubJobWorksheet(task)))
+	})
+
+	t.Run("an anchor unrelated to the receiver does not filter candidates", func(t *testing.T) {
+		// A fully-evacuated / cross-domain move: the anchor's subtree holds no
+		// candidate for n0, so all candidates remain and deepest tier wins.
+		task := newPendingTask("ns/j", "t", "n0", 1000)
+		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{AllocatedHyperNode: "rt-s1"}, newSubJobWorksheet(task)))
+	})
+}
+
 // TestAllocateFromNomination_FallsBackWhenHyperNodeMissing: pinned hyperNode
 // no longer in topology => fall back and nomination cleared.
 func TestAllocateFromNomination_FallsBackWhenHyperNodeMissing(t *testing.T) {

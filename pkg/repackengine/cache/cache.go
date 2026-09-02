@@ -21,6 +21,7 @@ package cache
 
 import (
 	"context"
+	"time"
 
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -33,6 +34,12 @@ import (
 )
 
 const nodeWorkers = 4
+
+// resourceSyncTimeout bounds the scheduler-cache handler drain at Engine
+// startup, matching the vc-scheduler default. Without it the Engine can open a
+// session while the initial node list is still draining and reconcile against a
+// partial node set.
+const resourceSyncTimeout = 60 * time.Second
 
 // Cluster is a read-only scheduler cache view for Repack planning. The engine
 // opens read-only scheduler sessions from it and never writes scheduler-owned
@@ -63,7 +70,7 @@ func NewCluster(config *rest.Config) *Cluster {
 		nodeWorkers,
 		schedoptions.ServerOpts.IgnoredCSIProvisioners,
 		0,
-		0,
+		resourceSyncTimeout,
 	)}
 }
 

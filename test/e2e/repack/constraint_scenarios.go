@@ -135,8 +135,10 @@ var _ = Describe("Repack scheduler-faithful feasibility & receiver ordering", Se
 	It("still drains a tainted node onto an untainted receiver", func() {
 		// node0 untainted with room, node1 occupied then tainted (NoSchedule only
 		// blocks new placements; the running pod stays).
-		occupy(ctx, "recv", nodes[0], 2)
-		occupy(ctx, "tainted-src", nodes[1], 4)
+		// Movable fixtures: this test drains the tainted node, so its pod must be
+		// drainable (a nodeName-pinned vcjob template is immovable).
+		occupyMovableVCJob(ctx, "recv", nodes[0], 2)
+		occupyMovableVCJob(ctx, "tainted-src", nodes[1], 4)
 		taintNode(ctx, nodes[1])
 		tainted = []string{nodes[1]}
 
@@ -174,9 +176,12 @@ var _ = Describe("Repack scheduler-faithful feasibility & receiver ordering", Se
 	// node0=2 (drained), node1=2 (staying, idle 6), node2=6 (drainable, idle 2).
 	// Best-fit alone would pick node2 (tightest); prefer-staying picks node1.
 	It("fills a staying (receiver-only) node before a tighter drainable one", func() {
-		occupy(ctx, "stay-src", nodes[0], 2)
-		occupy(ctx, "stay-recv", nodes[1], 2) // excluded from draining below -> staying
-		occupy(ctx, "stay-drain", nodes[2], 6)
+		// Movable fixtures: this test asserts the receiver-choice ORDER of a real
+		// consolidation, so the loads must be drainable (pinned templates are
+		// immovable and the planner would find nothing to move).
+		occupyMovableVCJob(ctx, "stay-src", nodes[0], 2)
+		occupyMovableVCJob(ctx, "stay-recv", nodes[1], 2) // excluded from draining below -> staying
+		occupyMovableVCJob(ctx, "stay-drain", nodes[2], 6)
 
 		// Exclude node1 from draining: it becomes receiver-only (staying).
 		scope := &repackv1alpha1.RepackScope{

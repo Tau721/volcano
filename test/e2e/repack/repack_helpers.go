@@ -35,10 +35,12 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
@@ -152,6 +154,16 @@ func occupyMovableVCJob(ctx *e2eutil.TestContext, name, initialNode string, card
 	return occupy(ctx, name, "", cards)
 }
 
+// occupyMovableResource is the movable counterpart of occupyResource: it places
+// the Pod deterministically on initialNode (other nodes tainted during the
+// initial scheduling decision) without persisting spec.nodeName, so a
+// replacement is free to follow Repack's live receiver selection.
+func occupyMovableResource(ctx *e2eutil.TestContext, name, initialNode string, res v1.ResourceName, cards int) *batchv1alpha1.Job {
+	releaseNodes := holdNonTargetNodes(ctx, initialNode)
+	defer releaseNodes()
+	return occupyResource(ctx, name, "", res, cards)
+}
+
 func occupyVCJobReplicas(ctx *e2eutil.TestContext, name, node string, cardsPerPod int, replicas, minAvailable int32) *batchv1alpha1.Job {
 	quantity := resource.MustParse(fmt.Sprintf("%d", cardsPerPod))
 	resources := v1.ResourceList{npuResource: quantity}
@@ -168,6 +180,15 @@ func occupyVCJobReplicas(ctx *e2eutil.TestContext, name, node string, cardsPerPo
 	})
 	Expect(e2eutil.WaitTasksReady(ctx, job, int(replicas))).NotTo(HaveOccurred())
 	return job
+}
+
+// occupyVCJobReplicasMovable is the movable counterpart of occupyVCJobReplicas:
+// it places the replicas deterministically on initialNode without persisting
+// spec.nodeName, so a replacement is free to follow Repack's receiver selection.
+func occupyVCJobReplicasMovable(ctx *e2eutil.TestContext, name, initialNode string, cardsPerPod int, replicas, minAvailable int32) *batchv1alpha1.Job {
+	releaseNodes := holdNonTargetNodes(ctx, initialNode)
+	defer releaseNodes()
+	return occupyVCJobReplicas(ctx, name, "", cardsPerPod, replicas, minAvailable)
 }
 
 // occupyResource creates a one-task vcjob requesting cards of res. It is used
@@ -329,43 +350,67 @@ func holdNonTargetNodes(ctx *e2eutil.TestContext, target string) func() {
 		if nodeName == target {
 			continue
 		}
-		node, err := ctx.Kubeclient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		node = node.DeepCopy()
-		alreadyHeld := false
-		for _, existing := range node.Spec.Taints {
-			if existing.Key == taint.Key && existing.Value == taint.Value && existing.Effect == taint.Effect {
-				alreadyHeld = true
-				break
-			}
-		}
-		if alreadyHeld {
-			continue
-		}
-		node.Spec.Taints = append(node.Spec.Taints, taint)
-		_, err = ctx.Kubeclient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+		addedNode, err := patchNodeTaint(ctx, nodeName, taint)
 		Expect(err).NotTo(HaveOccurred(), "hold non-target fixture node")
-		added = append(added, nodeName)
+		if addedNode {
+			added = append(added, nodeName)
+		}
 	}
 	return func() {
 		for _, nodeName := range added {
-			node, err := ctx.Kubeclient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
-			if err != nil {
-				continue
-			}
-			node = node.DeepCopy()
-			filtered := node.Spec.Taints[:0]
-			for _, existing := range node.Spec.Taints {
-				if existing.Key == taint.Key && existing.Value == taint.Value && existing.Effect == taint.Effect {
-					continue
-				}
-				filtered = append(filtered, existing)
-			}
-			node.Spec.Taints = filtered
-			_, err = ctx.Kubeclient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
-			Expect(err).NotTo(HaveOccurred(), "release non-target fixture node")
+			Expect(clearNodeTaint(ctx, nodeName, taint)).NotTo(HaveOccurred(), "release non-target fixture node")
 		}
 	}
+}
+
+// patchNodeTaint applies taint to nodeName unless already present, retrying on
+// resourceVersion conflicts (the live scheduler/kubelet keeps bumping node
+// resourceVersions, so a plain read-modify-write intermittently 409s). Returns
+// whether the taint was newly added.
+func patchNodeTaint(ctx *e2eutil.TestContext, nodeName string, taint v1.Taint) (bool, error) {
+	added := false
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := ctx.Kubeclient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		node = node.DeepCopy()
+		for _, existing := range node.Spec.Taints {
+			if existing.Key == taint.Key && existing.Value == taint.Value && existing.Effect == taint.Effect {
+				return nil // already held
+			}
+		}
+		node.Spec.Taints = append(node.Spec.Taints, taint)
+		added = true
+		_, err = ctx.Kubeclient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+		return err
+	})
+	return added, err
+}
+
+// clearNodeTaint removes taint from nodeName, retrying on resourceVersion
+// conflicts; a missing node or missing taint is a no-op.
+func clearNodeTaint(ctx *e2eutil.TestContext, nodeName string, taint v1.Taint) error {
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		node, err := ctx.Kubeclient.CoreV1().Nodes().Get(context.TODO(), nodeName, metav1.GetOptions{})
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return err
+		}
+		node = node.DeepCopy()
+		filtered := node.Spec.Taints[:0]
+		for _, existing := range node.Spec.Taints {
+			if existing.Key == taint.Key && existing.Value == taint.Value && existing.Effect == taint.Effect {
+				continue
+			}
+			filtered = append(filtered, existing)
+		}
+		node.Spec.Taints = filtered
+		_, err = ctx.Kubeclient.CoreV1().Nodes().Update(context.TODO(), node, metav1.UpdateOptions{})
+		return err
+	})
 }
 
 // ---- RepackRun helpers ---------------------------------------------------

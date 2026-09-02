@@ -125,6 +125,27 @@ func NewEngine(config *rest.Config, engineConfig Config) (*Engine, error) {
 				e.enqueue(newRun)
 			}
 		},
+		DeleteFunc: func(obj interface{}) {
+			run, ok := obj.(*repackv1alpha1.RepackRun)
+			if !ok {
+				if tombstone, ok := obj.(cache.DeletedFinalStateUnknown); ok {
+					run, ok = tombstone.Obj.(*repackv1alpha1.RepackRun)
+				}
+				if !ok {
+					return
+				}
+			}
+			if run.Spec.Mode != repackv1alpha1.RepackModeExecute {
+				return
+			}
+			// Deleting a Run before a terminal stage would leak the in-memory
+			// K=1 slot forever (the reconcile release only happens on a
+			// terminal/StageCleanup status write). Release it here so later
+			// Execute runs are not blocked by a deleted owner.
+			if e.markExecuteDone(run.Name) {
+				e.requeueGatedRuns()
+			}
+		},
 	})
 	return e, nil
 }

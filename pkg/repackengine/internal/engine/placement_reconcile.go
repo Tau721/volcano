@@ -79,9 +79,16 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 		return runtimeError(err)
 	}
 	snapshot := adapter.NewSessionSnapshot(schedulerSession, targetResource, scope)
+	nodes := snapshot.Nodes()
+	nodeNames := make(map[string]struct{}, len(nodes))
+	for _, n := range nodes {
+		if n != nil {
+			nodeNames[n.Name] = struct{}{}
+		}
+	}
 	excludedFreedNodes := enginestatus.RealizedFreedNodeNames(run)
 	klog.V(4).InfoS("repack: evaluating live placement receivers",
-		"run", run.Name, "candidateCount", len(pending), "snapshotNodeCount", len(snapshot.Nodes()),
+		"run", run.Name, "candidateCount", len(pending), "snapshotNodeCount", len(nodes),
 		"excludedFreedNodes", excludedFreedNodes)
 	committed := make([]*engineapi.Move, 0, len(pending))
 	selected := make(map[placementexecutor.Identity]string, len(pending))
@@ -96,11 +103,27 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 		if pod.UID != relocation.Placement.ReplacementPodUID || pod.Spec.NodeName != "" {
 			continue
 		}
+		// A restarted Engine can reconcile an in-flight placement before its
+		// scheduler node cache has finished draining the initial node list, so
+		// the planned node may be transiently absent. Committing now would
+		// silently pick a different receiver; requeue until it is visible. The
+		// placement's ExpirationTime still bounds the wait.
+		if relocation.PlannedNodeName != "" {
+			if _, plannedVisible := nodeNames[relocation.PlannedNodeName]; !plannedVisible {
+				klog.V(3).InfoS("repack: planned receiver node not yet visible in snapshot; placement requeued",
+					"run", run.Name, "pod", relocation.Namespace+"/"+relocation.Placement.ReplacementPodName,
+					"plannedNode", relocation.PlannedNodeName, "snapshotNodeCount", len(nodes))
+				if err := e.markWaitingForNodeSelection(ctx, run.Name, pending); err != nil {
+					return runtimeError(err)
+				}
+				return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+			}
+		}
 		// The replacement is a live Pod and has not been bound yet; constructing a
 		// scheduler TaskInfo from it preserves its current resource requests and
 		// scheduling constraints for the full predicate simulation below.
 		task := schedapi.NewTaskInfo(pod)
-		receivers := placementexecutor.Receivers(snapshot.Nodes(), excludedFreedNodes, relocation.PlannedNodeName, task)
+		receivers := placementexecutor.Receivers(nodes, excludedFreedNodes, relocation.PlannedNodeName, task)
 		klog.V(4).InfoS("repack: replacement receiver candidates evaluated",
 			"run", run.Name, "pod", relocation.Namespace+"/"+relocation.Placement.ReplacementPodName,
 			"plannedNode", relocation.PlannedNodeName, "receiverCount", len(receivers))

@@ -296,20 +296,20 @@ func (ti *TaskInfo) Clone() *TaskInfo {
 		TaskRole:                    ti.TaskRole,
 		Priority:                    ti.Priority,
 		Pod:                         ti.Pod,
-		Resreq:                      ti.Resreq.Clone(),
-		InitResreq:                  ti.InitResreq.Clone(),
+		Resreq:                      cloneResource(ti.Resreq),
+		InitResreq:                  cloneResource(ti.InitResreq),
 		VolumeReady:                 ti.VolumeReady,
 		Preemptable:                 ti.Preemptable,
 		BestEffort:                  ti.BestEffort,
 		HasRestartableInitContainer: ti.HasRestartableInitContainer,
 		RevocableZone:               ti.RevocableZone,
-		NumaInfo:                    ti.NumaInfo.Clone(),
+		NumaInfo:                    cloneTopologyInfo(ti.NumaInfo),
 		SchGated:                    ti.SchGated,
 		TransactionContext: TransactionContext{
 			NodeName: ti.NodeName,
 			Status:   ti.Status,
 		},
-		LastTransaction: ti.LastTransaction.Clone(),
+		LastTransaction: cloneTransactionContext(ti.LastTransaction),
 	}
 
 	if ti.DRAResreq != nil {
@@ -326,6 +326,33 @@ func (ti *TaskInfo) Clone() *TaskInfo {
 	}
 
 	return res
+}
+
+// cloneResource is a nil-safe Resource.Clone; Resreq/InitResreq may be nil on a
+// task (e.g. repack victims), and the nil must be preserved.
+func cloneResource(r *Resource) *Resource {
+	if r == nil {
+		return nil
+	}
+	return r.Clone()
+}
+
+// cloneTopologyInfo is a nil-safe TopologyInfo.Clone; NumaInfo is only set on
+// numa-aware binds, so ordinary tasks carry nil.
+func cloneTopologyInfo(info *TopologyInfo) *TopologyInfo {
+	if info == nil {
+		return nil
+	}
+	return info.Clone()
+}
+
+// cloneTransactionContext is a nil-safe TransactionContext.Clone; LastTransaction
+// is typically nil.
+func cloneTransactionContext(ctx *TransactionContext) *TransactionContext {
+	if ctx == nil {
+		return nil
+	}
+	return ctx.Clone()
 }
 
 // hasRestartableInitContainer returns whether pod has restartable container.

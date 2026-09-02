@@ -148,8 +148,8 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 	// C9: if every eviction is rejected (a maxUnavailable=0 PDB), Execute fails
 	// specifically at the eviction stage.
 	It("fails with EvictionFailed when all evictions are blocked by a PDB", func() {
-		jobA := occupy(ctx, "pdb-a", nodes[0], 4)
-		jobB := occupy(ctx, "pdb-b", nodes[1], 2)
+		jobA := occupyMovableVCJob(ctx, "pdb-a", nodes[0], 4)
+		jobB := occupyMovableVCJob(ctx, "pdb-b", nodes[1], 2)
 		// Every movable fixture pod is protected. This makes every possible plan
 		// eviction fail, rather than allowing the planner to choose an unprotected
 		// alternative and accidentally turn this into a non-asserting test.
@@ -265,7 +265,7 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 	// E14: scope.podGroups.include by exact name — only the selected gang may move.
 	It("scope.podGroups.include limits which gangs move", func() {
 		occupy(ctx, "inc-a", nodes[0], 4)
-		selectedJob := occupy(ctx, "inc-b", nodes[1], 2)
+		selectedJob := occupyMovableVCJob(ctx, "inc-b", nodes[1], 2)
 		selectedPodGroup := podGroupNameForOwner(ctx, selectedJob.UID)
 
 		// Include the known 2-card PodGroup, which can move onto inc-a's node and
@@ -288,7 +288,7 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 	})
 
 	It("moves all replicas of a scoped vcjob PodGroup when minAvailable is one", func() {
-		multi := occupyVCJobReplicas(ctx, "gang-minavailable", nodes[0], 2, 2, 1)
+		multi := occupyVCJobReplicasMovable(ctx, "gang-minavailable", nodes[0], 2, 2, 1)
 		occupy(ctx, "gang-receiver", nodes[1], 4)
 		selectedPodGroup := podGroupNameForOwner(ctx, multi.UID)
 		scope := &repackv1alpha1.RepackScope{
@@ -369,9 +369,10 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 
 	// F18: maxPerRun.podGroups caps the number of gangs a single run relocates.
 	It("maxPerRun.podGroups caps moved gangs", func() {
-		occupy(ctx, "cap-a", nodes[0], 2)
-		occupy(ctx, "cap-b", nodes[1], 2)
-		occupy(ctx, "cap-c", nodes[2], 2)
+		// Movable fixtures: maxPerRun caps real consolidation moves.
+		occupyMovableVCJob(ctx, "cap-a", nodes[0], 2)
+		occupyMovableVCJob(ctx, "cap-b", nodes[1], 2)
+		occupyMovableVCJob(ctx, "cap-c", nodes[2], 2)
 
 		one := int32(1)
 		run, err := newRun("maxperrun", repackv1alpha1.RepackModeDryRun).goal(npuResource).
@@ -389,8 +390,9 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 	// F19: maxPerRun.resources is measured in user-facing whole accelerator
 	// cards. The only useful relocation here moves a 2-card gang.
 	It("maxPerRun.resources caps moved accelerator cards", func() {
-		occupy(ctx, "resource-cap-a", nodes[0], 4)
-		occupy(ctx, "resource-cap-b", nodes[1], 2)
+		// Movable fixtures: the resource cap is measured against real moves.
+		occupyMovableVCJob(ctx, "resource-cap-a", nodes[0], 4)
+		occupyMovableVCJob(ctx, "resource-cap-b", nodes[1], 2)
 
 		blocked, err := newRun("resource-cap-blocked", repackv1alpha1.RepackModeDryRun).goal(npuResource).
 			maxPerRun(&repackv1alpha1.MaxPerRun{

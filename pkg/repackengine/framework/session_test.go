@@ -19,6 +19,7 @@ package framework
 import (
 	"testing"
 
+	"k8s.io/apimachinery/pkg/util/sets"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -38,6 +39,30 @@ func TestSession_MovableAND(t *testing.T) {
 	}
 	if mv(task("a", "ns/frozen", 1)) {
 		t.Error("frozen vetoed by second fn")
+	}
+}
+
+// A task whose workload template pins spec.nodeName (resolved by the Engine into
+// PinnedTasks) is immovable, while an otherwise-identical free task stays movable.
+// This is the planner-side guarantee that a nodeName-pinned pod is never drained:
+// its evicted replacement would be recreated glued to the same node by the
+// template, so the drain could not complete. The pin cannot be read off the live
+// pod — the scheduler writes spec.nodeName into every bound pod — hence the set.
+func TestSession_MovableExcludesPinnedTasks(t *testing.T) {
+	ssn := OpenSession(SessionConfig{
+		Snapshot:    &fakeSnap{},
+		Resource:    gpu,
+		PinnedTasks: sets.New[schedapi.TaskID]("ns/g/pinned"),
+	}, nil)
+	mv := ssn.Movable()
+
+	pinned := &schedapi.TaskInfo{UID: "ns/g/pinned", Name: "pinned", Job: "ns/g"}
+	if mv(pinned) {
+		t.Error("pinned task must be immovable")
+	}
+	free := &schedapi.TaskInfo{UID: "ns/g/free", Name: "free", Job: "ns/g"}
+	if !mv(free) {
+		t.Error("free task must stay movable")
 	}
 }
 

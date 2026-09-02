@@ -52,8 +52,10 @@ var _ = Describe("Repack DryRun & admission", Serial, func() {
 	// B1/B2/B3: fragmented cluster -> DryRun recommends consolidation, reports a
 	// plan with moves + freed nodes + reduced fragmentation, and evicts nothing.
 	It("recommends consolidation on a fragmented cluster (no eviction)", func() {
-		occupy(ctx, "frag-a", nodes[0], 4) // node0: 4/8
-		occupy(ctx, "frag-b", nodes[1], 2) // node1: 2/8 (node2 empty)
+		// Movable fixtures: a nodeName-pinned vcjob template is immovable, and a
+		// fragmented cluster whose gangs cannot drain can never recommend.
+		occupyMovableVCJob(ctx, "frag-a", nodes[0], 4) // node0: 4/8
+		occupyMovableVCJob(ctx, "frag-b", nodes[1], 2) // node1: 2/8 (node2 empty)
 		before := runningPodCount(ctx)
 
 		run, err := newRun("dryrun-recommend", repackv1alpha1.RepackModeDryRun).goal(npuResource).create(ctx)
@@ -128,8 +130,10 @@ var _ = Describe("Repack DryRun & admission", Serial, func() {
 	// D10/D11: empty goals falls back to the engine's --repack-default-resource
 	// (set to volcano.sh/e2e-npu for the e2e), so it still defragments.
 	It("uses the engine default resource when goals is empty", func() {
-		occupy(ctx, "def-a", nodes[0], 4)
-		occupy(ctx, "def-b", nodes[1], 2)
+		// Movable fixtures: this tests default-resource resolution, which only
+		// matters when the default-resource workload can actually consolidate.
+		occupyMovableVCJob(ctx, "def-a", nodes[0], 4)
+		occupyMovableVCJob(ctx, "def-b", nodes[1], 2)
 
 		run, err := newRun("dryrun-default", repackv1alpha1.RepackModeDryRun).create(ctx) // no goal()
 		Expect(err).NotTo(HaveOccurred())
@@ -148,8 +152,10 @@ var _ = Describe("Repack DryRun & admission", Serial, func() {
 		for _, n := range nodes {
 			advertiseResource(ctx, n, altNPUResource, npuPerNode)
 		}
-		occupyResource(ctx, "goal-a", nodes[0], altNPUResource, 4)
-		occupyResource(ctx, "goal-b", nodes[1], altNPUResource, 2)
+		// Movable fixtures on the goal resource: consolidation can only be
+		// recommended when the fragmented gangs are actually drainable.
+		occupyMovableResource(ctx, "goal-a", nodes[0], altNPUResource, 4)
+		occupyMovableResource(ctx, "goal-b", nodes[1], altNPUResource, 2)
 
 		run, err := newRun("explicit-goal", repackv1alpha1.RepackModeDryRun).goal(altNPUResource).create(ctx)
 		Expect(err).NotTo(HaveOccurred())
@@ -165,8 +171,10 @@ var _ = Describe("Repack DryRun & admission", Serial, func() {
 	// the 4-card gang reduces fragmentation by exactly 1/3, so a 33pp gate
 	// admits the plan whereas 34pp rejects it.
 	It("honors goals.minFragImprovementPercent as the plan benefit gate", func() {
-		occupy(ctx, "threshold-a", nodes[0], 4)
-		occupy(ctx, "threshold-b", nodes[1], 2)
+		// Movable fixtures: the gate compares real consolidation candidates, so the
+		// 4- and 2-card gangs must be drainable.
+		occupyMovableVCJob(ctx, "threshold-a", nodes[0], 4)
+		occupyMovableVCJob(ctx, "threshold-b", nodes[1], 2)
 
 		admit, err := newRun("threshold-admit", repackv1alpha1.RepackModeDryRun).
 			goalWithMinFragImprovement(npuResource, 33).create(ctx)

@@ -21,9 +21,14 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
+	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
+	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
 	state "volcano.sh/repack-controller/pkg/state"
 
 	"volcano.sh/volcano/pkg/repackengine/adapter"
@@ -32,6 +37,7 @@ import (
 	engineframework "volcano.sh/volcano/pkg/repackengine/framework"
 	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 	enginestatus "volcano.sh/volcano/pkg/repackengine/status"
+	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 )
 
@@ -79,6 +85,11 @@ func (r *actionRuntime) OpenPlanningCycle(ctx context.Context, run *repackv1alph
 	snapshot := adapter.NewSessionSnapshot(schedulerSession, targetResource, scope)
 	resolvedScope := enginestatus.BuildResolvedScope(snapshot.Nodes(), scope, targetResource)
 	maxPodGroups, maxResource, hasPodGroupLimit, hasResourceLimit := engineconf.MaxPerRun(run, targetResource)
+	pinnedTasks, err := collectPinnedTasks(ctx, e.volcanoClient, schedulerSession, scope)
+	if err != nil {
+		closeCycle()
+		return nil, engineframework.NewActionError(state.ReasonScopeResolutionFailed, err)
+	}
 	ssn := engineframework.OpenSession(engineframework.SessionConfig{
 		Context:                   ctx,
 		Snapshot:                  snapshot,
@@ -92,6 +103,7 @@ func (r *actionRuntime) OpenPlanningCycle(ctx context.Context, run *repackv1alph
 		MaxResource:               maxResource,
 		LimitPodGroups:            hasPodGroupLimit,
 		LimitResource:             hasResourceLimit,
+		PinnedTasks:               pinnedTasks,
 	}, e.config.Plugins)
 	closePlanning := func() {
 		engineframework.CloseSession(ssn)
@@ -200,4 +212,72 @@ func (r *actionRuntime) CleanupPlacement(ctx context.Context, run *repackv1alpha
 
 func (r *actionRuntime) RecordPlanComputed(run *repackv1alpha1.RepackRun) {
 	r.engine.recordRunEvent(run, v1.EventTypeNormal, eventReasonPlanComputed, plannedBenefitEventMessage(run))
+}
+
+// collectPinnedTasks returns the scheduler task UIDs whose owning vcjob template
+// pins spec.nodeName, restricted to gangs in scope. A pinned pod can never be
+// relocated — the vcjob controller recreates an evicted replacement from the
+// same template — so the planner must never select it as a victim.
+//
+// Only vcjob templates are inspected; native workloads (Deployment/StatefulSet)
+// are not yet covered. They pin via temporary taints rather than nodeName, so a
+// template pin there is unexpected, but would go undetected and the replacement
+// recreated onto the same node. The live pod alone cannot distinguish a pin
+// (every bound pod carries spec.nodeName).
+func collectPinnedTasks(ctx context.Context, volcanoClient vcclientset.Interface, ssn *schedframework.Session, scope *enginescope.Matcher) (sets.Set[schedapi.TaskID], error) {
+	pinned := sets.New[schedapi.TaskID]()
+	type jobKey struct{ namespace, name string }
+	// task-spec names whose template is nodeName-pinned, per vcjob, resolved once.
+	pinnedTaskSpec := make(map[jobKey]sets.Set[string])
+
+	for _, job := range ssn.Jobs {
+		if job == nil || (scope != nil && !scope.InScope(job.UID)) {
+			continue
+		}
+		for _, task := range job.Tasks {
+			if task == nil || task.Pod == nil {
+				continue
+			}
+			key := jobKey{namespace: task.Pod.Namespace, name: task.Pod.Labels[batchv1alpha1.JobNameKey]}
+			if key.name == "" {
+				continue
+			}
+			if _, seen := pinnedTaskSpec[key]; seen {
+				continue
+			}
+			// Default to nothing pinned; only vcjob templates can pin nodeName.
+			pinnedTaskSpec[key] = sets.New[string]()
+			vcjob, err := volcanoClient.BatchV1alpha1().Jobs(key.namespace).Get(ctx, key.name, metav1.GetOptions{})
+			if err != nil {
+				// A missing workload is fine (nothing recreates these pods pinned),
+				// but any other failure would silently make every pod movable and
+				// drain pinned pods. Fail the cycle closed on an incomplete view.
+				if !apierrors.IsNotFound(err) {
+					return nil, fmt.Errorf("cannot read vcjob template for pinned-task detection, job=%s/%s: %w",
+						key.namespace, key.name, err)
+				}
+				continue
+			}
+			for _, taskSpec := range vcjob.Spec.Tasks {
+				if taskSpec.Template.Spec.NodeName != "" {
+					pinnedTaskSpec[key].Insert(taskSpec.Name)
+				}
+			}
+		}
+	}
+	for _, job := range ssn.Jobs {
+		if job == nil || (scope != nil && !scope.InScope(job.UID)) {
+			continue
+		}
+		for _, task := range job.Tasks {
+			if task == nil || task.Pod == nil {
+				continue
+			}
+			key := jobKey{namespace: task.Pod.Namespace, name: task.Pod.Labels[batchv1alpha1.JobNameKey]}
+			if pinnedTaskSpec[key].Has(task.Pod.Labels[batchv1alpha1.TaskSpecKey]) {
+				pinned.Insert(task.UID)
+			}
+		}
+	}
+	return pinned, nil
 }

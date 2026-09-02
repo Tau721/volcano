@@ -21,6 +21,7 @@ import (
 	"sort"
 
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
@@ -58,6 +59,11 @@ type SessionConfig struct {
 	MaxResource               int64
 	LimitPodGroups            bool // distinguishes omitted from explicit zero
 	LimitResource             bool // distinguishes omitted from explicit zero
+	// PinnedTasks is the set of scheduler task UIDs whose workload template pins
+	// spec.nodeName. A pinned pod can never be relocated — the controller
+	// recreates an evicted replacement from the same template — so Movable()
+	// excludes these tasks. Nil means no pinned tasks.
+	PinnedTasks sets.Set[schedapi.TaskID]
 }
 
 // Session is one repack pass: a snapshot plus the callbacks plugins register,
@@ -71,6 +77,7 @@ type Session struct {
 	domainFns      []DomainFn
 	planScoreTerms []planScoreTerm
 	constraintFns  []PlanConstraintFn
+	pinnedTasks    sets.Set[schedapi.TaskID]
 
 	candidateFilterFns    []namedCandidateFilter
 	receiverPoolFns       []ReceiverPoolFn
@@ -95,6 +102,7 @@ func OpenSession(configuration SessionConfig, pluginOptions []PluginOption) *Ses
 	ssn := &Session{
 		configuration: configuration,
 		capabilities:  make(map[PluginCapability]bool),
+		pinnedTasks:   configuration.PinnedTasks,
 	}
 	ssn.registerBuiltinConstraints()
 	canonicalOptions := append([]PluginOption(nil), pluginOptions...)
@@ -179,10 +187,22 @@ func (s *Session) Nodes() []*schedapi.NodeInfo { return s.configuration.Snapshot
 // Movable returns an api.Movable that first enforces Repack's non-optional
 // PodGroup ownership boundary, then applies the AND of all registered policy
 // callbacks. With no callbacks, every valid PodGroup task is movable.
+//
+// A pod pinned via spec.nodeName is immovable: the scheduler honors the pin
+// outside its filter stack, so Repack can never relocate it to another node.
+// Treating it as immovable excludes it from VictimsOf and marks its node
+// unfreeable, matching what Execute can actually achieve.
 func (s *Session) Movable() api.Movable {
 	fns := s.movableFns
 	return func(t *schedapi.TaskInfo) bool {
 		if _, _, valid := api.PodGroupIdentity(t); !valid {
+			return false
+		}
+		// A live bound pod always carries spec.nodeName, so only the workload
+		// template distinguishes a true pin (the Engine pre-resolves those task
+		// UIDs into PinnedTasks). Treat a pinned pod as immovable, or it would be
+		// drained and its replacement glued back onto the same node.
+		if s.pinnedTasks != nil && s.pinnedTasks.Has(t.UID) {
 			return false
 		}
 		for _, fn := range fns {

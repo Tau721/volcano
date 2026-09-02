@@ -33,13 +33,16 @@ import (
 // This suite is the positive-path regression net for the core defragmentation
 // capability: a battery of distinct fragmentation shapes that must each yield a
 // real consolidation plan. Every case is DryRun, so it is fully deterministic
-// (pods are pinned, nothing is evicted) and exercises the whole planning pipeline
+// (nothing is evicted) and exercises the whole planning pipeline
 // — fragmentation measurement, gang-aware drain, reschedulability feasibility,
 // best-fit receiver selection and scoring.
 //
-// Each scenario advertises the fake NPU on len(cardsPerNode) worker nodes and pins
-// one single-pod gang of the given card count on each non-zero node (a 0 entry is
-// an advertised-but-empty node, used to check empty nodes are excluded as receivers).
+// Each scenario advertises the fake NPU on len(cardsPerNode) worker nodes and
+// places one single-pod gang of the given card count deterministically on each
+// non-zero node (a 0 entry is an advertised-but-empty node, used to check empty
+// nodes are excluded as receivers). Fixtures must be movable — never vcjob
+// templates that persist spec.nodeName, which the engine treats as pinned and
+// refuses to drain — so the fragmented gangs can actually consolidate.
 // expectedFreed is the optimal number of nodes the plan should empty; the greedy
 // drain reaches the optimum for these shapes, so we assert FreedNodeCount >= it.
 var _ = Describe("Repack defragmentation scenarios (DryRun consolidation)", Serial, func() {
@@ -94,7 +97,11 @@ var _ = Describe("Repack defragmentation scenarios (DryRun consolidation)", Seri
 			occupied := map[string]bool{}
 			for i, cards := range sc.cardsPerNode {
 				if cards > 0 {
-					occupy(ctx, fmt.Sprintf("%s-%d", sc.name, i), nodes[i], cards)
+					// The consolidation fixtures must be movable: the engine treats
+					// vcjob templates that persist spec.nodeName as pinned and never
+					// drains them (the controller would recreate a replacement on the
+					// same node), so a nodeName-pinned layout can never consolidate.
+					occupyMovableVCJob(ctx, fmt.Sprintf("%s-%d", sc.name, i), nodes[i], cards)
 					occupied[nodes[i]] = true
 				}
 			}
