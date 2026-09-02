@@ -26,7 +26,8 @@ import (
 type NetworkTopologySpecApplyConfiguration struct {
 	// Mode specifies the mode of the network topology constrain.
 	Mode *schedulingv1beta1.NetworkTopologyMode `json:"mode,omitempty"`
-	// HighestTierAllowed specifies the highest tier that a job allowed to cross when scheduling.
+	// HighestTierAllowed is a mandatory maximum LCA tier in hard mode and a preferred,
+	// fallback-capable maximum LCA tier in soft mode. It is optional in soft mode.
 	HighestTierAllowed *int `json:"highestTierAllowed,omitempty"`
 	// HighestTierName specifies the highest tier name that a job allowed to cross when scheduling.
 	// HighestTierName and HighestTierAllowed cannot be set simultaneously.

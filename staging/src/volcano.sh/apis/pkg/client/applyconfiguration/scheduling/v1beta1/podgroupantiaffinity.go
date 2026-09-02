@@ -19,6 +19,8 @@ package v1beta1
 
 // PodGroupAntiAffinityApplyConfiguration represents a declarative configuration of the PodGroupAntiAffinity type for use
 // with apply.
+//
+// PodGroupAntiAffinity defines required/preferred anti-affinity against other PodGroups.
 type PodGroupAntiAffinityApplyConfiguration struct {
 	Required  []PodGroupAffinityTermApplyConfiguration `json:"required,omitempty"`
 	Preferred []PodGroupAffinityTermApplyConfiguration `json:"preferred,omitempty"`

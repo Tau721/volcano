@@ -23,6 +23,8 @@ import (
 
 // PodGroupAffinityTermApplyConfiguration represents a declarative configuration of the PodGroupAffinityTerm type for use
 // with apply.
+//
+// PodGroupAffinityTerm selects matching PodGroups and the topology tier for HyperNode comparison.
 type PodGroupAffinityTermApplyConfiguration struct {
 	Weight            *int32                              `json:"weight,omitempty"`
 	PodGroupSelector  *v1.LabelSelectorApplyConfiguration `json:"podGroupSelector,omitempty"`

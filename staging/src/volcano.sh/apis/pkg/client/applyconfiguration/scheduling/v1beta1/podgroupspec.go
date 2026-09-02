@@ -55,7 +55,7 @@ type PodGroupSpecApplyConfiguration struct {
 	// Compared with minTaskMember, it offers more comprehensive topology scheduling and Gang scheduling management capabilities.
 	// Concurrent use with minTaskMember is not recommended, and SubGroupPolicy is the long-term evolution direction.
 	SubGroupPolicy []SubGroupPolicySpecApplyConfiguration `json:"subGroupPolicy,omitempty"`
-	// TopologyAffinity defines the topology affinity of the pod group.
+	// TopologyAffinity expresses inter-group topology affinity and anti-affinity on the HyperNode tree.
 	TopologyAffinity *TopologyAffinitySpecApplyConfiguration `json:"topologyAffinity,omitempty"`
 }
 

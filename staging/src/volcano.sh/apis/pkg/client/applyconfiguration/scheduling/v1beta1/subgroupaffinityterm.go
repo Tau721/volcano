@@ -19,6 +19,8 @@ package v1beta1
 
 // SubGroupAffinityTermApplyConfiguration represents a declarative configuration of the SubGroupAffinityTerm type for use
 // with apply.
+//
+// SubGroupAffinityTerm selects SubGroupPolicy names and the topology tier for HyperNode comparison.
 type SubGroupAffinityTermApplyConfiguration struct {
 	SubGroups        []string `json:"subGroups,omitempty"`
 	Weight           *int32   `json:"weight,omitempty"`

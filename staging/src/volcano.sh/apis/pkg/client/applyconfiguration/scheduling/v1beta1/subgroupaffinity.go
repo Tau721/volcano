@@ -19,6 +19,8 @@ package v1beta1
 
 // SubGroupAffinityApplyConfiguration represents a declarative configuration of the SubGroupAffinity type for use
 // with apply.
+//
+// SubGroupAffinity defines required/preferred affinity between SubJobs in the same PodGroup.
 type SubGroupAffinityApplyConfiguration struct {
 	Required  []SubGroupAffinityTermApplyConfiguration `json:"required,omitempty"`
 	Preferred []SubGroupAffinityTermApplyConfiguration `json:"preferred,omitempty"`

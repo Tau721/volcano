@@ -19,6 +19,8 @@ package v1beta1
 
 // SubGroupAntiAffinityApplyConfiguration represents a declarative configuration of the SubGroupAntiAffinity type for use
 // with apply.
+//
+// SubGroupAntiAffinity defines required/preferred anti-affinity between SubJobs in the same PodGroup.
 type SubGroupAntiAffinityApplyConfiguration struct {
 	Required  []SubGroupAffinityTermApplyConfiguration `json:"required,omitempty"`
 	Preferred []SubGroupAffinityTermApplyConfiguration `json:"preferred,omitempty"`

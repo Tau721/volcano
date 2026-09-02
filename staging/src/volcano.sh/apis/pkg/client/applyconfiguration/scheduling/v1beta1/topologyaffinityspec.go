@@ -19,6 +19,8 @@ package v1beta1
 
 // TopologyAffinitySpecApplyConfiguration represents a declarative configuration of the TopologyAffinitySpec type for use
 // with apply.
+//
+// TopologyAffinitySpec holds topology affinity rules on the HyperNode tree.
 type TopologyAffinitySpecApplyConfiguration struct {
 	PodGroupAntiAffinity *PodGroupAntiAffinityApplyConfiguration `json:"podGroupAntiAffinity,omitempty"`
 	SubGroupAffinity     *SubGroupAffinityApplyConfiguration     `json:"subGroupAffinity,omitempty"`
