@@ -37,6 +37,22 @@ func TestCandidatesRequireConcreteReplacement(t *testing.T) {
 	}
 }
 
+func TestCompleteOnlyWaitsForAcceptedEvictionSubset(t *testing.T) {
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Relocations: []repackv1alpha1.PodRelocationStatus{
+			{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted}, Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced}},
+			{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionInProgress}, Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement}},
+		},
+	}}
+	if !Complete(run) {
+		t.Fatal("a placed accepted subset must be complete even while another eviction is retryable")
+	}
+	run.Status.Relocations[0].Placement.Phase = repackv1alpha1.PodPlacementNominated
+	if Complete(run) {
+		t.Fatal("an accepted replacement must reach a terminal placement phase")
+	}
+}
+
 func TestReceiversPreferPlannedNodeWhenIdleLedgerIsStale(t *testing.T) {
 	resourceName := v1.ResourceName("example.com/accelerator")
 	resource := func(value float64) *schedapi.Resource {

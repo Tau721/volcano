@@ -37,11 +37,11 @@ const (
 	// collision — this is purely for a consistent, memorable convention.
 	defaultHealthzAddress = ":11251"
 	defaultMetricsAddress = ":8081"
-	// defaultExecuteCooldown / defaultNominationTTL are the default times; keep
-	// defaultExecuteCooldown in sync with the controller's GC cooldown floor.
-	defaultExecuteCooldown = 10 * time.Minute
-	defaultNominationTTL   = 10 * time.Minute
-	defaultResyncPeriod    = 10 * time.Minute
+	// defaultExecuteCooldown is kept in sync with the controller's GC cooldown
+	// floor. defaultExecutionTimeout bounds the complete Execute workflow.
+	defaultExecuteCooldown  = 10 * time.Minute
+	defaultExecutionTimeout = 10 * time.Minute
+	defaultResyncPeriod     = 10 * time.Minute
 )
 
 // ServerOption holds the volcano-repack-engine configuration.
@@ -58,12 +58,12 @@ type ServerOption struct {
 	// order-independent capability set.
 	// MinNodesFreed is the benefit gate. DefaultResource is the target when a
 	// RepackRun's spec.goals is empty.
-	Actions         []string
-	Plugins         []string
-	MinNodesFreed   int
-	DefaultResource string
-	NominationTTL   time.Duration
-	Cooldown        time.Duration
+	Actions          []string
+	Plugins          []string
+	MinNodesFreed    int
+	DefaultResource  string
+	ExecutionTimeout time.Duration
+	Cooldown         time.Duration
 
 	LeaderElection      componentbaseconfig.LeaderElectionConfiguration
 	LockObjectNamespace string
@@ -102,7 +102,7 @@ func (s *ServerOption) AddFlags(fs *pflag.FlagSet) {
 		"Repack capability plugin set; input order does not affect behavior (default: workloadscope,repackbudget,nodeconsolidation,networktopologyaware,workloaddisruption,gangdisruption,binpack)")
 	fs.IntVar(&s.MinNodesFreed, "repack-min-nodes-freed", 0, "Benefit gate: minimum whole nodes a plan must free (0 = engine default 1)")
 	fs.StringVar(&s.DefaultResource, "repack-default-resource", "", "Target resource when a RepackRun's spec.goals is empty (e.g. nvidia.com/gpu)")
-	fs.DurationVar(&s.NominationTTL, "repack-nomination-ttl", defaultNominationTTL, "How long an Execute nomination is re-asserted onto the replacement pod before expiring")
+	fs.DurationVar(&s.ExecutionTimeout, "repack-execution-timeout", defaultExecutionTimeout, "Maximum time from the first eviction batch until eviction, replacement placement, and result verification complete")
 
 	fs.BoolVar(&s.EnableHealthz, "enable-healthz", false, "Enable the /healthz liveness endpoint (false by default)")
 	fs.StringVar(&s.HealthzBindAddress, "healthz-address", defaultHealthzAddress, "The address to listen on for the /healthz health-check server")

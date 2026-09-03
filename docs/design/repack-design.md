@@ -543,7 +543,7 @@ placement 协议：
 5. controller 将该节点写入 `pod.status.nominatedNodeName` 并移除 gate；
 6. Scheduler 按实时状态调度，controller 观察并写入 `actualNodeName`。
 
-`selectedNodeName` 是 Repack 的实时建议，`actualNodeName` 是最终事实。Nomination TTL/`expirationTime` 限制牵引持续时间；超时后 placement 进入 `TimedOut`，controller 清理 gate，避免 Pod 永久被 Repack 阻塞。
+`selectedNodeName` 是 Repack 的实时建议，`actualNodeName` 是最终事实。Run 级 `status.executionDeadline` 从第一批 Eviction 发起前开始计时，并覆盖驱逐重试、replacement 识别与 placement、绑定和最终收益验证。超时后未完成 placement 进入 `TimedOut`，controller 清理 gate，避免 Pod 永久被 Repack 阻塞。
 
 ### 9.5 终态收益
 
@@ -671,8 +671,9 @@ Engine 对 plan computed、execute prepared、eviction accepted/rejected 和 ter
 | 无可行候选 | 正常以 `InsufficientImprovement` 完成 |
 | plan 状态写失败 | 不进入 Eviction，重试持久化 |
 | lease 或 active index 写失败 | 不驱逐；保留全 `Pending` journal 并重试准备，已写 lease 可幂等回滚；进入终态后先完成外部清理，再清除未执行 journal |
-| Eviction 被 PDB 拒绝 | relocation 记 Rejected；根据接受情况汇总最终结果 |
-| replacement 未出现 | 等待至 expirationTime，随后 TimedOut 并释放 gate |
+| Eviction 被 PDB 暂时拒绝 | 保持 `InProgress`，按 Run 批次执行 2s/4s/8s/16s/30s 封顶、±20% jitter 的退避重试；已成功子集先完成 replacement placement |
+| replacement 未出现 | 等待至 `status.executionDeadline`，随后 TimedOut 并释放 gate |
+| Execute 整体超时 | 终止新增驱逐，将未完成项收敛到终态，`metricsVerified=false`，Run 以 `ExecutionTimedOut` 失败 |
 | Scheduler 选择其他节点 | 记录 selected/actual 差异并验证计划源节点是否真正释放 |
 | 快照无法一致验证 | `metricsVerified=false`，不把推测值表示为已验证收益 |
 
@@ -687,7 +688,7 @@ Repack 的 RBAC 遵循最小权限：Engine 只获取规划所需资源、更新
 - Plugin：Scope、预算、Node Domain、中断评分、Gang、binpack；
 - Planner：节点预分类、容量预检、候选顺序、完整模拟、增量状态和规模 benchmark；
 - Engine：gate、status、Eviction journal、规划与驱逐的 context cancellation、worker 优雅退出和终态收益；
-- Controller：replacement 匹配、PodGroup 代际、gate、nomination、TTL 和重启恢复。
+- Controller：replacement 匹配、PodGroup 代际、gate、nomination、Run 级执行截止时间和重启恢复。
 
 ### 14.2 组合测试
 

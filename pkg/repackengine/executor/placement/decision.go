@@ -92,14 +92,25 @@ func Complete(run *repackv1alpha1.RepackRun) bool {
 	if run == nil || len(run.Status.Relocations) == 0 {
 		return false
 	}
+	accepted := 0
 	for index := range run.Status.Relocations {
-		switch run.Status.Relocations[index].Placement.Phase {
+		relocation := &run.Status.Relocations[index]
+		if !evictionAllowsPlacement(relocation.Eviction.Phase) {
+			continue
+		}
+		accepted++
+		switch relocation.Placement.Phase {
 		case repackv1alpha1.PodPlacementPlaced, repackv1alpha1.PodPlacementTimedOut:
 		default:
 			return false
 		}
 	}
-	return true
+	return accepted > 0
+}
+
+func evictionAllowsPlacement(phase repackv1alpha1.PodEvictionPhase) bool {
+	return phase == repackv1alpha1.PodEvictionAccepted ||
+		phase == repackv1alpha1.PodEvictionIndirectlyRemoved
 }
 
 type FreedNodeComparison struct {
@@ -180,20 +191,8 @@ func SortedUniqueNodeNames(nodeNames []string) []string {
 }
 
 func ObservationDeadlinePassed(run *repackv1alpha1.RepackRun, now time.Time) bool {
-	if run == nil || len(run.Status.Relocations) == 0 {
-		return false
-	}
-	var latest time.Time
-	for index := range run.Status.Relocations {
-		expirationTime := run.Status.Relocations[index].Placement.ExpirationTime
-		if expirationTime == nil {
-			return false
-		}
-		if expirationTime.Time.After(latest) {
-			latest = expirationTime.Time
-		}
-	}
-	return !latest.IsZero() && !now.Before(latest)
+	return run != nil && run.Status.ExecutionDeadline != nil &&
+		!now.Before(run.Status.ExecutionDeadline.Time)
 }
 
 func FreedNodeVerificationPending(run *repackv1alpha1.RepackRun, now time.Time) (FreedNodeComparison, bool) {
@@ -243,20 +242,6 @@ func MarkBenefitUnverified(run *repackv1alpha1.RepackRun) {
 	run.Status.Result.FreedNodeCount = 0
 	run.Status.Result.FreedNodes = nil
 	run.Status.Result.MetricsVerified = false
-}
-
-func CanExpire(relocation *repackv1alpha1.PodRelocationStatus, now time.Time) bool {
-	if relocation == nil || relocation.Placement.ExpirationTime == nil || now.Before(relocation.Placement.ExpirationTime.Time) {
-		return false
-	}
-	switch relocation.Placement.Phase {
-	case repackv1alpha1.PodPlacementWaitingForReplacement,
-		repackv1alpha1.PodPlacementWaitingForNodeSelection,
-		repackv1alpha1.PodPlacementNominated:
-		return true
-	default:
-		return false
-	}
 }
 
 func outcomeCounts(run *repackv1alpha1.RepackRun) (selectedNodePlacements, alternativeNodePlacements, timedOut int) {

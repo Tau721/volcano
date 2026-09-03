@@ -42,6 +42,7 @@ custom:
   repack_engine_replicas: 1
   repack_schedule_period: "5m"
   repack_execute_cooldown: "10m" # min gap after an Execute finishes before the next Execute may start
+  repack_execution_timeout: "10m" # wall-clock budget from first eviction batch through result verification
   repack_default_resource: "nvidia.com/gpu" # used when a RepackRun's spec.goals is empty
   # Optional complete repack-engine.conf override. Empty renders the chart's
   # default Action and Plugin configuration.

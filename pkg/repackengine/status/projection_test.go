@@ -290,7 +290,7 @@ func TestMarkExecuteNotPerformedPreservesPlanAndClearsExecutionState(t *testing.
 }
 
 func TestBuildPodRelocations(t *testing.T) {
-	if relocations, err := enginestatus.BuildPodRelocations(nil, time.Minute, time.Unix(100, 0), nil); err != nil || relocations != nil {
+	if relocations, err := enginestatus.BuildPodRelocations(nil, nil); err != nil || relocations != nil {
 		t.Error("nil plan -> nil")
 	}
 	pod := &v1.Pod{Spec: v1.PodSpec{NodeSelector: map[string]string{"accelerator": "npu"}}}
@@ -303,8 +303,7 @@ func TestBuildPodRelocations(t *testing.T) {
 			From: "n0", To: "n2",
 		},
 	}}
-	baseTime := time.Unix(100, 0)
-	relocations, err := enginestatus.BuildPodRelocations(plan, time.Hour, baseTime, testPodGroupPlacementPolicies{
+	relocations, err := enginestatus.BuildPodRelocations(plan, testPodGroupPlacementPolicies{
 		"ns/g": true,
 	})
 	if err != nil {
@@ -323,11 +322,7 @@ func TestBuildPodRelocations(t *testing.T) {
 	if relocation.SchedulingRequirementsHash == "" {
 		t.Error("SubGroup-enabled PodGroup must record schedulingRequirementsHash")
 	}
-	if relocation.Placement.ExpirationTime == nil || !relocation.Placement.ExpirationTime.Time.Equal(baseTime.Add(time.Hour)) {
-		t.Errorf("expirationTime = %v, want %v", relocation.Placement.ExpirationTime, baseTime.Add(time.Hour))
-	}
-
-	homogeneous, err := enginestatus.BuildPodRelocations(plan, time.Hour, baseTime, testPodGroupPlacementPolicies{
+	homogeneous, err := enginestatus.BuildPodRelocations(plan, testPodGroupPlacementPolicies{
 		"ns/g": false,
 	})
 	if err != nil {
@@ -341,7 +336,7 @@ func TestBuildPodRelocations(t *testing.T) {
 		Task: &schedapi.TaskInfo{Name: "missing", Namespace: "ns", Job: "ns/g"},
 		From: "n0", To: "n2",
 	}}}
-	if _, err := enginestatus.BuildPodRelocations(missingVictimPod, time.Hour, baseTime, testPodGroupPlacementPolicies{
+	if _, err := enginestatus.BuildPodRelocations(missingVictimPod, testPodGroupPlacementPolicies{
 		"ns/g": true,
 	}); err == nil {
 		t.Fatal("SubGroup placement without a victim Pod must fail before eviction")
@@ -361,7 +356,7 @@ func TestBuildPodRelocations(t *testing.T) {
 				Task: testCase.task, From: "n0", To: "n2",
 			}}}
 			if _, err := enginestatus.BuildPodRelocations(
-				invalidPlan, time.Hour, baseTime, testPodGroupPlacementPolicies{},
+				invalidPlan, testPodGroupPlacementPolicies{},
 			); err == nil {
 				t.Fatal("invalid PodGroup identity must fail execution preparation before eviction")
 			}
@@ -398,7 +393,7 @@ func TestApplyPlan(t *testing.T) {
 	// Execute preparation is explicit and does not alter the plan.
 	exec := &repackv1alpha1.RepackRun{}
 	enginestatus.ApplyPlan(exec, report, plan, gpuResource, nil, resolved)
-	if err := enginestatus.PrepareExecuteRelocations(exec, plan, time.Minute, time.Unix(100, 0), testPodGroupPlacementPolicies{}); err != nil {
+	if err := enginestatus.PrepareExecuteRelocations(exec, plan, testPodGroupPlacementPolicies{}); err != nil {
 		t.Fatal(err)
 	}
 	if len(exec.Status.Relocations) != 1 {

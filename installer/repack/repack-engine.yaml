@@ -138,6 +138,7 @@ spec:
             - --leader-elect=true
             - --leader-elect-resource-namespace=volcano-system
             - --resync-period=5m
+            - --repack-execution-timeout=10m
             # default accelerator when a RepackRun's spec.goals is empty:
             - --repack-default-resource=nvidia.com/gpu
             - -v=3

@@ -47,6 +47,10 @@ type RepackRunStatusApplyConfiguration struct {
 	StartTime *metav1.Time `json:"startTime,omitempty"`
 	// CompletionTime is when the run first reached a terminal phase (TTL anchor).
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
+	// ExecutionDeadline bounds the complete Execute workflow, starting immediately
+	// before the first eviction batch. It covers eviction retries, replacement
+	// placement, binding observation, and result verification.
+	ExecutionDeadline *metav1.Time `json:"executionDeadline,omitempty"`
 	// Plan is the immutable plan-time decision in both modes. DryRun reports what
 	// would be done; Execute preserves the complete pre-eviction plan so rejected
 	// or alternatively placed actions remain auditable. Actual Execute metrics
@@ -111,6 +115,14 @@ func (b *RepackRunStatusApplyConfiguration) WithStartTime(value metav1.Time) *Re
 // If called multiple times, the CompletionTime field is set to the value of the last call.
 func (b *RepackRunStatusApplyConfiguration) WithCompletionTime(value metav1.Time) *RepackRunStatusApplyConfiguration {
 	b.CompletionTime = &value
+	return b
+}
+
+// WithExecutionDeadline sets the ExecutionDeadline field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the ExecutionDeadline field is set to the value of the last call.
+func (b *RepackRunStatusApplyConfiguration) WithExecutionDeadline(value metav1.Time) *RepackRunStatusApplyConfiguration {
+	b.ExecutionDeadline = &value
 	return b
 }
 

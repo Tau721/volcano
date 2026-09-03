@@ -43,6 +43,18 @@ var (
 		Help:      "Number of planned Pod disruption outcomes during Execute, by result (evicted/rejected/indirectly_removed).",
 	}, []string{"result"})
 
+	EvictionRetryBatchesTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Subsystem: subsystem,
+		Name:      "eviction_retry_batches_total",
+		Help:      "Number of Execute eviction batches scheduled for retry after transient failures such as PDB rejection.",
+	})
+
+	EvictionRetryPodsTotal = promauto.NewCounter(prometheus.CounterOpts{
+		Subsystem: subsystem,
+		Name:      "eviction_retry_pods_total",
+		Help:      "Number of transiently blocked Pod evictions included in retry batches.",
+	})
+
 	// CycleDurationSeconds observes how long one reconcile's plan/act took.
 	CycleDurationSeconds = promauto.NewHistogramVec(prometheus.HistogramOpts{
 		Subsystem: subsystem,
@@ -106,6 +118,14 @@ func ObserveIndirectRemovals(count int) {
 	if count > 0 {
 		EvictionsTotal.WithLabelValues("indirectly_removed").Add(float64(count))
 	}
+}
+
+func ObserveEvictionRetryBatch(pods int) {
+	if pods <= 0 {
+		return
+	}
+	EvictionRetryBatchesTotal.Inc()
+	EvictionRetryPodsTotal.Add(float64(pods))
 }
 
 // ObserveCycle records reconcile wall time for a mode.

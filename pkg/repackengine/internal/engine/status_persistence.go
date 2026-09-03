@@ -45,6 +45,7 @@ func (e *Engine) fail(ctx context.Context, run *repackv1alpha1.RepackRun, genera
 	if run.Spec.Mode != repackv1alpha1.RepackModeExecute {
 		return nil
 	}
+	e.clearEvictionRetry(run)
 	// A failure after the prepare barrier must release its PodGroup lease.
 	// Pod-level gate cleanup is driven by the placement controller from this
 	// terminal status. Return lease cleanup failures so the terminal-only

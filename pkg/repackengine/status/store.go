@@ -80,7 +80,12 @@ func MergeRelocationProgress(desired, latest []repackv1alpha1.PodRelocationStatu
 		if persisted, found := evictions[identity]; found {
 			persistedPhase := persisted.Eviction.Phase
 			desiredPhase := desired[index].Eviction.Phase
-			if persistedPhase != "" && (persistedPhase == desiredPhase || EvictionPhaseAdvances(desiredPhase, persistedPhase)) {
+			if persistedPhase == desiredPhase {
+				// Eviction is engine-owned. Preserve the durable UID while allowing
+				// same-phase detail (notably a repeated InProgress PDB error) to be
+				// refreshed by the current batch outcome.
+				desired[index].VictimPodUID = persisted.VictimPodUID
+			} else if persistedPhase != "" && EvictionPhaseAdvances(desiredPhase, persistedPhase) {
 				desired[index].VictimPodUID = persisted.VictimPodUID
 				desired[index].Eviction.Phase = persistedPhase
 				desired[index].Eviction.Message = persisted.Eviction.Message
@@ -92,11 +97,16 @@ func MergeRelocationProgress(desired, latest []repackv1alpha1.PodRelocationStatu
 		if placement, found := placements[identity]; found {
 			latestPhase := placement.Placement.Phase
 			desiredPhase := desired[index].Placement.Phase
-			if latestPhase == desiredPhase || PlacementPhaseAdvances(desiredPhase, latestPhase) {
+			if latestPhase == desiredPhase || PlacementPhaseAdvances(desiredPhase, latestPhase) ||
+				(placementTerminal(latestPhase) && placementTerminal(desiredPhase)) {
 				desired[index].Placement = placement.Placement
 			}
 		}
 	}
+}
+
+func placementTerminal(phase repackv1alpha1.PodPlacementPhase) bool {
+	return phase == repackv1alpha1.PodPlacementPlaced || phase == repackv1alpha1.PodPlacementTimedOut
 }
 
 func PlacementPhaseAdvances(current, observed repackv1alpha1.PodPlacementPhase) bool {

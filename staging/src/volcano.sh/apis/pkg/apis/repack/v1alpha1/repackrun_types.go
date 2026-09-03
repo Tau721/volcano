@@ -330,6 +330,12 @@ type RepackRunStatus struct {
 	// +optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
 
+	// ExecutionDeadline bounds the complete Execute workflow, starting immediately
+	// before the first eviction batch. It covers eviction retries, replacement
+	// placement, binding observation, and result verification.
+	// +optional
+	ExecutionDeadline *metav1.Time `json:"executionDeadline,omitempty"`
+
 	// Plan is the immutable plan-time decision in both modes. DryRun reports what
 	// would be done; Execute preserves the complete pre-eviction plan so rejected
 	// or alternatively placed actions remain auditable. Actual Execute metrics
@@ -403,7 +409,7 @@ type PodEvictionStatus struct {
 }
 
 // PodPlacementStatus contains the replacement Pod identity, selected receiver,
-// observed binding, and placement deadline.
+// and observed binding. The shared deadline lives on RepackRunStatus.
 type PodPlacementStatus struct {
 	// Phase is the current replacement placement lifecycle phase.
 	Phase PodPlacementPhase `json:"phase"`
@@ -421,9 +427,6 @@ type PodPlacementStatus struct {
 	// with SelectedNodeName reveals an alternative scheduler placement.
 	// +optional
 	ActualNodeName string `json:"actualNodeName,omitempty"`
-	// ExpirationTime bounds placement reconciliation.
-	// +optional
-	ExpirationTime *metav1.Time `json:"expirationTime,omitempty"`
 }
 
 // RepackPlan is the immutable plan-time output in both modes. Three progressive

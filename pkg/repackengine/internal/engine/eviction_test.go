@@ -38,6 +38,7 @@ import (
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	state "volcano.sh/repack-controller/pkg/state"
+	enginestatus "volcano.sh/volcano/pkg/repackengine/status"
 )
 
 func TestExecutePreparedEvictionsRecoversAcceptedRequestAfterStatusFailure(t *testing.T) {
@@ -196,12 +197,212 @@ func TestClassifyMissingVictimsRequiresAcceptedSibling(t *testing.T) {
 	}
 }
 
+func TestExecutePreparedEvictionsBatchesPDBRetriesWithoutStatusChurn(t *testing.T) {
+	now := time.Unix(1000, 0)
+	run := testEvictionRun("batch-pdb", []string{"victim-a", "victim-b"})
+	volcanoClient := vcfake.NewSimpleClientset(run.DeepCopy())
+	statusUpdates := 0
+	volcanoClient.PrependReactor("update", "repackruns", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		if action.GetSubresource() == "status" {
+			statusUpdates++
+		}
+		return false, nil, nil
+	})
+	kubeClient := kubefake.NewSimpleClientset(
+		&v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "victim-a", UID: "uid-a"}},
+		&v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "victim-b", UID: "uid-b"}},
+	)
+	evictionCalls := 0
+	kubeClient.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		evictionCalls++
+		return true, nil, apierrors.NewTooManyRequests("cannot evict pod as it would violate the pod's disruption budget", 0)
+	})
+	engine := &Engine{
+		volcanoClient:   volcanoClient,
+		config:          Config{ExecutionTimeout: 10 * time.Minute},
+		now:             func() time.Time { return now },
+		evictionRetries: make(map[string]evictionRetryState),
+	}
+
+	result := engine.executePreparedEvictionsWithClient(context.Background(), run.DeepCopy(), 0,
+		"example.com/accelerator", kubeClient)
+	if result.Err != nil {
+		t.Fatalf("first PDB-blocked batch failed: %v", result.Err)
+	}
+	if evictionCalls != 2 {
+		t.Fatalf("Eviction calls=%d, want one batch of 2", evictionCalls)
+	}
+	if statusUpdates != 2 {
+		t.Fatalf("status updates=%d, want one intent and one outcome checkpoint", statusUpdates)
+	}
+	if result.RequeueAfter < 1600*time.Millisecond || result.RequeueAfter > 2400*time.Millisecond {
+		t.Fatalf("first retry delay=%s, want 2s with ±20%% jitter", result.RequeueAfter)
+	}
+	latest, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.ExecutionDeadline == nil || !latest.Status.ExecutionDeadline.Time.Equal(now.Add(10*time.Minute)) {
+		t.Fatalf("executionDeadline=%v, want %v", latest.Status.ExecutionDeadline, now.Add(10*time.Minute))
+	}
+	for index := range latest.Status.Relocations {
+		if latest.Status.Relocations[index].Eviction.Phase != repackv1alpha1.PodEvictionInProgress {
+			t.Fatalf("relocation %d phase=%q, want InProgress", index, latest.Status.Relocations[index].Eviction.Phase)
+		}
+		if latest.Status.Relocations[index].Eviction.Message == "" {
+			t.Fatalf("relocation %d must retain the PDB rejection detail", index)
+		}
+	}
+
+	second := engine.executePreparedEvictionsWithClient(context.Background(), latest.DeepCopy(), 0,
+		"example.com/accelerator", kubeClient)
+	if second.Err != nil || second.RequeueAfter <= 0 {
+		t.Fatalf("early retry result=%+v, want delayed requeue", second)
+	}
+	if evictionCalls != 2 || statusUpdates != 2 {
+		t.Fatalf("early retry changed state: evictionCalls=%d statusUpdates=%d", evictionCalls, statusUpdates)
+	}
+}
+
+func TestExecutePreparedEvictionsPlacesAcceptedSubsetBeforeRetry(t *testing.T) {
+	now := time.Unix(2000, 0)
+	run := testEvictionRun("mixed-batch", []string{"accepted", "pdb-blocked"})
+	volcanoClient := vcfake.NewSimpleClientset(run.DeepCopy())
+	kubeClient := kubefake.NewSimpleClientset(
+		&v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "accepted", UID: "accepted-uid"}},
+		&v1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "pdb-blocked", UID: "blocked-uid"}},
+	)
+	kubeClient.PrependReactor("create", "pods", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		eviction := action.(k8stesting.CreateAction).GetObject().(*policyv1.Eviction)
+		if eviction.Name == "pdb-blocked" {
+			return true, nil, apierrors.NewTooManyRequests("PDB currently has no disruptions allowed", 0)
+		}
+		return true, eviction, nil
+	})
+	engine := &Engine{
+		volcanoClient:   volcanoClient,
+		config:          Config{ExecutionTimeout: 10 * time.Minute},
+		now:             func() time.Time { return now },
+		evictionRetries: make(map[string]evictionRetryState),
+	}
+
+	result := engine.executePreparedEvictionsWithClient(context.Background(), run.DeepCopy(), 0,
+		"example.com/accelerator", kubeClient)
+	if result.Err != nil {
+		t.Fatalf("mixed batch failed: %v", result.Err)
+	}
+	latest, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.Relocations[0].Eviction.Phase != repackv1alpha1.PodEvictionAccepted ||
+		latest.Status.Relocations[1].Eviction.Phase != repackv1alpha1.PodEvictionInProgress {
+		t.Fatalf("mixed phases=%q/%q, want Accepted/InProgress",
+			latest.Status.Relocations[0].Eviction.Phase, latest.Status.Relocations[1].Eviction.Phase)
+	}
+	if enginestatus.ResolveStage(latest) != enginestatus.StagePlacing {
+		t.Fatalf("stage=%q, want accepted subset placement before retry", enginestatus.ResolveStage(latest))
+	}
+	if latest.Status.Result == nil || latest.Status.Result.MovedCardCount != 1 {
+		t.Fatalf("result=%+v, want accepted subset movedCardCount=1", latest.Status.Result)
+	}
+}
+
+func TestExecutionDeadlineStopsFurtherEvictionAndMarksRunFailed(t *testing.T) {
+	now := time.Unix(3000, 0)
+	run := testEvictionRun("execution-timeout", []string{"blocked"})
+	deadline := metav1.NewTime(now.Add(-time.Second))
+	run.Status.ExecutionDeadline = &deadline
+	run.Status.Relocations[0].VictimPodUID = "blocked-uid"
+	run.Status.Relocations[0].Eviction.Phase = repackv1alpha1.PodEvictionInProgress
+	volcanoClient := vcfake.NewSimpleClientset(run.DeepCopy())
+	kubeClient := kubefake.NewSimpleClientset(&v1.Pod{ObjectMeta: metav1.ObjectMeta{
+		Namespace: "ns", Name: "blocked", UID: "blocked-uid",
+	}})
+	evictionCalls := 0
+	kubeClient.PrependReactor("create", "pods", func(k8stesting.Action) (bool, runtime.Object, error) {
+		evictionCalls++
+		return true, nil, nil
+	})
+	engine := &Engine{
+		volcanoClient:   volcanoClient,
+		config:          Config{ExecutionTimeout: 10 * time.Minute},
+		now:             func() time.Time { return now },
+		evictionRetries: make(map[string]evictionRetryState),
+	}
+
+	result := engine.executePreparedEvictionsWithClient(context.Background(), run.DeepCopy(), 0,
+		"example.com/accelerator", kubeClient)
+	if result.Err != nil {
+		t.Fatalf("timeout convergence returned error: %v", result.Err)
+	}
+	if evictionCalls != 0 {
+		t.Fatalf("Eviction calls=%d, want no request after deadline", evictionCalls)
+	}
+	latest, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Status.Phase != repackv1alpha1.RepackFailed ||
+		!hasFailedReason(latest, state.ReasonExecutionTimedOut) {
+		t.Fatalf("terminal status=%+v, want Failed/%s", latest.Status, state.ReasonExecutionTimedOut)
+	}
+	if latest.Status.Relocations[0].Eviction.Phase != repackv1alpha1.PodEvictionRejected {
+		t.Fatalf("eviction phase=%q, want Rejected", latest.Status.Relocations[0].Eviction.Phase)
+	}
+	if latest.Status.Result == nil || latest.Status.Result.MetricsVerified {
+		t.Fatalf("result=%+v, want unverified timeout result", latest.Status.Result)
+	}
+}
+
+func testEvictionRun(name string, podNames []string) *repackv1alpha1.RepackRun {
+	run := &repackv1alpha1.RepackRun{
+		ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(name + "-uid")},
+		Spec: repackv1alpha1.RepackRunSpec{
+			Mode:  repackv1alpha1.RepackModeExecute,
+			Goals: []repackv1alpha1.RepackGoal{{Resource: "example.com/accelerator"}},
+		},
+		Status: repackv1alpha1.RepackRunStatus{
+			Phase: repackv1alpha1.RepackRunning,
+			Conditions: []metav1.Condition{{
+				Type: state.CondProgressing, Status: metav1.ConditionTrue, Reason: state.ReasonEvicting,
+			}},
+			Plan: &repackv1alpha1.RepackPlan{
+				Summary:    &repackv1alpha1.RepackSummary{FragBeforePercent: 50, FreedNodeCount: 1, MovedCardCount: int64(len(podNames))},
+				FreedNodes: []string{"source"},
+			},
+		},
+	}
+	for _, podName := range podNames {
+		run.Status.Plan.Moves = append(run.Status.Plan.Moves, repackv1alpha1.RepackMove{
+			Namespace: "ns", PodGroupName: "pg", Cards: 1,
+			Pods: []repackv1alpha1.PodMove{{Name: podName, FromNode: "source", ToNode: "target", Cards: 1}},
+		})
+		run.Status.Relocations = append(run.Status.Relocations, repackv1alpha1.PodRelocationStatus{
+			Namespace: "ns", PodGroupName: "pg", VictimPodName: podName, PlannedNodeName: "target",
+			Eviction:  repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionPending},
+			Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+		})
+	}
+	return run
+}
+
 func hasProgressingReason(run *repackv1alpha1.RepackRun, reason string) bool {
 	for index := range run.Status.Conditions {
 		condition := &run.Status.Conditions[index]
 		if condition.Type == state.CondProgressing &&
 			condition.Status == metav1.ConditionTrue &&
 			condition.Reason == reason {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFailedReason(run *repackv1alpha1.RepackRun, reason string) bool {
+	for index := range run.Status.Conditions {
+		condition := &run.Status.Conditions[index]
+		if condition.Type == state.CondFailed && condition.Status == metav1.ConditionTrue && condition.Reason == reason {
 			return true
 		}
 	}

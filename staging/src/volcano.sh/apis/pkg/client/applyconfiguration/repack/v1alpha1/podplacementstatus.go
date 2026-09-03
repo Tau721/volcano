@@ -18,7 +18,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	types "k8s.io/apimachinery/pkg/types"
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 )
@@ -27,7 +26,7 @@ import (
 // with apply.
 //
 // PodPlacementStatus contains the replacement Pod identity, selected receiver,
-// observed binding, and placement deadline.
+// and observed binding. The shared deadline lives on RepackRunStatus.
 type PodPlacementStatusApplyConfiguration struct {
 	// Phase is the current replacement placement lifecycle phase.
 	Phase *repackv1alpha1.PodPlacementPhase `json:"phase,omitempty"`
@@ -41,8 +40,6 @@ type PodPlacementStatusApplyConfiguration struct {
 	// ActualNodeName is populated after the replacement is bound. Comparing it
 	// with SelectedNodeName reveals an alternative scheduler placement.
 	ActualNodeName *string `json:"actualNodeName,omitempty"`
-	// ExpirationTime bounds placement reconciliation.
-	ExpirationTime *v1.Time `json:"expirationTime,omitempty"`
 }
 
 // PodPlacementStatusApplyConfiguration constructs a declarative configuration of the PodPlacementStatus type for use with
@@ -88,13 +85,5 @@ func (b *PodPlacementStatusApplyConfiguration) WithReplacementPodUID(value types
 // If called multiple times, the ActualNodeName field is set to the value of the last call.
 func (b *PodPlacementStatusApplyConfiguration) WithActualNodeName(value string) *PodPlacementStatusApplyConfiguration {
 	b.ActualNodeName = &value
-	return b
-}
-
-// WithExpirationTime sets the ExpirationTime field in the declarative configuration to the given value
-// and returns the receiver, so that objects can be built by chaining "With" function invocations.
-// If called multiple times, the ExpirationTime field is set to the value of the last call.
-func (b *PodPlacementStatusApplyConfiguration) WithExpirationTime(value v1.Time) *PodPlacementStatusApplyConfiguration {
-	b.ExpirationTime = &value
 	return b
 }

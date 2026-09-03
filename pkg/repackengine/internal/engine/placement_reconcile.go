@@ -44,6 +44,9 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 	if run == nil {
 		return engineframework.RuntimeResult{}
 	}
+	if executionDeadlinePassed(run, e.now()) {
+		return runtimeError(e.timeoutExecution(ctx, run, run.Generation, e.clusterCache.Client()))
+	}
 	selectedNodePlacements, alternativeNodePlacements, timedOutPlacements := enginestatus.PlacementOutcomeCounts(run)
 	klog.V(4).InfoS("repack: reconciling replacement placement",
 		"run", run.Name, "relocationCount", len(run.Status.Relocations),
@@ -53,12 +56,20 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 	if err := e.repairRecreatedPodGroupLeasesIfDue(ctx, run); err != nil {
 		return runtimeError(fmt.Errorf("reconcile recreated PodGroup leases: %w", err))
 	}
-	if expired, err := e.expirePlacements(ctx, run); err != nil {
-		return runtimeError(err)
-	} else if expired {
-		return engineframework.RuntimeResult{Requeue: true}
-	}
 	if placementexecutor.Complete(run) {
+		if hasRetryableEvictions(run) && !hasTimedOutPlacement(run) {
+			changed := state.MarkRunning(run, state.ReasonEvicting,
+				"Accepted replacements are restored; resuming remaining eviction retries.")
+			if changed {
+				if err := e.updateStatus(ctx, run); err != nil {
+					return runtimeError(fmt.Errorf("persist eviction retry resume: %w", err))
+				}
+			}
+			if wait := e.evictionRetryWait(run); wait > 0 {
+				return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), wait)}
+			}
+			return engineframework.RuntimeResult{Requeue: true}
+		}
 		return e.finishPlacement(ctx, run)
 	}
 	pending := placementexecutor.Candidates(run)
@@ -68,7 +79,7 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 		// expiration escape hatch.
 		klog.V(4).InfoS("repack: no selectable replacement Pod observed yet; placement requeued",
 			"run", run.Name, "retryAfter", placementRetryInterval)
-		return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+		return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), placementRetryInterval)}
 	}
 
 	targetResource := engineconf.ResolveResource(run, e.config.DefaultResource)
@@ -135,7 +146,7 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 			if err := e.markWaitingForNodeSelection(ctx, run.Name, pending); err != nil {
 				return runtimeError(err)
 			}
-			return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+			return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), placementRetryInterval)}
 		}
 		committed = append(committed, placements[0])
 		selected[placementexecutor.IdentityForRelocation(relocation)] = placements[0].To
@@ -144,9 +155,21 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 			"plannedNode", relocation.PlannedNodeName, "selectedNode", placements[0].To)
 	}
 	if len(selected) == 0 {
-		return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+		return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), placementRetryInterval)}
 	}
 	return runtimeError(e.writePlacementSelection(ctx, run.Name, selected))
+}
+
+func hasTimedOutPlacement(run *repackv1alpha1.RepackRun) bool {
+	if run == nil {
+		return false
+	}
+	for index := range run.Status.Relocations {
+		if run.Status.Relocations[index].Placement.Phase == repackv1alpha1.PodPlacementTimedOut {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) writePlacementSelection(

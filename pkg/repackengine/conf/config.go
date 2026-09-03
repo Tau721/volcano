@@ -29,15 +29,15 @@ import (
 
 // Config holds the engine's runtime parameters.
 type Config struct {
-	SchedulerConf   string
-	RepackConf      string
-	ResyncPeriod    time.Duration
-	Cooldown        time.Duration
-	Plugins         []framework.PluginOption
-	Actions         []string
-	MinNodesFreed   int
-	DefaultResource string
-	NominationTTL   time.Duration
+	SchedulerConf    string
+	RepackConf       string
+	ResyncPeriod     time.Duration
+	Cooldown         time.Duration
+	Plugins          []framework.PluginOption
+	Actions          []string
+	MinNodesFreed    int
+	DefaultResource  string
+	ExecutionTimeout time.Duration
 }
 
 // FileConfiguration is the strict YAML representation of repack-engine.conf.
@@ -46,15 +46,15 @@ type FileConfiguration struct {
 	Plugins []framework.PluginOption `yaml:"plugins"`
 }
 
-const DefaultNominationTTL = 10 * time.Minute
+const DefaultExecutionTimeout = 10 * time.Minute
 
 // ApplyDefaults fills runtime defaults that are independent of command flags.
 func ApplyDefaults(config *Config) {
 	if len(config.Plugins) == 0 {
 		config.Plugins = DefaultPluginOptions()
 	}
-	if config.NominationTTL <= 0 {
-		config.NominationTTL = DefaultNominationTTL
+	if config.ExecutionTimeout <= 0 {
+		config.ExecutionTimeout = DefaultExecutionTimeout
 	}
 }
 

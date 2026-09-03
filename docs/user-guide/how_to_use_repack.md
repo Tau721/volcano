@@ -1138,6 +1138,10 @@ status:
       - ascend-node-01
 
   # Execute 的实际观测结果；DryRun 中不存在。
+  # 从第一批 Eviction 发起前开始计算，覆盖驱逐重试、replacement placement、
+  # 绑定和最终收益验证；默认由 --repack-execution-timeout 控制为 10 分钟。
+  executionDeadline: "2026-07-30T10:10:30Z"
+
   result:
     # 重建 Pod 完成调度后观测到的碎片率。
     fragAfterPercent: 0
@@ -1176,8 +1180,6 @@ status:
         replacementPodUID: "22222222-2222-2222-2222-222222222222"
         # Volcano Scheduler 最终绑定的节点，可能与 selectedNodeName 不同。
         actualNodeName: ascend-node-02
-        # 本条 relocation 完成重建 Pod 调度协调的截止时间。
-        expirationTime: "2026-07-30T10:10:30Z"
 
   # Job 风格的权威状态。终态成功时 Progressing=False、Complete=True。
   conditions:
@@ -1391,8 +1393,9 @@ kubectl get events -A --sort-by=.lastTimestamp
 | Execute 失败 | `InvalidConfiguration` | 默认资源或运行参数无效 |
 | Execute 失败 | `ScopeResolutionFailed` | selector 或范围解析失败 |
 | Execute 失败 | `ExecutionPreparationFailed` | 驱逐前持久化计划或放置准备失败，尚未安全开始执行 |
-| Execute 失败 | `EvictionFailed` | Eviction API 被拒绝或失败；优先查看 PDB 和 Pod 事件 |
-| Execute 失败 | `PlacementTimedOut` | 重建 Pod 未在期限内完成绑定 |
+| Execute 失败 | `EvictionFailed` | Eviction API 返回不可重试错误，或已接受的驱逐无法形成有效腾空结果 |
+| Execute 失败 | `ExecutionTimedOut` | 从第一批驱逐到 placement/收益验证的整体执行超过 `status.executionDeadline`；PDB 长期阻塞也会收敛到此结果 |
+| Execute 失败 | `PlacementTimedOut` | 状态中已有 placement 超时记录，无法形成完整结果 |
 | Execute 失败 | `ResultVerificationFailed` | 无法得到一致的终态调度快照以验证结果 |
 | Execute 失败 | `BenefitNotRealized` | 重建 Pod 已调度，但计划腾空节点没有全部释放目标资源 |
 | Execute 失败 | `ExecutionInterrupted` / `ReconcileFailed` | 引擎执行被中断或状态协调失败；结合引擎日志排查 |
@@ -1458,10 +1461,10 @@ kubectl get events -A --sort-by=.lastTimestamp
 | Phase | 含义 |
 | --- | --- |
 | `Pending` | 已持久化驱逐意图，尚未调用 Eviction API |
-| `InProgress` | 已记录将要驱逐，API 请求可能已发出；故障恢复时会通过 UID 安全确认 |
+| `InProgress` | 已记录将要驱逐，API 请求可能已发出；故障恢复时会通过 UID 安全确认；PDB/429 等临时失败也保持此状态并按批次退避重试 |
 | `Accepted` | Eviction API 已接受该 Pod 的驱逐 |
 | `IndirectlyRemoved` | Pod 在同一 PodGroup 的其他驱逐后消失，但本条没有收到单独的接受响应 |
-| `Rejected` | 本次没有驱逐该 Pod；查看 `eviction.message`、PDB 和 Pod 事件 |
+| `Rejected` | 永久错误或整体执行超时导致本次没有驱逐该 Pod；查看 `eviction.message` 和 Pod 事件 |
 
 `relocations[].placement`：
 
@@ -1475,7 +1478,8 @@ kubectl get events -A --sort-by=.lastTimestamp
 | `selectedNodeName` | Repack 在实时快照中选定并写入 `nominatedNodeName` 的节点 |
 | `replacementPodName` / `replacementPodUID` | Repack 识别的重建 Pod 名称和 UID |
 | `actualNodeName` | Scheduler 最终绑定的节点；可与 `selectedNodeName` 不同 |
-| `expirationTime` | 该 relocation 完成 Pod 调度协调的截止时间 |
+
+所有 relocation 共用 `status.executionDeadline`；它限制从第一批驱逐到收益验证完成的整个 Execute 流程。
 
 ### `kubectl get repackrun` 列说明
 

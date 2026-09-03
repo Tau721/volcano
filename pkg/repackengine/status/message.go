@@ -312,6 +312,8 @@ func failureStage(reason string) string {
 		return "execution preparation"
 	case state.ReasonEvictionFailed:
 		return "Pod eviction"
+	case state.ReasonExecutionTimedOut:
+		return "execution deadline"
 	case state.ReasonBenefitNotRealized:
 		return "benefit verification"
 	case state.ReasonPlacementTimedOut:

@@ -142,12 +142,9 @@ func TestNeedsNomination(t *testing.T) {
 }
 
 func TestMatchNomination(t *testing.T) {
-	future := metav1.NewTime(time.Unix(5000, 0)) // > now (1000)
-	past := metav1.NewTime(time.Unix(500, 0))    // < now
-
 	t.Run("victimPodName exact wins", func(t *testing.T) {
 		n := nominatorWith(runWithNoms("r1",
-			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", VictimPodName: "w-0", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future}},
+			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", VictimPodName: "w-0", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{}},
 		))
 		rec, owner := matchNomination(n, pendingPod("ns", "w-0", "g", nil))
 		if rec == nil || owner != "r1" || rec.PlannedNodeName != "n2" {
@@ -157,7 +154,7 @@ func TestMatchNomination(t *testing.T) {
 
 	t.Run("victimPodName exact remains scoped to PodGroup", func(t *testing.T) {
 		n := nominatorWith(runWithNoms("r1",
-			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "source", VictimPodName: "w-0", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future}},
+			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "source", VictimPodName: "w-0", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{}},
 		))
 		rec, _ := matchNomination(n, pendingPod("ns", "w-0", "concurrent-scale-out", nil))
 		if rec != nil {
@@ -172,7 +169,7 @@ func TestMatchNomination(t *testing.T) {
 			repackv1alpha1.PodRelocationStatus{
 				Namespace: "ns", PodGroupName: "g",
 				SchedulingRequirementsHash: testSchedulingRequirementsHash(pod),
-				PlannedNodeName:            "n5", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+				PlannedNodeName:            "n5", Placement: repackv1alpha1.PodPlacementStatus{},
 			},
 		))
 		rec, owner := matchNomination(n, pod)
@@ -183,7 +180,7 @@ func TestMatchNomination(t *testing.T) {
 
 	t.Run("homogeneous PodGroup when scheduling requirements hash is empty", func(t *testing.T) {
 		n := nominatorWith(runWithNoms("r1",
-			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future}},
+			repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{}},
 		))
 		rec, owner := matchNomination(n, pendingPod("ns", "any-pod", "g", nil))
 		if rec == nil || owner != "r1" || rec.PlannedNodeName != "n1" {
@@ -199,29 +196,38 @@ func TestMatchNomination(t *testing.T) {
 		n := nominatorWith(runWithNoms("r1", repackv1alpha1.PodRelocationStatus{
 			Namespace: "ns", PodGroupName: "g", VictimPodName: victim.Name,
 			SchedulingRequirementsHash: testSchedulingRequirementsHash(victim),
-			PlannedNodeName:            "n5", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+			PlannedNodeName:            "n5", Placement: repackv1alpha1.PodPlacementStatus{},
 		}))
 		if rec, _ := matchNomination(n, replacement); rec != nil {
 			t.Fatalf("different scheduling requirements must not match: %+v", rec)
 		}
 	})
 
-	t.Run("no match: wrong PodGroup / namespace / expired / bound", func(t *testing.T) {
-		bound := repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced, ExpirationTime: &future}}
-		expired := repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &past}}
-		wrongPG := repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "other", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future}}
-		wrongNS := repackv1alpha1.PodRelocationStatus{Namespace: "elsewhere", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future}}
-		n := nominatorWith(runWithNoms("r1", bound, expired, wrongPG, wrongNS))
+	t.Run("no match: wrong PodGroup / namespace / bound", func(t *testing.T) {
+		bound := repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced}}
+		wrongPG := repackv1alpha1.PodRelocationStatus{Namespace: "ns", PodGroupName: "other", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{}}
+		wrongNS := repackv1alpha1.PodRelocationStatus{Namespace: "elsewhere", PodGroupName: "g", PlannedNodeName: "n1", Placement: repackv1alpha1.PodPlacementStatus{}}
+		n := nominatorWith(runWithNoms("r1", bound, wrongPG, wrongNS))
 		if rec, _ := matchNomination(n, pendingPod("ns", "p", "g", nil)); rec != nil {
-			t.Fatalf("should not match any (bound/expired/wrong pg/ns): got %+v", rec)
+			t.Fatalf("should not match any (bound/wrong pg/ns): got %+v", rec)
+		}
+	})
+
+	t.Run("execution deadline makes every placement unavailable", func(t *testing.T) {
+		run := runWithNoms("r1", repackv1alpha1.PodRelocationStatus{
+			Namespace: "ns", PodGroupName: "g", PlannedNodeName: "n1",
+		})
+		past := metav1.NewTime(time.Unix(500, 0))
+		run.Status.ExecutionDeadline = &past
+		if rec, _ := matchNomination(nominatorWith(run), pendingPod("ns", "p", "g", nil)); rec != nil {
+			t.Fatalf("expired execution must not nominate a Pod: %+v", rec)
 		}
 	})
 }
 
 func TestHomogeneousNominationWaitsForVictimDeletion(t *testing.T) {
-	future := metav1.NewTime(time.Unix(5000, 0))
 	n := nominatorWith(runWithNoms("r1", repackv1alpha1.PodRelocationStatus{
-		Namespace: "ns", PodGroupName: "g", VictimPodName: "old", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+		Namespace: "ns", PodGroupName: "g", VictimPodName: "old", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{},
 	}))
 	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	victim := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "old"}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
@@ -291,7 +297,6 @@ func TestVictimGoneDistinguishesRecreatedPodByUID(t *testing.T) {
 }
 
 func TestReconcileOpensGateAfterVictimNameIsReused(t *testing.T) {
-	future := metav1.NewTime(time.Unix(5000, 0))
 	replacementPod2 := pendingPod("ns", "pod-2", "group", nil)
 	replacementPod2.UID = "new-pod-2-uid"
 	replacementPod3 := pendingPod("ns", "pod-3", "group", nil)
@@ -307,13 +312,12 @@ func TestReconcileOpensGateAfterVictimNameIsReused(t *testing.T) {
 				ReplacementPodName: replacementPod2.Name,
 				ReplacementPodUID:  replacementPod2.UID,
 				Phase:              repackv1alpha1.PodPlacementWaitingForNodeSelection,
-				ExpirationTime:     &future,
 			},
 		},
 		repackv1alpha1.PodRelocationStatus{
 			Namespace: "ns", PodGroupName: "group", VictimPodName: "pod-2", VictimPodUID: "old-pod-2-uid",
 			PlannedNodeName: "node-b",
-			Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+			Placement:       repackv1alpha1.PodPlacementStatus{},
 		},
 	)
 	pods := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
@@ -370,7 +374,6 @@ func TestReconcileOpensGateAfterVictimNameIsReused(t *testing.T) {
 }
 
 func TestMatchNominationUsesRecordedReplacementPodGroupForEveryMatchingStrategy(t *testing.T) {
-	future := metav1.NewTime(time.Unix(5000, 0))
 	hashMatchedPod := pendingPod("ns", "new-worker", "new", nil)
 	hashMatchedPod.Spec.NodeSelector = map[string]string{"accelerator": "npu"}
 	tests := []struct {
@@ -382,7 +385,7 @@ func TestMatchNominationUsesRecordedReplacementPodGroupForEveryMatchingStrategy(
 			name: "exact Pod name",
 			nomination: repackv1alpha1.PodRelocationStatus{
 				Namespace: "ns", PodGroupName: "old", ReplacementPodGroupName: "new",
-				VictimPodName: "worker-0", PlannedNodeName: "node-a", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+				VictimPodName: "worker-0", PlannedNodeName: "node-a", Placement: repackv1alpha1.PodPlacementStatus{},
 			},
 			pod: pendingPod("ns", "worker-0", "new", nil),
 		},
@@ -391,7 +394,7 @@ func TestMatchNominationUsesRecordedReplacementPodGroupForEveryMatchingStrategy(
 			nomination: repackv1alpha1.PodRelocationStatus{
 				Namespace: "ns", PodGroupName: "old", ReplacementPodGroupName: "new",
 				VictimPodName: "old-worker", PlannedNodeName: "node-a",
-				SchedulingRequirementsHash: testSchedulingRequirementsHash(hashMatchedPod), Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+				SchedulingRequirementsHash: testSchedulingRequirementsHash(hashMatchedPod), Placement: repackv1alpha1.PodPlacementStatus{},
 			},
 			pod: hashMatchedPod,
 		},
@@ -399,7 +402,7 @@ func TestMatchNominationUsesRecordedReplacementPodGroupForEveryMatchingStrategy(
 			name: "homogeneous PodGroup",
 			nomination: repackv1alpha1.PodRelocationStatus{
 				Namespace: "ns", PodGroupName: "old", ReplacementPodGroupName: "new",
-				VictimPodName: "old-random", PlannedNodeName: "node-a", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &future},
+				VictimPodName: "old-random", PlannedNodeName: "node-a", Placement: repackv1alpha1.PodPlacementStatus{},
 			},
 			pod: pendingPod("ns", "new-random", "new", nil),
 		},
@@ -443,9 +446,8 @@ func TestRemovePlacementGateRemovesOwnerMarker(t *testing.T) {
 }
 
 func TestHasClaimableNominationForPodGroup(t *testing.T) {
-	future := metav1.NewTime(time.Unix(5000, 0))
 	run := runWithNoms("run", repackv1alpha1.PodRelocationStatus{
-		Namespace: "ns", PodGroupName: "group", VictimPodName: "victim", Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement, ExpirationTime: &future},
+		Namespace: "ns", PodGroupName: "group", VictimPodName: "victim", Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 	})
 	if !hasClaimableNominationForPodGroup(run, "ns", "group", "", time.Unix(1000, 0)) {
 		t.Fatal("homogeneous pending placement in the same PodGroup must remain a potential match")

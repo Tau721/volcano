@@ -191,6 +191,7 @@ spec:
             - --leader-elect-resource-namespace={{ .Release.Namespace }}
             - --resync-period={{ .Values.custom.repack_schedule_period }}
             - --repack-execute-cooldown={{ .Values.custom.repack_execute_cooldown | default "10m" }}
+            - --repack-execution-timeout={{ .Values.custom.repack_execution_timeout | default "10m" }}
             - --repack-default-resource={{ .Values.custom.repack_default_resource }}
             {{- if .Values.custom.repack_plugins }}
             - --repack-plugins={{ join "," .Values.custom.repack_plugins }}

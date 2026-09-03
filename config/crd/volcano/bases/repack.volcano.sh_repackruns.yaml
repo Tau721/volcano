@@ -544,6 +544,13 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              executionDeadline:
+                description: |-
+                  ExecutionDeadline bounds the complete Execute workflow, starting immediately
+                  before the first eviction batch. It covers eviction retries, replacement
+                  placement, binding observation, and result verification.
+                format: date-time
+                type: string
               message:
                 description: Message is the current one-line operator summary.
                 type: string
@@ -737,10 +744,6 @@ spec:
                           description: |-
                             ActualNodeName is populated after the replacement is bound. Comparing it
                             with SelectedNodeName reveals an alternative scheduler placement.
-                          type: string
-                        expirationTime:
-                          description: ExpirationTime bounds placement reconciliation.
-                          format: date-time
                           type: string
                         phase:
                           description: Phase is the current replacement placement

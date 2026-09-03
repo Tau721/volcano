@@ -667,7 +667,7 @@ func (n *Nominator) recoverStalePlacementClaim(
 		for index := range latest.Status.Relocations {
 			nomination := &latest.Status.Relocations[index]
 			if !placementClaimCanBeRecoveredForPod(
-				nomination, candidate, candidateSchedulingRequirementsHash, now) {
+				latest, nomination, candidate, candidateSchedulingRequirementsHash, now) {
 				continue
 			}
 			replacement, getErr := n.kubernetesClient.CoreV1().Pods(nomination.Namespace).Get(
@@ -705,7 +705,7 @@ func hasRecoverablePlacementClaimForPod(
 	}
 	for index := range run.Status.Relocations {
 		if placementClaimCanBeRecoveredForPod(
-			&run.Status.Relocations[index], candidate, candidateSchedulingRequirementsHash, now) {
+			run, &run.Status.Relocations[index], candidate, candidateSchedulingRequirementsHash, now) {
 			return true
 		}
 	}
@@ -713,6 +713,7 @@ func hasRecoverablePlacementClaimForPod(
 }
 
 func placementClaimCanBeRecoveredForPod(
+	run *repackv1alpha1.RepackRun,
 	nomination *repackv1alpha1.PodRelocationStatus,
 	candidate *corev1.Pod,
 	candidateSchedulingRequirementsHash string,
@@ -723,7 +724,7 @@ func placementClaimCanBeRecoveredForPod(
 		nomination.Placement.ReplacementPodName == "" || nomination.Placement.ReplacementPodUID == "" ||
 		nomination.Namespace != candidate.Namespace ||
 		!placement.RelocationUsesPodGroup(nomination, placement.PodGroupName(candidate)) ||
-		(nomination.Placement.ExpirationTime != nil && now.After(nomination.Placement.ExpirationTime.Time)) {
+		executionDeadlinePassed(run, now) {
 		return false
 	}
 	switch nomination.Placement.Phase {
@@ -832,8 +833,7 @@ func hasClaimableNomination(
 	}
 	for index := range run.Status.Relocations {
 		nomination := &run.Status.Relocations[index]
-		if nominationUnavailableForClaim(nomination) ||
-			(nomination.Placement.ExpirationTime != nil && now.After(nomination.Placement.ExpirationTime.Time)) {
+		if nominationUnavailableForClaim(nomination) || executionDeadlinePassed(run, now) {
 			continue
 		}
 		if inCandidateGroup(nomination) && (nomination.SchedulingRequirementsHash == "" ||
@@ -882,7 +882,7 @@ func (n *Nominator) matchNomination(
 		if nominationUnavailableForClaim(nomination) {
 			continue
 		}
-		if nomination.Placement.ExpirationTime != nil && now.After(nomination.Placement.ExpirationTime.Time) {
+		if executionDeadlinePassed(run, now) {
 			continue
 		}
 		// 1. An exact victim name has the strongest Pod identity, but it
@@ -921,6 +921,11 @@ func (n *Nominator) matchNomination(
 		return homogeneousNomination, nominationMatchedByHomogeneousPodGroup
 	}
 	return nil, ""
+}
+
+func executionDeadlinePassed(run *repackv1alpha1.RepackRun, now time.Time) bool {
+	return run != nil && run.Status.ExecutionDeadline != nil &&
+		!now.Before(run.Status.ExecutionDeadline.Time)
 }
 
 // ensureReplacementPodGroup persists the workload-level PodGroup recreation

@@ -45,6 +45,22 @@ func TestResolveStageUsesOneDurableWorkflowClassification(t *testing.T) {
 				Relocations: []repackv1alpha1.PodRelocationStatus{{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted}}},
 				Conditions:  []metav1.Condition{{Type: state.CondProgressing, Status: metav1.ConditionTrue, Reason: state.ReasonReconcilingPlacements}}},
 		}, want: StagePlacing},
+		{name: "mixed batch places accepted subset first", run: &repackv1alpha1.RepackRun{
+			Spec: repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
+			Status: repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackRunning, Plan: plan,
+				Relocations: []repackv1alpha1.PodRelocationStatus{
+					{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted}, Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement}},
+					{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionInProgress}},
+				}},
+		}, want: StagePlacing},
+		{name: "mixed batch resumes eviction after accepted placement", run: &repackv1alpha1.RepackRun{
+			Spec: repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
+			Status: repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackRunning, Plan: plan,
+				Relocations: []repackv1alpha1.PodRelocationStatus{
+					{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted}, Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced}},
+					{Eviction: repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionInProgress}},
+				}},
+		}, want: StageEvicting},
 		{name: "terminal cleanup", run: &repackv1alpha1.RepackRun{
 			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{repackv1alpha1.PlacementActiveLabel: "true"}},
 			Spec:       repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},

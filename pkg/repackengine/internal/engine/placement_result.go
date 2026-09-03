@@ -21,8 +21,6 @@ import (
 	"fmt"
 
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
@@ -62,7 +60,7 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 			// scheduler cache applies the same Pod update. Wait for one coherent
 			// snapshot before publishing cluster-wide actual metrics.
 			if !placementexecutor.ObservationDeadlinePassed(run, e.now()) {
-				return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+				return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), placementRetryInterval)}
 			}
 			resultSnapshotUnavailable = true
 			placementexecutor.MarkBenefitUnverified(run)
@@ -87,7 +85,7 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 					"missingFreedNodes", comparison.Missing,
 					"unexpectedFreedNodes", comparison.Unexpected,
 					"retryAfter", placementRetryInterval)
-				return engineframework.RuntimeResult{RequeueAfter: placementRetryInterval}
+				return engineframework.RuntimeResult{RequeueAfter: capAtExecutionDeadline(run, e.now(), placementRetryInterval)}
 			}
 		}
 	}
@@ -197,58 +195,4 @@ func updateActualExecuteResult(run *repackv1alpha1.RepackRun, nodes []*schedapi.
 		"run", run.Name, "resource", targetResource,
 		"plannedFreedNodes", comparison.Planned, "actualFreedNodes", comparison.Actual,
 		"missingFreedNodes", comparison.Missing, "unexpectedFreedNodes", comparison.Unexpected)
-}
-
-// expirePlacements is the liveness escape hatch. A scheduling gate deliberately
-// fails closed while the engine is deciding a receiver, but it must never leave
-// a workload unavailable forever when concurrent work consumed every viable
-// receiver. At the durable relocation deadline, release only our gate and let
-// normal scheduling restore the Pod; the Run then ends Failed with explicit
-// placement status instead of silently claiming defragmentation success.
-func (e *Engine) expirePlacements(ctx context.Context, run *repackv1alpha1.RepackRun) (bool, error) {
-	keys := map[placementexecutor.Identity]struct{}{}
-	for index := range run.Status.Relocations {
-		relocation := &run.Status.Relocations[index]
-		if placementexecutor.CanExpire(relocation, e.now()) {
-			keys[placementexecutor.IdentityForRelocation(relocation)] = struct{}{}
-		}
-	}
-	if len(keys) == 0 {
-		return false, nil
-	}
-	klog.V(3).InfoS("repack: replacement placement deadline reached",
-		"run", run.Name, "expiringRelocationCount", len(keys))
-	var updatedRun *repackv1alpha1.RepackRun
-	expiredCount := 0
-	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		latest, err := e.volcanoClient.RepackV1alpha1().RepackRuns().Get(ctx, run.Name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		changed := false
-		expiredCount = 0
-		for index := range latest.Status.Relocations {
-			relocation := &latest.Status.Relocations[index]
-			if _, found := keys[placementexecutor.IdentityForRelocation(relocation)]; !found || !placementexecutor.CanExpire(relocation, e.now()) {
-				continue
-			}
-			relocation.Placement.Phase = repackv1alpha1.PodPlacementTimedOut
-			changed = true
-			expiredCount++
-		}
-		if !changed {
-			return nil
-		}
-		updatedRun, err = e.volcanoClient.RepackV1alpha1().RepackRuns().UpdateStatus(ctx, latest, metav1.UpdateOptions{})
-		return err
-	})
-	if err != nil {
-		return false, err
-	}
-	if updatedRun != nil {
-		e.recordRunEvent(updatedRun, v1.EventTypeWarning, eventReasonPlacementTimedOut,
-			fmt.Sprintf("%d replacement placement intents expired; scheduling gates will be released.", expiredCount))
-		return true, nil
-	}
-	return false, nil
 }

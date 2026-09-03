@@ -79,6 +79,10 @@ type Engine struct {
 	// owned by the single reconcile worker; recoverOrphans seeds it before that
 	// worker starts.
 	pendingTerminalStatuses map[string]*repackv1alpha1.RepackRunStatus
+	// evictionRetries is worker-owned transient retry state. The durable
+	// InProgress journal remains the recovery source of truth; a process restart
+	// intentionally restarts the delay at the base interval.
+	evictionRetries map[string]evictionRetryState
 
 	placementRepairLimiter placementRepairLimiter
 }
@@ -106,6 +110,7 @@ func NewEngine(config *rest.Config, engineConfig Config) (*Engine, error) {
 		workQueue:               workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		now:                     time.Now,
 		pendingTerminalStatuses: make(map[string]*repackv1alpha1.RepackRunStatus),
+		evictionRetries:         make(map[string]evictionRetryState),
 	}
 	informer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc: e.enqueue,
@@ -173,7 +178,8 @@ func (e *Engine) Run(ctx context.Context) {
 	e.recoverOrphans(ctx) // fail runs left Running by a crashed predecessor
 	klog.V(3).InfoS("repack-engine started (event-driven)",
 		"plugins", configuredPluginNames(e.config.Plugins),
-		"defaultResource", e.config.DefaultResource, "cooldown", e.config.Cooldown, "resyncPeriod", e.config.ResyncPeriod)
+		"defaultResource", e.config.DefaultResource, "cooldown", e.config.Cooldown,
+		"executionTimeout", e.config.ExecutionTimeout, "resyncPeriod", e.config.ResyncPeriod)
 	// Single worker: Execute runs serialize naturally (one reconcile at a time).
 	var worker sync.WaitGroup
 	worker.Add(1)

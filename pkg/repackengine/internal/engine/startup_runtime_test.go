@@ -61,8 +61,8 @@ func TestNewEngineAppliesDefaults(t *testing.T) {
 	if got := configuredPluginNames(e.config.Plugins); !reflect.DeepEqual(got, wantPlugins) {
 		t.Errorf("default Plugins=%v, want %v", got, wantPlugins)
 	}
-	if e.config.NominationTTL != 10*time.Minute {
-		t.Errorf("default NominationTTL = %v, want 10m", e.config.NominationTTL)
+	if e.config.ExecutionTimeout != 10*time.Minute {
+		t.Errorf("default ExecutionTimeout = %v, want 10m", e.config.ExecutionTimeout)
 	}
 }
 

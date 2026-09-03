@@ -428,8 +428,9 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		schedulingRequirementsHash, err := placement.SchedulingRequirementsHash(hashTemplate)
 		Expect(err).NotTo(HaveOccurred())
 		run.Status = repackv1alpha1.RepackRunStatus{
-			Phase:     repackv1alpha1.RepackRunning,
-			StartTime: &started,
+			Phase:             repackv1alpha1.RepackRunning,
+			StartTime:         &started,
+			ExecutionDeadline: &expires,
 			Plan: &repackv1alpha1.RepackPlan{
 				Summary:    &repackv1alpha1.RepackSummary{FreedNodeCount: 1, MovedCardCount: 2},
 				FreedNodes: []string{nodes[0]},
@@ -447,8 +448,7 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 				SchedulingRequirementsHash: schedulingRequirementsHash,
 				PlannedNodeName:            nodes[1],
 				Eviction:                   acceptedEviction(),
-				Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires,
-					Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+				Placement:                  repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 			}},
 		}
 		markPlacementReconciliationCheckpoint(run)
@@ -569,7 +569,8 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		victimPodName := run.Name + "-victim"
 		expires := metav1.NewTime(time.Now().Add(90 * time.Second))
 		run.Status = repackv1alpha1.RepackRunStatus{
-			Phase: repackv1alpha1.RepackRunning,
+			Phase:             repackv1alpha1.RepackRunning,
+			ExecutionDeadline: &expires,
 			Plan: &repackv1alpha1.RepackPlan{
 				Summary:    &repackv1alpha1.RepackSummary{FreedNodeCount: 1, MovedCardCount: 2},
 				FreedNodes: []string{nodes[0]},
@@ -586,7 +587,7 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 				Namespace: ctx.Namespace, PodGroupName: originalPodGroupName, VictimPodName: victimPodName,
 				PlannedNodeName: nodes[1],
 				Eviction:        acceptedEviction(),
-				Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires, Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+				Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 			}},
 		}
 		markPlacementReconciliationCheckpoint(run)
@@ -732,7 +733,8 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		defer deleteRun(ctx, run.Name)
 		expires := metav1.NewTime(time.Now().Add(90 * time.Second))
 		run.Status = repackv1alpha1.RepackRunStatus{
-			Phase: repackv1alpha1.RepackRunning,
+			Phase:             repackv1alpha1.RepackRunning,
+			ExecutionDeadline: &expires,
 			Plan: &repackv1alpha1.RepackPlan{
 				Summary:    &repackv1alpha1.RepackSummary{FreedNodeCount: 1, MovedCardCount: 4},
 				FreedNodes: []string{nodes[0]},
@@ -759,13 +761,13 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 					Namespace: ctx.Namespace, PodGroupName: originalPodGroupName, VictimPodName: victimPodName,
 					PlannedNodeName: nodes[1],
 					Eviction:        acceptedEviction(),
-					Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires, Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+					Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 				},
 				{
 					Namespace: peerNamespace, PodGroupName: originalPodGroupName, VictimPodName: victimPodName,
 					PlannedNodeName: nodes[2],
 					Eviction:        acceptedEviction(),
-					Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires, Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+					Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 				},
 			},
 		}
@@ -1126,7 +1128,8 @@ func prepareGatedPlacement(ctx *e2eutil.TestContext, name, plannedNode string, f
 		fromNode = freedNodes[0]
 	}
 	run.Status = repackv1alpha1.RepackRunStatus{
-		Phase: repackv1alpha1.RepackRunning,
+		Phase:             repackv1alpha1.RepackRunning,
+		ExecutionDeadline: &expires,
 		Plan: &repackv1alpha1.RepackPlan{
 			Summary: &repackv1alpha1.RepackSummary{
 				FreedNodeCount: int32(len(freedNodes)),
@@ -1143,7 +1146,7 @@ func prepareGatedPlacement(ctx *e2eutil.TestContext, name, plannedNode string, f
 			Namespace: ctx.Namespace, PodGroupName: pgName, VictimPodName: podName,
 			PlannedNodeName: plannedNode,
 			Eviction:        acceptedEviction(),
-			Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires, Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 		}},
 	}
 	markPlacementReconciliationCheckpoint(run)
@@ -1226,7 +1229,8 @@ func prepareGatedNativeReplacement(ctx *e2eutil.TestContext, name string, worklo
 		fromNode = freedNodes[0]
 	}
 	run.Status = repackv1alpha1.RepackRunStatus{
-		Phase: repackv1alpha1.RepackRunning,
+		Phase:             repackv1alpha1.RepackRunning,
+		ExecutionDeadline: &expires,
 		Plan: &repackv1alpha1.RepackPlan{
 			Summary: &repackv1alpha1.RepackSummary{
 				FreedNodeCount: int32(len(freedNodes)),
@@ -1245,7 +1249,7 @@ func prepareGatedNativeReplacement(ctx *e2eutil.TestContext, name string, worklo
 			Namespace: ctx.Namespace, PodGroupName: workload.podGroup, VictimPodName: workload.podName,
 			PlannedNodeName: plannedNode,
 			Eviction:        acceptedEviction(),
-			Placement:       repackv1alpha1.PodPlacementStatus{ExpirationTime: &expires, Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
 		}},
 	}
 	markPlacementReconciliationCheckpoint(run)

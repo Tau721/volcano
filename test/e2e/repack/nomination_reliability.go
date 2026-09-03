@@ -87,6 +87,9 @@ var _ = Describe("Repack relocations & reliability boundaries", Serial, func() {
 			fixture[n] = true
 		}
 
+		Expect(got.Status.ExecutionDeadline).NotTo(BeNil(), "Execute needs one shared deadline")
+		Expect(got.Status.ExecutionDeadline.Time.After(time.Now())).To(BeTrue(), "execution deadline must be in the future")
+
 		// Each relocation is well-formed and never targets a freed node.
 		for _, nom := range got.Status.Relocations {
 			Expect(nom.Namespace).To(Equal(ctx.Namespace), "relocation namespace")
@@ -95,8 +98,6 @@ var _ = Describe("Repack relocations & reliability boundaries", Serial, func() {
 			Expect(freed).NotTo(HaveKey(nom.PlannedNodeName), "a relocation must never target a freed node")
 			Expect(moveTargets).To(HaveKey(nom.PlannedNodeName), "planned node must coincide with a plan move ToNode")
 			Expect(movePGs).To(HaveKey(nom.PodGroupName), "relocation must reference a moved PodGroup")
-			Expect(nom.Placement.ExpirationTime).NotTo(BeNil(), "placement needs a TTL bound")
-			Expect(nom.Placement.ExpirationTime.Time.After(time.Now())).To(BeTrue(), "placement expiration must be in the future")
 			Expect(nom.Placement.Phase).To(Equal(repackv1alpha1.PodPlacementPlaced), "terminal success requires verified placement")
 			Expect(nom.Placement.SelectedNodeName).NotTo(BeEmpty(), "live receiver selection must be recorded")
 			Expect(nom.Placement.ActualNodeName).To(Equal(nom.Placement.SelectedNodeName), "actual node must match the selected receiver")

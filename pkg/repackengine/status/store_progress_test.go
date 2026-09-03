@@ -39,6 +39,26 @@ func TestMergeRelocationProgressPreservesControllerOwnedPlacementPhase(t *testin
 	}
 }
 
+func TestMergeRelocationProgressAllowsEngineOwnedSamePhaseMessage(t *testing.T) {
+	desired := []repackv1alpha1.PodRelocationStatus{{
+		Namespace: "ns", PodGroupName: "g", VictimPodName: "p", PlannedNodeName: "n",
+		VictimPodUID: "uid", Eviction: repackv1alpha1.PodEvictionStatus{
+			Phase: repackv1alpha1.PodEvictionInProgress, Message: "PDB temporarily blocked eviction",
+		},
+	}}
+	latest := []repackv1alpha1.PodRelocationStatus{{
+		Namespace: "ns", PodGroupName: "g", VictimPodName: "p", PlannedNodeName: "n",
+		VictimPodUID: "uid", Eviction: repackv1alpha1.PodEvictionStatus{
+			Phase: repackv1alpha1.PodEvictionInProgress, Message: "durable intent",
+		},
+	}}
+
+	enginestatus.MergeRelocationProgress(desired, latest)
+	if desired[0].Eviction.Message != "PDB temporarily blocked eviction" {
+		t.Fatalf("message=%q, want current batch outcome", desired[0].Eviction.Message)
+	}
+}
+
 func TestMergeRelocationProgressDoesNotOverwriteTerminalPlacementWithOlderObservation(t *testing.T) {
 	for _, olderPhase := range []repackv1alpha1.PodPlacementPhase{
 		repackv1alpha1.PodPlacementWaitingForReplacement,
@@ -66,6 +86,26 @@ func TestMergeRelocationProgressDoesNotOverwriteTerminalPlacementWithOlderObserv
 				t.Fatalf("phase=%q, want TimedOut", desired[0].Placement.Phase)
 			}
 		})
+	}
+}
+
+func TestMergeRelocationProgressPreservesConcurrentTerminalPlacement(t *testing.T) {
+	desired := []repackv1alpha1.PodRelocationStatus{{
+		Namespace: "ns", PodGroupName: "g", VictimPodName: "p", PlannedNodeName: "n",
+		Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementTimedOut},
+	}}
+	latest := []repackv1alpha1.PodRelocationStatus{{
+		Namespace: "ns", PodGroupName: "g", VictimPodName: "p", PlannedNodeName: "n",
+		Placement: repackv1alpha1.PodPlacementStatus{
+			Phase: repackv1alpha1.PodPlacementPlaced, ReplacementPodName: "replacement",
+			ReplacementPodUID: "uid", ActualNodeName: "node-a",
+		},
+	}}
+
+	enginestatus.MergeRelocationProgress(desired, latest)
+	if desired[0].Placement.Phase != repackv1alpha1.PodPlacementPlaced ||
+		desired[0].Placement.ActualNodeName != "node-a" {
+		t.Fatalf("placement=%+v, want concurrent Placed result", desired[0].Placement)
 	}
 }
 

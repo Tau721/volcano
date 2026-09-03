@@ -46,6 +46,11 @@ func ResolveStage(run *repackv1alpha1.RepackRun) Stage {
 	if cleanupRequired(run) {
 		return StageCleanup
 	}
+	// Accepted evictions are restored before the next disruption retry. Once all
+	// currently accepted replacements are terminal, unfinished evictions resume.
+	if acceptedPlacementPending(run) {
+		return StagePlacing
+	}
 	if evictionPending(run) {
 		return StageEvicting
 	}
@@ -58,6 +63,25 @@ func ResolveStage(run *repackv1alpha1.RepackRun) Stage {
 		return StagePlanning
 	}
 	return StageNone
+}
+
+func acceptedPlacementPending(run *repackv1alpha1.RepackRun) bool {
+	if run == nil || run.Spec.Mode != repackv1alpha1.RepackModeExecute ||
+		run.Status.Phase != repackv1alpha1.RepackRunning {
+		return false
+	}
+	for index := range run.Status.Relocations {
+		relocation := &run.Status.Relocations[index]
+		if relocation.Eviction.Phase != repackv1alpha1.PodEvictionAccepted &&
+			relocation.Eviction.Phase != repackv1alpha1.PodEvictionIndirectlyRemoved {
+			continue
+		}
+		if relocation.Placement.Phase != repackv1alpha1.PodPlacementPlaced &&
+			relocation.Placement.Phase != repackv1alpha1.PodPlacementTimedOut {
+			return true
+		}
+	}
+	return false
 }
 
 func ShouldReconcile(run *repackv1alpha1.RepackRun) bool {

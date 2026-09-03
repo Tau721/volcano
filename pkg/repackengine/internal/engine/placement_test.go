@@ -432,28 +432,27 @@ func TestPlacementBindingsVisible(t *testing.T) {
 func TestPlacementObservationDeadlinePassed(t *testing.T) {
 	deadline := metav1.NewTime(time.Unix(100, 0))
 	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		ExecutionDeadline: &deadline,
 		Relocations: []repackv1alpha1.PodRelocationStatus{{
-			Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &deadline},
+			Placement: repackv1alpha1.PodPlacementStatus{},
 		}},
 	}}
 	if placementexecutor.ObservationDeadlinePassed(run, time.Unix(99, 0)) {
 		t.Fatal("deadline must not pass early")
 	}
 	if !placementexecutor.ObservationDeadlinePassed(run, time.Unix(100, 0)) {
-		t.Fatal("deadline must pass at expirationTime")
+		t.Fatal("deadline must pass at executionDeadline")
 	}
 }
 
 func TestPlannedNodeFreeingCanConvergeUntilPlacementDeadline(t *testing.T) {
 	deadline := metav1.NewTime(time.Unix(100, 0))
 	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
-		Plan:   &repackv1alpha1.RepackPlan{FreedNodes: []string{"source"}},
-		Result: &repackv1alpha1.RepackResult{MetricsVerified: true},
+		Plan:              &repackv1alpha1.RepackPlan{FreedNodes: []string{"source"}},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
 		Relocations: []repackv1alpha1.PodRelocationStatus{{
-			Placement: repackv1alpha1.PodPlacementStatus{
-				ExpirationTime: &deadline,
-				Phase:          repackv1alpha1.PodPlacementPlaced,
-			},
+			Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
 		}},
 	}}
 
@@ -477,74 +476,6 @@ func TestPlannedNodeFreeingCanConvergeUntilPlacementDeadline(t *testing.T) {
 	decision := placementexecutor.EvaluateTerminal(run, false)
 	if decision.Succeeded || decision.Reason != state.ReasonBenefitNotRealized {
 		t.Fatalf("decision=%+v, want failed %s", decision, state.ReasonBenefitNotRealized)
-	}
-}
-
-func TestExpirePlacementsIncludesNominatedReplacement(t *testing.T) {
-	deadline := metav1.NewTime(time.Unix(100, 0))
-	run := &repackv1alpha1.RepackRun{
-		ObjectMeta: metav1.ObjectMeta{Name: "run", UID: types.UID("run-uid")},
-		Spec:       repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
-		Status: repackv1alpha1.RepackRunStatus{
-			Phase: repackv1alpha1.RepackRunning,
-			Relocations: []repackv1alpha1.PodRelocationStatus{{
-				Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{SelectedNodeName: "n2", ReplacementPodName: "replacement", ReplacementPodUID: "replacement-uid",
-					ExpirationTime: &deadline, Phase: repackv1alpha1.PodPlacementNominated},
-			}},
-		},
-	}
-	client := vcfake.NewSimpleClientset(run.DeepCopy())
-	engine := &Engine{
-		volcanoClient: client,
-		now:           func() time.Time { return time.Unix(101, 0) },
-	}
-
-	expired, err := engine.expirePlacements(context.Background(), run)
-	if err != nil {
-		t.Fatalf("expirePlacements() error = %v", err)
-	}
-	if !expired {
-		t.Fatal("an overdue Nominated replacement must expire")
-	}
-	updated, err := client.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if phase := updated.Status.Relocations[0].Placement.Phase; phase != repackv1alpha1.PodPlacementTimedOut {
-		t.Fatalf("placement phase = %q, want TimedOut", phase)
-	}
-}
-
-func TestExpirePlacementsDoesNotOverwriteConcurrentPlacementResult(t *testing.T) {
-	deadline := metav1.NewTime(time.Unix(100, 0))
-	staleRun := &repackv1alpha1.RepackRun{
-		ObjectMeta: metav1.ObjectMeta{Name: "run", UID: types.UID("run-uid")},
-		Status: repackv1alpha1.RepackRunStatus{Relocations: []repackv1alpha1.PodRelocationStatus{{
-			Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim", PlannedNodeName: "n2", Placement: repackv1alpha1.PodPlacementStatus{ExpirationTime: &deadline, Phase: repackv1alpha1.PodPlacementNominated},
-		}},
-		},
-	}
-	latestRun := staleRun.DeepCopy()
-	latestRun.Status.Relocations[0].Placement.Phase = repackv1alpha1.PodPlacementPlaced
-	client := vcfake.NewSimpleClientset(latestRun)
-	engine := &Engine{
-		volcanoClient: client,
-		now:           func() time.Time { return time.Unix(101, 0) },
-	}
-
-	expired, err := engine.expirePlacements(context.Background(), staleRun)
-	if err != nil {
-		t.Fatalf("expirePlacements() error = %v", err)
-	}
-	if expired {
-		t.Fatal("a concurrently completed placement must not be reported expired")
-	}
-	updated, err := client.RepackV1alpha1().RepackRuns().Get(context.Background(), staleRun.Name, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if phase := updated.Status.Relocations[0].Placement.Phase; phase != repackv1alpha1.PodPlacementPlaced {
-		t.Fatalf("placement phase = %q, want Placed", phase)
 	}
 }
 
