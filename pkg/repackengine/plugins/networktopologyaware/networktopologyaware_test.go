@@ -38,35 +38,34 @@ import (
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/binpack"
 )
 
-// These unit tests pin the §4.1.3 block-score semantics and the invariants R1–R17
-// from the design doc §5.1.2. Pure-function tests (R7/R8/R9) feed the registration
-// closures directly; session tests (R1/R2/R4/R5/R6/R10/R13/R14/R15) exercise the
-// real OpenSession + PlanScores/PlanAdmissible pipeline over a fake snapshot.
+// These unit tests pin the block-score semantics of the plugin. Pure-function
+// tests feed the registration closures directly; session tests exercise the real
+// OpenSession + PlanScores/PlanAdmissible pipeline over a fake snapshot.
 
 const testResource = v1.ResourceName("example.com/accelerator")
 
 // ---- fake Snapshot carrying a HyperNode topology ----
 
-type topoSnapshot struct {
+type topologySnapshot struct {
 	nodes            []*schedapi.NodeInfo
 	hyperNodesByTier map[int]sets.Set[string]
 	realNodesSet     map[string]sets.Set[string]
 	tierNames        map[string]int
 }
 
-func (s topoSnapshot) Nodes() []*schedapi.NodeInfo { return s.nodes }
-func (topoSnapshot) NodeInScope(*schedapi.NodeInfo) bool {
+func (s topologySnapshot) Nodes() []*schedapi.NodeInfo { return s.nodes }
+func (topologySnapshot) NodeInScope(*schedapi.NodeInfo) bool {
 	return true
 }
-func (topoSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView { return api.PodGroupView{} }
-func (topoSnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
+func (topologySnapshot) PodGroupView(schedapi.JobID) api.PodGroupView { return api.PodGroupView{} }
+func (topologySnapshot) FeasibleRelocation(context.Context, []*api.Move, []*schedapi.TaskInfo, []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	return nil, false
 }
-func (s topoSnapshot) HyperNodesSetByTier() map[int]sets.Set[string] { return s.hyperNodesByTier }
-func (s topoSnapshot) RealNodesSet() map[string]sets.Set[string]     { return s.realNodesSet }
-func (s topoSnapshot) HyperNodeTierNameMap() map[string]int          { return s.tierNames }
+func (s topologySnapshot) HyperNodesSetByTier() map[int]sets.Set[string] { return s.hyperNodesByTier }
+func (s topologySnapshot) RealNodesSet() map[string]sets.Set[string]     { return s.realNodesSet }
+func (s topologySnapshot) HyperNodeTierNameMap() map[string]int          { return s.tierNames }
 
-func topoNode(name string, capacity, used int64) *schedapi.NodeInfo {
+func topologyNode(name string, capacity, used int64) *schedapi.NodeInfo {
 	resource := func(value int64) *schedapi.Resource {
 		return &schedapi.Resource{ScalarResources: map[v1.ResourceName]float64{testResource: float64(value)}}
 	}
@@ -76,8 +75,8 @@ func topoNode(name string, capacity, used int64) *schedapi.NodeInfo {
 func intPtr(v int) *int       { return &v }
 func strPtr(v string) *string { return &v }
 
-// topoRun builds a RepackRun with the given networkTopology.
-func topoRun(mode repackv1alpha1.RepackBlockMode, tier *int, tierName *string, size, required int) *repackv1alpha1.RepackRun {
+// topologyRun builds a RepackRun with the given networkTopology.
+func topologyRun(mode repackv1alpha1.RepackBlockMode, tier *int, tierName *string, size, required int) *repackv1alpha1.RepackRun {
 	return &repackv1alpha1.RepackRun{Spec: repackv1alpha1.RepackRunSpec{
 		NetworkTopology: &repackv1alpha1.NetworkTopology{
 			HyperNodeTier:      tier,
@@ -117,13 +116,13 @@ func scoreFor(ssn *framework.Session, candidates []*api.CandidatePlan) []framewo
 	return ssn.PlanScores(candidates)
 }
 
-// ---- R7: nodeBlockProgressScore ----
+// ---- nodeBlockProgressScore ----
 
 func TestNodeBlockProgressScore(t *testing.T) {
 	cases := []struct {
-		name                       string
-		freeInH, freeableInH, size int
-		want                       int64
+		name                                       string
+		freeInHyperNode, freeableInHyperNode, size int
+		want                                       int64
 	}{
 		{"r==0 exact block is max", 4, 0, 4, 4},
 		{"r==0 with nothing idle", 0, 0, 4, 4},
@@ -137,49 +136,49 @@ func TestNodeBlockProgressScore(t *testing.T) {
 		{"negative freeable", 2, -1, 4, 0},
 		{"size 1 always a block", 0, 0, 1, 1},
 		{"size 1 with free", 7, 3, 1, 1},
-		// size < 1 is normalized to 1 BEFORE the modulo, so any freeInH forms a
+		// size < 1 is normalized to 1 BEFORE the modulo, so any freeInHyperNode forms a
 		// complete block and the score is the max (1).
 		{"size 0 degrades to 1", 3, 0, 0, 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nodeBlockProgressScore(tc.freeInH, tc.freeableInH, tc.size); got != tc.want {
+			if got := nodeBlockProgressScore(tc.freeInHyperNode, tc.freeableInHyperNode, tc.size); got != tc.want {
 				t.Errorf("nodeBlockProgressScore(%d,%d,%d)=%d, want %d",
-					tc.freeInH, tc.freeableInH, tc.size, got, tc.want)
+					tc.freeInHyperNode, tc.freeableInHyperNode, tc.size, got, tc.want)
 			}
 		})
 	}
 }
 
-// ---- R8: nodeBlockDistributionScore (binpack and spread are exact opposites) ----
+// ---- nodeBlockDistributionScore (binpack and spread are exact opposites) ----
 
 func TestNodeBlockDistributionScore(t *testing.T) {
 	cases := []struct {
-		name                 string
-		mode                 repackv1alpha1.RepackBlockMode
-		hasH                 bool
-		blocks, blocksInHMax int
-		want                 int64
+		name                         string
+		mode                         repackv1alpha1.RepackBlockMode
+		hasHyperNode                 bool
+		blocks, maxBlocksInHyperNode int
+		want                         int64
 	}{
 		{"binpack concentrates more", repackv1alpha1.RepackBlockModeBinpack, true, 3, 5, 3},
 		{"spread disperses fewer", repackv1alpha1.RepackBlockModeSpread, true, 3, 5, -3},
 		{"binpack no-H strictly worst (below zero-block H)", repackv1alpha1.RepackBlockModeBinpack, false, 0, 5, -1},
 		{"spread no-H least preferred (below max-block H)", repackv1alpha1.RepackBlockModeSpread, false, 0, 5, -6},
-		{"spread no-H sparse tier (blocksInHMax=0, below zero-block H)", repackv1alpha1.RepackBlockModeSpread, false, 0, 0, -1},
+		{"spread no-H sparse tier (maxBlocksInHyperNode=0, below zero-block H)", repackv1alpha1.RepackBlockModeSpread, false, 0, 0, -1},
 		{"binpack zero blocks", repackv1alpha1.RepackBlockModeBinpack, true, 0, 5, 0},
 		{"unknown mode neutral", repackv1alpha1.RepackBlockMode(""), true, 3, 5, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := nodeBlockDistributionScore(tc.mode, tc.hasH, tc.blocks, tc.blocksInHMax); got != tc.want {
+			if got := nodeBlockDistributionScore(tc.mode, tc.hasHyperNode, tc.blocks, tc.maxBlocksInHyperNode); got != tc.want {
 				t.Errorf("nodeBlockDistributionScore(%s,%v,%d,%d)=%d, want %d",
-					tc.mode, tc.hasH, tc.blocks, tc.blocksInHMax, got, tc.want)
+					tc.mode, tc.hasHyperNode, tc.blocks, tc.maxBlocksInHyperNode, got, tc.want)
 			}
 		})
 	}
 }
 
-// R8's headline invariant: for the same HyperNode, spread is the exact negation
+// Headline invariant: for the same HyperNode, spread is the exact negation
 // of binpack, so a tie in one never flips in the other.
 func TestDistributionOppositeSignsPerMode(t *testing.T) {
 	for _, blocks := range []int{0, 1, 4, 9} {
@@ -191,7 +190,7 @@ func TestDistributionOppositeSignsPerMode(t *testing.T) {
 	}
 }
 
-// ---- R9: totalBlocksInTier counts only HyperNodes of the target tier ----
+// ---- totalBlocksInTier counts only HyperNodes of the target tier ----
 
 func TestTotalBlocksInTier(t *testing.T) {
 	idle := map[string]int{"hnA": 3, "hnB": 0}
@@ -202,12 +201,12 @@ func TestTotalBlocksInTier(t *testing.T) {
 		t.Errorf("totalBlocksInTier(size=2)=%d, want 2 (hnA (3+1)/2 + hnB 0/2)", got)
 	}
 	// size=1: hnA (3+1)/1 + hnB (0+0)/1 = 4. The "outside-tier" freed nodes are
-	// not members of any HyperNode in the tier and never count (R9).
+	// not members of any HyperNode in the tier and never count.
 	if got := totalBlocksInTier(idle, freed, hyperNodes, 1); got != 4 {
 		t.Errorf("totalBlocksInTier(size=1)=%d, want 4 (hnA 4/1 + hnB 0/1)", got)
 	}
 	if got := totalBlocksInTier(idle, freed, nil, 2); got != 0 {
-		t.Errorf("totalBlocksInTier(empty tier)=%d, want 0 (nodes outside the tier never count, R9)", got)
+		t.Errorf("totalBlocksInTier(empty tier)=%d, want 0 (nodes outside the tier never count)", got)
 	}
 	// size<1 degrades to 1, so the same 4.
 	if got := totalBlocksInTier(idle, freed, hyperNodes, 0); got != 4 {
@@ -215,11 +214,11 @@ func TestTotalBlocksInTier(t *testing.T) {
 	}
 }
 
-// ---- R1: no networkTopology -> no callbacks registered ----
+// ---- no networkTopology -> no callbacks registered ----
 
 func TestOnSessionOpenRegistersNothingWithoutTopology(t *testing.T) {
-	snapshot := topoSnapshot{
-		nodes:            []*schedapi.NodeInfo{topoNode("a1", 8, 4)},
+	snapshot := topologySnapshot{
+		nodes:            []*schedapi.NodeInfo{topologyNode("a1", 8, 4)},
 		hyperNodesByTier: map[int]sets.Set[string]{2: sets.New[string]("hnA")},
 		realNodesSet:     map[string]sets.Set[string]{"hnA": sets.New[string]("a1")},
 	}
@@ -229,9 +228,9 @@ func TestOnSessionOpenRegistersNothingWithoutTopology(t *testing.T) {
 	}{
 		{"run is nil", nil},
 		{"networkTopology unset", &repackv1alpha1.RepackRun{}},
-		{"numeric tier does not exist", topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(99), nil, 4, 0)},
-		{"tierName does not exist", topoRun(repackv1alpha1.RepackBlockModeBinpack, nil, strPtr("missing"), 4, 0)},
-		{"tier exists but has no HyperNode", topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(3), nil, 4, 0)},
+		{"numeric tier does not exist", topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(99), nil, 4, 0)},
+		{"tierName does not exist", topologyRun(repackv1alpha1.RepackBlockModeBinpack, nil, strPtr("missing"), 4, 0)},
+		{"tier exists but has no HyperNode", topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(3), nil, 4, 0)},
 	}
 	for _, tc := range runCases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -245,12 +244,12 @@ func TestOnSessionOpenRegistersNothingWithoutTopology(t *testing.T) {
 	}
 }
 
-// ---- R2: registration set depends on Mode ----
+// ---- registration set depends on Mode ----
 
 func TestOnSessionOpenRegistrationDependsOnMode(t *testing.T) {
-	snapshot := topoSnapshot{
+	snapshot := topologySnapshot{
 		nodes: []*schedapi.NodeInfo{
-			topoNode("a1", 8, 4), topoNode("b1", 8, 4), topoNode("b2", 8, 0),
+			topologyNode("a1", 8, 4), topologyNode("b1", 8, 4), topologyNode("b2", 8, 0),
 		},
 		hyperNodesByTier: map[int]sets.Set[string]{2: sets.New[string]("hnA", "hnB")},
 		realNodesSet: map[string]sets.Set[string]{
@@ -264,7 +263,7 @@ func TestOnSessionOpenRegistrationDependsOnMode(t *testing.T) {
 		"spread":  {"nodeBlockProgress", "nodeBlockDistribution"},
 	}
 	for mode, want := range wantTerms {
-		run := topoRun(repackv1alpha1.RepackBlockMode(mode), intPtr(2), nil, 4, 0)
+		run := topologyRun(repackv1alpha1.RepackBlockMode(mode), intPtr(2), nil, 4, 0)
 		ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 		defer framework.CloseSession(ssn)
 
@@ -286,19 +285,19 @@ func TestOnSessionOpenRegistrationDependsOnMode(t *testing.T) {
 	}
 }
 
-// ---- R4/R6/R9: end-to-end raw values for anchored candidates ----
+// ---- end-to-end raw values for anchored candidates ----
 
 // Topology for the anchoring tests:
 //
 //	tier 2: hnA -> a1..a4 (all Partial), hnB -> b1 (Partial), b2 (Empty), and an
 //	"outside" node that belongs to no HyperNode.
-func anchorSnapshot() topoSnapshot {
+func anchorSnapshot() topologySnapshot {
 	nodes := []*schedapi.NodeInfo{}
 	for _, name := range []string{"a1", "a2", "a3", "a4", "b1"} {
-		nodes = append(nodes, topoNode(name, 8, 4)) // Partial
+		nodes = append(nodes, topologyNode(name, 8, 4)) // Partial
 	}
-	nodes = append(nodes, topoNode("b2", 8, 0), topoNode("outside", 8, 4))
-	return topoSnapshot{
+	nodes = append(nodes, topologyNode("b2", 8, 0), topologyNode("outside", 8, 4))
+	return topologySnapshot{
 		nodes:            nodes,
 		hyperNodesByTier: map[int]sets.Set[string]{2: sets.New[string]("hnA", "hnB")},
 		realNodesSet: map[string]sets.Set[string]{
@@ -310,15 +309,15 @@ func anchorSnapshot() topoSnapshot {
 
 func TestBlockScoreRawValuesAnchorOnTheSingleFreedNode(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
 	// hnA: idle 0, busy 4; hnB: idle 1 (b2), busy 1 (b1). size=4.
-	// P_A (a1 -> hnA): freeInH=1, freeable=3 -> progress 1; blocks 0.
-	// P_B (b1 -> hnB): freeInH=2, freeable=0 <2 -> progress 0; blocks 0.
-	// P_X (outside  -> no H): progress 0 (R6), binpack distribution -1 (R6:
-	// strictly below the zero-block H's 0).
+	// P_A (a1 -> hnA): freeInHyperNode=1, freeable=3 -> progress 1; blocks 0.
+	// P_B (b1 -> hnB): freeInHyperNode=2, freeable=0 <2 -> progress 0; blocks 0.
+	// P_X (outside -> no H): progress 0 and binpack distribution -1 (strictly
+	// below the zero-block H's 0).
 	candidates := []*api.CandidatePlan{candidate("a1"), candidate("b1"), candidate("outside")}
 	scores := scoreFor(ssn, candidates)
 
@@ -342,27 +341,27 @@ func TestBlockScoreRawValuesAnchorOnTheSingleFreedNode(t *testing.T) {
 	}
 }
 
-// R6: a candidate whose node belongs to no HyperNode must score worst among a
+// A candidate whose node belongs to no HyperNode must score worst among a
 // batch under spread — progress is 0 and distribution takes the sentinel
-// -(blocksInHMax+1) (strictly below every real-HyperNode value).
+// -(maxBlocksInHyperNode+1) (strictly below every real-HyperNode value).
 func TestNoHyperNodeCandidateScoresWorstUnderSpread(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeSpread, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeSpread, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
 	candidates := []*api.CandidatePlan{candidate("a1"), candidate("b1"), candidate("outside")}
 	scores := scoreFor(ssn, candidates)
 
-	// blocksInHMax = max((0+4)/4, (1+1)/4) = 1, so the outside candidate's
-	// distribution raw is -(blocksInHMax+1) = -2 while the real-HyperNode
+	// maxBlocksInHyperNode = max((0+4)/4, (1+1)/4) = 1, so the outside candidate's
+	// distribution raw is -(maxBlocksInHyperNode+1) = -2 while the real-HyperNode
 	// candidates' are 0 / -0.
 	outside, ok := findTerm(scores[2], "nodeBlockDistribution")
 	if !ok {
 		t.Fatal("outside candidate distribution term missing")
 	}
 	if outside.Raw != -2 {
-		t.Errorf("outside candidate distribution raw=%d, want -(blocksInHMax+1)=-2", outside.Raw)
+		t.Errorf("outside candidate distribution raw=%d, want -(maxBlocksInHyperNode+1)=-2", outside.Raw)
 	}
 	if scores[0].Total <= scores[2].Total || scores[1].Total <= scores[2].Total {
 		t.Errorf("real-HyperNode candidates (%d, %d) must beat the no-H candidate (%d)",
@@ -374,12 +373,12 @@ func TestNoHyperNodeCandidateScoresWorstUnderSpread(t *testing.T) {
 	}
 }
 
-// R6 binpack counterpart: the no-H candidate must also be worst — its
+// Binpack counterpart: the no-H candidate must also be worst — its
 // distribution raw -1 sits strictly below the zero-block H's 0, so a zero-block
 // H candidate (b1, progress 0) beats it even though both tie on progress.
 func TestNoHyperNodeCandidateScoresWorstUnderBinpack(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -405,12 +404,12 @@ func TestNoHyperNodeCandidateScoresWorstUnderBinpack(t *testing.T) {
 	}
 }
 
-// ---- R5: overlapping membership never double counts a node ----
+// ---- overlapping membership never double counts a node ----
 
 func TestNodeToHyperNodeOverlapCountsOnce(t *testing.T) {
-	snapshot := topoSnapshot{
+	snapshot := topologySnapshot{
 		nodes: []*schedapi.NodeInfo{
-			topoNode("shared", 8, 4), topoNode("a2", 8, 4), topoNode("b1", 8, 4),
+			topologyNode("shared", 8, 4), topologyNode("a2", 8, 4), topologyNode("b1", 8, 4),
 		},
 		// Both HyperNodes claim "shared"; hnA sorts first so it must win.
 		hyperNodesByTier: map[int]sets.Set[string]{1: sets.New[string]("hnA", "hnB")},
@@ -422,31 +421,31 @@ func TestNodeToHyperNodeOverlapCountsOnce(t *testing.T) {
 	ssn := openSession(snapshot, nil, nil)
 	defer framework.CloseSession(ssn)
 
-	bsn, ok := buildNodeBlockSession(ssn, topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(1), nil, 4, 0).Spec.NetworkTopology)
+	blockSession, ok := buildNodeBlockSession(ssn, topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(1), nil, 4, 0).Spec.NetworkTopology)
 	if !ok {
 		t.Fatal("buildNodeBlockSession failed")
 	}
-	if bsn.nodeToHyperNode["shared"] != "hnA" {
-		t.Errorf("nodeToHyperNode[shared]=%q, want hnA (first hit wins)", bsn.nodeToHyperNode["shared"])
+	if blockSession.nodeToHyperNode["shared"] != "hnA" {
+		t.Errorf("nodeToHyperNode[shared]=%q, want hnA (first hit wins)", blockSession.nodeToHyperNode["shared"])
 	}
-	if bsn.busyInH["hnA"] != 2 || bsn.busyInH["hnB"] != 1 {
+	if blockSession.busyInHyperNode["hnA"] != 2 || blockSession.busyInHyperNode["hnB"] != 1 {
 		// shared counted once (under hnA) + a2 under hnA; b1 under hnB.
-		t.Errorf("busyInH=%v, want hnA:2, hnB:1 (shared must not double count)", bsn.busyInH)
+		t.Errorf("busyInHyperNode=%v, want hnA:2, hnB:1 (shared must not double count)", blockSession.busyInHyperNode)
 	}
-	if bsn.busyInH["hnA"]+bsn.busyInH["hnB"] != 3 {
-		t.Errorf("total classified nodes=%d, want 3 (three distinct nodes)", bsn.busyInH["hnA"]+bsn.busyInH["hnB"])
+	if blockSession.busyInHyperNode["hnA"]+blockSession.busyInHyperNode["hnB"] != 3 {
+		t.Errorf("total classified nodes=%d, want 3 (three distinct nodes)", blockSession.busyInHyperNode["hnA"]+blockSession.busyInHyperNode["hnB"])
 	}
 }
 
-// ---- R10 + R9: block-count admission gate ----
+// ---- block-count admission gate ----
 
 func TestBlockCountConstraintAdmission(t *testing.T) {
 	// tier 5: hnA -> a1..a4 (Partial), hnB -> b1..b4 (Partial). size=4.
 	nodes := []*schedapi.NodeInfo{}
 	for _, name := range []string{"a1", "a2", "a3", "a4", "b1", "b2", "b3", "b4"} {
-		nodes = append(nodes, topoNode(name, 8, 4))
+		nodes = append(nodes, topologyNode(name, 8, 4))
 	}
-	snapshot := topoSnapshot{
+	snapshot := topologySnapshot{
 		nodes:            nodes,
 		hyperNodesByTier: map[int]sets.Set[string]{5: sets.New[string]("hnA", "hnB")},
 		realNodesSet: map[string]sets.Set[string]{
@@ -455,7 +454,7 @@ func TestBlockCountConstraintAdmission(t *testing.T) {
 		},
 	}
 	// 2 required blocks of 4 nodes: only a plan emptying two whole HyperNodes passes.
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(5), nil, 4, 2)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(5), nil, 4, 2)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -480,33 +479,33 @@ func TestBlockCountConstraintAdmission(t *testing.T) {
 		}
 	}
 
-	// R10: requiredBlocks=0 always admits, even a single freed node.
-	noFloor := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(5), nil, 4, 0)
+	// requiredBlocks=0 always admits, even a single freed node.
+	noFloor := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(5), nil, 4, 0)
 	lenient := openSession(snapshot, noFloor, framework.PluginOptions(Name))
 	defer framework.CloseSession(lenient)
 	if !lenient.PlanAdmissible(&api.RepackPlan{FreedNodes: []string{"a1"}}) {
-		t.Error("requiredBlocks=0 must always pass the block-count constraint (R10)")
+		t.Error("requiredBlocks=0 must always pass the block-count constraint")
 	}
 }
 
-// ---- R13: block-progress dominates distribution ----
+// ---- block-progress dominates distribution ----
 
 // Topology for dominance tests:
 //
 //	tier 3: hnA -> 3 Empty + 4 Partial; hnB -> 9 Empty + 1 Partial.
-func dominanceSnapshot() topoSnapshot {
+func dominanceSnapshot() topologySnapshot {
 	nodes := []*schedapi.NodeInfo{}
 	for _, name := range []string{"a1", "a2", "a3"} {
-		nodes = append(nodes, topoNode(name, 8, 0)) // Empty
+		nodes = append(nodes, topologyNode(name, 8, 0)) // Empty
 	}
 	for _, name := range []string{"a4", "a5", "a6", "a7"} {
-		nodes = append(nodes, topoNode(name, 8, 4)) // Partial
+		nodes = append(nodes, topologyNode(name, 8, 4)) // Partial
 	}
 	for _, name := range []string{"b1", "b2", "b3", "b4", "b5", "b6", "b7", "b8", "b9"} {
-		nodes = append(nodes, topoNode(name, 8, 0)) // Empty
+		nodes = append(nodes, topologyNode(name, 8, 0)) // Empty
 	}
-	nodes = append(nodes, topoNode("b10", 8, 4)) // Partial
-	return topoSnapshot{
+	nodes = append(nodes, topologyNode("b10", 8, 4)) // Partial
+	return topologySnapshot{
 		nodes:            nodes,
 		hyperNodesByTier: map[int]sets.Set[string]{3: sets.New[string]("hnA", "hnB")},
 		realNodesSet: map[string]sets.Set[string]{
@@ -518,14 +517,14 @@ func dominanceSnapshot() topoSnapshot {
 
 func TestProgressScoreDominatesDistribution(t *testing.T) {
 	snapshot := dominanceSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(3), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(3), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
-	// P_A frees an hnA Partial: freeInH=3+1=4 -> progress 4 (full block), blocks 1.
-	// P_B frees hnB's only Partial: freeInH=9+1=10 -> progress 0 (freeable exhausted
+	// P_A frees an hnA Partial: freeInHyperNode=3+1=4 -> progress 4 (full block), blocks 1.
+	// P_B frees hnB's only Partial: freeInHyperNode=9+1=10 -> progress 0 (freeable exhausted
 	// before the remainder), blocks 2. Distribution OPPOSES progress (P_B has more
-	// completed blocks), yet the progress weight must dominate (R13).
+	// completed blocks), yet the progress weight must dominate.
 	candidates := []*api.CandidatePlan{candidate("a4"), candidate("b10")}
 	scores := scoreFor(ssn, candidates)
 
@@ -546,17 +545,17 @@ func TestProgressScoreDominatesDistribution(t *testing.T) {
 	}
 }
 
-// ---- R14: distribution dominates disruption cost within the same progress tier ----
+// ---- distribution dominates disruption cost within the same progress tier ----
 
 // Topology for the cost test:
 //
 //	tier 4: hnA -> 2 Empty + 4 Partial; hnB -> 4 Partial. size=2.
-func costSnapshot() topoSnapshot {
-	nodes := []*schedapi.NodeInfo{topoNode("a1", 8, 0), topoNode("a2", 8, 0)}
+func costSnapshot() topologySnapshot {
+	nodes := []*schedapi.NodeInfo{topologyNode("a1", 8, 0), topologyNode("a2", 8, 0)}
 	for _, name := range []string{"a3", "a4", "a5", "a6", "b1", "b2", "b3", "b4"} {
-		nodes = append(nodes, topoNode(name, 8, 4))
+		nodes = append(nodes, topologyNode(name, 8, 4))
 	}
-	return topoSnapshot{
+	return topologySnapshot{
 		nodes:            nodes,
 		hyperNodesByTier: map[int]sets.Set[string]{4: sets.New[string]("hnA", "hnB")},
 		realNodesSet: map[string]sets.Set[string]{
@@ -568,17 +567,17 @@ func costSnapshot() topoSnapshot {
 
 func TestDistributionScoreDominatesDisruptionCost(t *testing.T) {
 	snapshot := costSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(4), nil, 2, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(4), nil, 2, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name, "workloaddisruption"))
 	defer framework.CloseSession(ssn)
 
-	// Same progress tier (both progress raw 1): hnA freeInH=2+1=3, hnB freeInH=1,
+	// Same progress tier (both progress raw 1): hnA freeInHyperNode=2+1=3, hnB freeInHyperNode=1,
 	// both with r=1 and enough freeable. Distribution differs: hnA completes
 	// blocks=3/2=1, hnB blocks=1/2=0, so binpack prefers P_A.
 	//
 	// Cost opposes: P_A's move disrupts pgA (1 pod, 4 cards) while P_B's move has
 	// no task and hence zero cost. With defaults w_dist=100 vs w_cost=10+3+1=14,
-	// R14 requires distribution to win (100*100 > 100*14).
+	// Distribution must win (100*100 > 100*14).
 	pA := api.NewCandidatePlan(nil, []*api.Move{{
 		From: "a3", To: "b1",
 		Task: &schedapi.TaskInfo{
@@ -606,16 +605,16 @@ func TestDistributionScoreDominatesDisruptionCost(t *testing.T) {
 	}
 }
 
-// ---- R15: full weight x full normalized score never overflows int64 ----
+// ---- full weight x full normalized score never overflows int64 ----
 
 func TestNodeBlockScoreNoOverflowAtMaxWeights(t *testing.T) {
 	// costSnapshot with size=2: hnA idle=2/busy=4, hnB idle=0/busy=4.
-	// P_A (a3 -> hnA): freeInH=3 -> progress raw 1, blocks 1 (tier max).
-	// P_B (b1 -> hnB): freeInH=1 -> progress raw 1 (same tier), blocks 0.
+	// P_A (a3 -> hnA): freeInHyperNode=3 -> progress raw 1, blocks 1 (tier max).
+	// P_B (b1 -> hnB): freeInHyperNode=1 -> progress raw 1 (same tier), blocks 0.
 	// Progress raws tie (span 0 -> both 100); distribution gives P_A the max,
 	// so P_A's contributions are exactly weight*100 on both terms.
 	snapshot := costSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(4), nil, 2, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(4), nil, 2, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -642,7 +641,7 @@ func TestNodeBlockScoreNoOverflowAtMaxWeights(t *testing.T) {
 	}
 }
 
-// ---- R3: capability requirement + default plugin assembly ----
+// ---- capability requirement + default plugin assembly ----
 
 func TestRequiresDomainCapabilityAndInDefaultPluginList(t *testing.T) {
 	requires := framework.PluginRequires(Name)
@@ -660,7 +659,7 @@ func TestRequiresDomainCapabilityAndInDefaultPluginList(t *testing.T) {
 	}
 }
 
-// ---- R17: argument validation ----
+// ---- argument validation ----
 
 func TestValidateArgumentsRejectsNegativeAndUnknownWeights(t *testing.T) {
 	valid := framework.Arguments{
@@ -698,12 +697,12 @@ func TestValidateArgumentsRejectsNegativeAndUnknownWeights(t *testing.T) {
 // A zero progress weight disables the term through the real OpenSession path, so
 // only the distribution term (if any) remains.
 func TestZeroWeightsDisableScoreTerms(t *testing.T) {
-	snapshot := topoSnapshot{
-		nodes:            []*schedapi.NodeInfo{topoNode("a1", 8, 4)},
+	snapshot := topologySnapshot{
+		nodes:            []*schedapi.NodeInfo{topologyNode("a1", 8, 4)},
 		hyperNodesByTier: map[int]sets.Set[string]{2: sets.New[string]("hnA")},
 		realNodesSet:     map[string]sets.Set[string]{"hnA": sets.New[string]("a1")},
 	}
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, []framework.PluginOption{{
 		Name: Name,
 		Arguments: framework.Arguments{
@@ -719,7 +718,7 @@ func TestZeroWeightsDisableScoreTerms(t *testing.T) {
 	}
 }
 
-// ---- 4.1.3.4 node-block receiver preference ----
+// ---- node-block receiver preference ----
 
 // planningCandidate wraps a plan into the read-only candidate view plugins receive.
 func planningCandidate(plan *api.CandidatePlan) *framework.PlanningCandidate {
@@ -731,7 +730,7 @@ func planningCandidate(plan *api.CandidatePlan) *framework.PlanningCandidate {
 // is set when testing cross-plugin key order.
 func receiver(name string, staysOccupied bool) *framework.ReceiverCandidate {
 	return &framework.ReceiverCandidate{
-		Node:              topoNode(name, 8, 4),
+		Node:              topologyNode(name, 8, 4),
 		StaysOccupied:     staysOccupied,
 		AvailableResource: 4,
 	}
@@ -762,7 +761,7 @@ func orderedNames(ordered []framework.OrderedReceiver) []string {
 // HyperNode, keyed off the candidate's anchor (a1 -> hnA).
 func TestNodeBlockReceiverPreferenceOrdersByHyperNode(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -789,7 +788,7 @@ func TestNodeBlockReceiverPreferenceOrdersByHyperNode(t *testing.T) {
 // stable and the input order is preserved — never a mis-ordering.
 func TestNodeBlockReceiverPreferenceAbstainsWithoutAnchor(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -813,7 +812,7 @@ func TestNodeBlockReceiverPreferenceAbstainsWithoutAnchor(t *testing.T) {
 // ({3}) and is preferred over any in-tier node.
 func TestNodeBlockReceiverPreferenceAnchorOutsideTier(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 
@@ -835,7 +834,7 @@ func TestNodeBlockReceiverPreferenceAnchorOutsideTier(t *testing.T) {
 	}
 }
 
-// R1 dormancy: without networkTopology the plugin registers nothing, so no
+// Dormancy: without networkTopology the plugin registers nothing, so no
 // receiver preference is evaluated.
 func TestNodeBlockReceiverPreferenceRegistersOnlyWithTopology(t *testing.T) {
 	snapshot := anchorSnapshot()
@@ -850,17 +849,17 @@ func TestNodeBlockReceiverPreferenceRegistersOnlyWithTopology(t *testing.T) {
 		t.Fatalf("ordered=%d receivers, want 1", len(ordered))
 	}
 	if len(ordered[0].Terms) != 0 {
-		t.Errorf("no topology -> terms=%v, want none (R1)", ordered[0].Terms)
+		t.Errorf("no topology -> terms=%v, want none", ordered[0].Terms)
 	}
 }
 
 // The key order is staysOccupied (Stability) before nodeBlockPreserve (Topology):
 // a stays-occupied own-H receiver wins over a drainable no-H receiver even though
 // the block preference alone would choose the no-H node. This pins the design's
-// "only loses to staysOccupied" invariant (design §4.1.3.4, hard guarantee).
+// "only loses to staysOccupied" invariant (hard guarantee).
 func TestNodeBlockReceiverPreferenceSitsAfterStaysOccupied(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name, "binpack"))
 	defer framework.CloseSession(ssn)
 
@@ -891,7 +890,7 @@ func TestNodeBlockReceiverPreferenceSitsAfterStaysOccupied(t *testing.T) {
 // — anchor[0] alone would only protect the first member's HyperNode.
 func TestNodeBlockReceiverPreferenceMultiAnchorSet(t *testing.T) {
 	snapshot := anchorSnapshot()
-	run := topoRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
+	run := topologyRun(repackv1alpha1.RepackBlockModeBinpack, intPtr(2), nil, 4, 0)
 	ssn := openSession(snapshot, run, framework.PluginOptions(Name))
 	defer framework.CloseSession(ssn)
 

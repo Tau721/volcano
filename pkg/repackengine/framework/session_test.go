@@ -44,10 +44,10 @@ func TestSession_MovableAND(t *testing.T) {
 
 // A task whose workload template pins spec.nodeName (resolved by the Engine into
 // PinnedTasks) is immovable, while an otherwise-identical free task stays movable.
-// This is the planner-side guarantee that a nodeName-pinned pod is never drained:
-// its evicted replacement would be recreated glued to the same node by the
-// template, so the drain could not complete. The pin cannot be read off the live
-// pod — the scheduler writes spec.nodeName into every bound pod — hence the set.
+// The planner-side guarantee: an evicted pinned pod is recreated glued to the same
+// node by the template, so the drain could never complete. The pin cannot be read
+// off the live pod (the scheduler writes spec.nodeName into every bound pod), hence
+// the explicit set.
 func TestSession_MovableExcludesPinnedTasks(t *testing.T) {
 	ssn := OpenSession(SessionConfig{
 		Snapshot:    &fakeSnap{},

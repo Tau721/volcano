@@ -40,23 +40,21 @@ import (
 //	    ├── hB (tier 1)  — contains n1
 //	    └── hD (tier 1)  — contains n2
 //
-// A task on n0 maps to hA via getLowestTierHyperNode; LCA(hD, hB) = top. The
-// virtual root is what makes hasHyperNodeTopology()/allowedDomains() find a tree.
+// The virtual root is what lets hasHyperNodeTopology()/allowedDomains() find a tree.
 func planTestHyperNodes() (schedapi.HyperNodeInfoMap, map[string]sets.Set[string]) {
 	top := schedframework.ClusterTopHyperNode
-	hn := schedapi.HyperNodeInfoMap{
+	hyperNodes := schedapi.HyperNodeInfoMap{
 		top:   schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: top}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 3}}, schedapi.TierOpt(3)),
 		"top": schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "top"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 2}}, schedapi.TierOpt(2), schedapi.ParentOpt(top)),
 		"hA":  schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "hA"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 1}}, schedapi.TierOpt(1), schedapi.ParentOpt("top")),
 		"hB":  schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "hB"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 1}}, schedapi.TierOpt(1), schedapi.ParentOpt("top")),
 		"hD":  schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "hD"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 1}}, schedapi.TierOpt(1), schedapi.ParentOpt("top")),
 	}
-	// Link parent -> children, mirroring the scheduler cache's addChild pass.
 	// ParentOpt only records the parent pointer; gradient BFS walks Children.
-	for _, hni := range hn {
-		if hni.Parent != "" {
-			if parent, ok := hn[hni.Parent]; ok {
-				parent.Children.Insert(hni.Name)
+	for _, hyperNode := range hyperNodes {
+		if hyperNode.Parent != "" {
+			if parent, ok := hyperNodes[hyperNode.Parent]; ok {
+				parent.Children.Insert(hyperNode.Name)
 			}
 		}
 	}
@@ -67,12 +65,11 @@ func planTestHyperNodes() (schedapi.HyperNodeInfoMap, map[string]sets.Set[string
 		"hB":  sets.New("n1"),
 		"hD":  sets.New("n2"),
 	}
-	return hn, rns
+	return hyperNodes, rns
 }
 
-// planTestTask builds an allocated task with both Resreq and InitResreq set —
-// TaskInfo.Clone() calls Resreq.Clone()/InitResreq.Clone() unconditionally and
-// Resource.Clone() is not nil-safe.
+// planTestTask builds an allocated task with both Resreq and InitResreq set:
+// TaskInfo.Clone() clones both unconditionally, and Resource.Clone() is not nil-safe.
 func planTestTask(uid, jobID, name, nodeName string) *schedapi.TaskInfo {
 	rr := gpuRes(4)
 	return &schedapi.TaskInfo{
@@ -134,12 +131,11 @@ func planTestNode(name string, tasks ...*schedapi.TaskInfo) *schedapi.NodeInfo {
 	}
 }
 
-// planTestBothMovingSession builds a session with two subJobs side by side:
-// subJob A = uA on n0 (anchored hA), subJob B = uB on n1 (anchored hB); the
-// job anchor is their LCA, top. Initial anchors are computed with the real
-// SyncJobAllocatedHyperNode so the test asserts against true initial state.
+// planTestBothMovingSession builds a two-subJob session (A on n0 anchored hA,
+// B on n1 anchored hB, job anchor = LCA top). Anchors use the real
+// SyncJobAllocatedHyperNode so tests assert the true initial state.
 func planTestBothMovingSession(t *testing.T) (*schedframework.Session, *schedapi.JobInfo, *schedapi.SubJobInfo, *schedapi.SubJobInfo) {
-	hn, rns := planTestHyperNodes()
+	hyperNodes, rns := planTestHyperNodes()
 
 	uA := planTestTask("uA", "ns/job", "ta", "n0")
 	uB := planTestTask("uB", "ns/job", "tb", "n1")
@@ -154,19 +150,18 @@ func planTestBothMovingSession(t *testing.T) (*schedframework.Session, *schedapi
 			"n1": planTestNode("n1", uB),
 			"n2": planTestNode("n2"),
 		},
-		HyperNodes: hn, RealNodesSet: rns,
+		HyperNodes: hyperNodes, RealNodesSet: rns,
 	}
-	schedapi.SyncJobAllocatedHyperNode(ji, hn, rns)
+	schedapi.SyncJobAllocatedHyperNode(ji, hyperNodes, rns)
 	if sjA.AllocatedHyperNode != "hA" || sjB.AllocatedHyperNode != "hB" || ji.AllocatedHyperNode != "top" {
 		t.Fatalf("bad initial anchors: sjA=%q sjB=%q job=%q, want hA/hB/top", sjA.AllocatedHyperNode, sjB.AllocatedHyperNode, ji.AllocatedHyperNode)
 	}
 	return ssn, ji, sjA, sjB
 }
 
-// R26 both-moving: committing both subJobs into the common domain hD rewrites
-// the job side (n0,n1 → n2), recomputes subJob/job anchors to hD, leaves the
-// node side untouched, advances the rollback baseline on re-Save, and restores
-// symmetrically back to the pre-commit baseline.
+// Both-moving: committing both subJobs into the common domain hD rewrites the
+// job side (n0,n1 → n2) and re-anchors subJob/job to hD; the node side stays
+// untouched, and rollback returns to the pre-commit baseline.
 func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 	ssn, ji, sjA, sjB := planTestBothMovingSession(t)
 	ps := NewSessionPlanState(ssn)
@@ -188,7 +183,7 @@ func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 		t.Error("job TaskStatusIndex not rewritten")
 	}
 
-	// anchors recomputed via SyncJobAllocatedHyperNode (M1).
+	// anchors recomputed via SyncJobAllocatedHyperNode.
 	if got := ps.SubJobAllocatedHyperNode(ji.UID, sjA.UID); got != "hD" {
 		t.Errorf("subJob A anchor=%q, want hD", got)
 	}
@@ -199,7 +194,7 @@ func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 		t.Errorf("job anchor=%q, want hD", got)
 	}
 
-	// node side untouched: original pointers, original NodeName (Jobs/Nodes 分叉).
+	// node side untouched: original pointers and NodeName (job side and node side diverge).
 	if n := ssn.Nodes["n0"].Tasks["uA"]; n.NodeName != "n0" || n == ji.Tasks["uA"] {
 		t.Errorf("node-side uA must stay the original n0 task, got NodeName=%q", n.NodeName)
 	}
@@ -217,8 +212,7 @@ func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 		t.Errorf("restore to committed baseline reverted task, got %q", ji.Tasks["uA"].NodeName)
 	}
 
-	// full rollback to the pre-commit baseline: anchors back, job side points at
-	// the original tasks again, and the node side is untouched throughout.
+	// full rollback to the pre-commit baseline: anchors and job-side tasks revert.
 	ps.Restore(baseline)
 	if got := ps.SubJobAllocatedHyperNode(ji.UID, sjA.UID); got != "hA" {
 		t.Errorf("restored subJob A anchor=%q, want hA", got)
@@ -240,7 +234,7 @@ func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 	}
 }
 
-// H1: ClearGangAnchor temporarily clears a job/subJob AllocatedHyperNode for
+// ClearGangAnchor temporarily clears a job/subJob AllocatedHyperNode for
 // no-anchor gradient evaluation; Save/Restore restores it.
 func TestSessionPlanState_ClearGangAnchor(t *testing.T) {
 	_, ji, sjA, _ := planTestBothMovingSession(t)
@@ -269,9 +263,8 @@ func TestSessionPlanState_ClearGangAnchor(t *testing.T) {
 	}
 }
 
-// R26 trial rollback: a trial placement that is later rejected must leave no
-// residue — anchors and task bindings return to the last committed baseline and
-// the rewritten bookkeeping is empty, so the next gradient evaluation is clean.
+// Trial rollback: a rejected trial must leave no residue — anchors and task
+// bindings return to the committed baseline, keeping the next trial clean.
 func TestSessionPlanState_TrialRollbackNoResidue(t *testing.T) {
 	ssn, ji, sjA, _ := planTestBothMovingSession(t)
 	ps := NewSessionPlanState(ssn)

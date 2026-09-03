@@ -39,7 +39,7 @@ type gangUnit struct {
 // requiresHyperNodeAllocate reports whether the unit's job hits the scheduler's
 // RequiresHyperNodeAllocate predicate AND the session carries a HyperNode tree.
 // Without a tree the constraint stack is inert and the unit must keep the
-// legacy greedy behavior (R19).
+// legacy greedy behavior.
 func (u *gangUnit) requiresHyperNodeAllocate(s *SessionSnapshot) bool {
 	return u.job != nil && u.job.RequiresHyperNodeAllocate() && s.hasHyperNodeTopology()
 }
@@ -112,9 +112,9 @@ func (s *SessionSnapshot) allowedDomains(unit *gangUnit) ([][]*schedapi.HyperNod
 func intersectGradientForest(outer, inner [][]*schedapi.HyperNodeInfo, hyperNodes schedapi.HyperNodeInfoMap) ([][]*schedapi.HyperNodeInfo, bool) {
 	roots := sets.New[string]()
 	for _, layer := range outer {
-		for _, hn := range layer {
-			if hn != nil {
-				roots.Insert(hn.Name)
+		for _, hyperNode := range layer {
+			if hyperNode != nil {
+				roots.Insert(hyperNode.Name)
 			}
 		}
 	}
@@ -124,11 +124,11 @@ func intersectGradientForest(outer, inner [][]*schedapi.HyperNodeInfo, hyperNode
 	var result [][]*schedapi.HyperNodeInfo
 	for _, layer := range inner {
 		var kept []*schedapi.HyperNodeInfo
-		for _, hn := range layer {
-			if hn == nil || !underAnyRoot(hyperNodes, hn.Name, roots) {
+		for _, hyperNode := range layer {
+			if hyperNode == nil || !underAnyRoot(hyperNodes, hyperNode.Name, roots) {
 				continue
 			}
-			kept = append(kept, hn)
+			kept = append(kept, hyperNode)
 		}
 		if len(kept) > 0 {
 			result = append(result, kept)
@@ -175,28 +175,46 @@ func (s *SessionSnapshot) domainTrialRelocation(
 
 // allowedDomainsForTrial clears the gang anchor when this unit fully vacates
 // the gang, so the whole-cluster branch applies as the real scheduler would
-// after eviction. Save/Restore keeps the clear leak-free.
+// after eviction. Save/Restore keeps the clear leak-free even on a panic.
 func (s *SessionSnapshot) allowedDomainsForTrial(unit *gangUnit) ([][]*schedapi.HyperNodeInfo, bool) {
 	if s.gangFullyVacated(unit) {
 		anchor := s.plan.Save()
+		defer s.plan.Restore(anchor)
 		s.plan.ClearGangAnchor(unit.job.UID, unit.subJobID())
-		allowed, ok := s.allowedDomains(unit)
-		s.plan.Restore(anchor)
-		return allowed, ok
+		return s.allowedDomains(unit)
 	}
 	return s.allowedDomains(unit)
 }
 
-// gangFullyVacated reports whether every plan-state allocated task of the gang
-// is a victim of this unit (no residual pod after this commit).
+// gangFullyVacated reports whether every plan-state allocated task of the gang is
+// a victim of this unit (no residual pod anchors it). Set membership, not count
+// equality: on the Execute-side reconcile a victim is the live Pending replacement
+// pod, so counts could match while a residual allocated pod still anchors the gang.
 func (s *SessionSnapshot) gangFullyVacated(unit *gangUnit) bool {
 	if len(unit.victims) == 0 {
 		return false
 	}
-	if unit.subJob != nil {
-		return unit.subJob.AllocatedTaskNum() == int32(len(unit.victims))
+	victimIDs := sets.New[schedapi.TaskID]()
+	for _, v := range unit.victims {
+		if v != nil {
+			victimIDs.Insert(v.UID)
+		}
 	}
-	return unit.job.AllocatedTaskNum() == int32(len(unit.victims))
+	index := unit.job.TaskStatusIndex
+	if unit.subJob != nil {
+		index = unit.subJob.TaskStatusIndex
+	}
+	for status, tasks := range index {
+		if !schedapi.AllocatedStatus(status) {
+			continue
+		}
+		for taskID := range tasks {
+			if !victimIDs.Has(taskID) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // trialFitDomain places every victim into receivers under domain's real node

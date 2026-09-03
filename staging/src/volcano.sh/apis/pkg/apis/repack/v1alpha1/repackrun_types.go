@@ -229,8 +229,7 @@ type RepackGoal struct {
 // The tier identifier is mutually exclusive by construction: configure exactly
 // one of HyperNodeTier (numeric, matching HyperNode.Spec.Tier) or
 // HyperNodeTierName (matching HyperNode.Spec.TierName). The exclusivity is
-// enforced at the apiserver with a CEL XValidation on this struct (there is no
-// repo precedent for struct-level XValidation; verify via make manifests + e2e).
+// enforced at the apiserver with a CEL XValidation on this struct.
 //
 // +kubebuilder:validation:XValidation:rule="(has(self.hyperNodeTier) && !has(self.hyperNodeTierName)) || (!has(self.hyperNodeTier) && has(self.hyperNodeTierName))",message="hyperNodeTier and hyperNodeTierName are mutually exclusive; configure exactly one"
 type NetworkTopology struct {

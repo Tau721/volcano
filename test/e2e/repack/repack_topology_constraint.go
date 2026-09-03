@@ -14,22 +14,15 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// HyperNode-level constraint-preservation e2e scenarios (US-02). Every scenario
-// builds a real HyperNode tree over the kind workers, declares a hard
-// HyperNode-level constraint on the PodGroup, runs a RepackRun through the real
-// scheduler, and asserts the post-repack placement still satisfies the
-// constraint — the plan is only "right" if the real scheduler (which
-// re-evaluates the constraint during Execute replacement scheduling) accepts it.
+// HyperNode-level constraint-preservation e2e scenarios (US-02): build a real
+// HyperNode tree over the kind workers, declare a hard HyperNode-level
+// constraint on a PodGroup, run a RepackRun through the real scheduler, and
+// assert the post-repack placement still satisfies the constraint.
 //
-// Determinism: the drain planner selects the highest-scored candidate first, so
-// these specs never depend on WHICH node drains. Every non-subject node is either
-// full (never a drain target) or pinned (spec.nodeName makes its replacement
-// immovable, so repack's relocation predicate rejects it and the node never
-// drains). Only the subject unit has a feasible migration, and assertions check
-// order-independent properties: which domains the pods end up in and which node
-// set was freed — "constraint still satisfied" rather than "exact target node".
-// Scenarios that could free either of a symmetric pair (E10a/E17/E18) assert
-// that at least one of the pair is freed and the constraint holds.
+// Determinism: the drain planner picks the highest-scored candidate first and
+// every non-subject node is full or pinned, so only the subject unit can move;
+// assertions are order-independent. Symmetric pairs (E10a/E17/E18) assert at
+// least one side is freed.
 package repack
 
 import (
@@ -64,11 +57,9 @@ type hyperNodeFixture struct {
 	memberIsNode bool
 }
 
-// setupRepackTopologyCustom builds an arbitrary HyperNode tree. E10a/E17/E18
-// need a tier-1 domain wider than the standard 2-node rt-s0 so an in-domain
-// receiver exists; E10b needs a one-node second domain. setupRepackTopology
-// (E8/E9/E11/E12/E13/E16) cannot express those, so these specs build their own
-// tree.
+// setupRepackTopologyCustom builds an arbitrary HyperNode tree. E10a/E17/E18 need
+// a wider tier-1 domain than the standard two-node rt-s0 and E10b a one-node
+// second domain, which setupRepackTopology cannot express.
 func setupRepackTopologyCustom(ctx *e2eutil.TestContext, fixtures []hyperNodeFixture) {
 	for _, hn := range fixtures {
 		memberType := topologyv1alpha1.MemberTypeHyperNode
@@ -190,10 +181,8 @@ func subGroupJobSpec(ctx *e2eutil.TestContext, name string, jobTier *int, tasks 
 }
 
 // createMovableJob creates the job while only the `hold` nodes are schedulable
-// and waits for every replica to be Ready. The pod template carries no
-// spec.nodeName, so replacements stay free to follow repack's live receiver
-// selection. hold must be sized so the requested total cards force the intended
-// spread.
+// and waits for every replica to be Ready. No spec.nodeName, so replacements stay
+// free to follow repack's live receiver selection; `hold` must force the spread.
 func createMovableJob(ctx *e2eutil.TestContext, spec *e2eutil.JobSpec, hold ...string) *batchv1alpha1.Job {
 	release := holdNodesExcept(ctx, hold...)
 	defer release()
@@ -342,11 +331,8 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 
 	Context("E8: hard network topology holds across a cross-tier drain (US-02)", func() {
 		It("moves a tier-1 hard-topology pod across domains when the gang fully vacates", func() {
-			// A hard tier-1 job is the only movable load on n0. The gang (a
-			// single pod) fully vacates, so the H1 anchor clear applies and the
-			// pod may land on any tier-1 HyperNode — rt-s0's only node is full,
-			// so the receiver is in rt-s1. The real scheduler must accept that
-			// cross-domain placement during Execute or the run fails.
+			// n0 fully vacates -> anchor clear -> may land on any tier-1 HyperNode;
+			// rt-s0 is full, so the receiver is in rt-s1 (the scheduler must accept it).
 			hardJob := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e8-topo", 4, 1, 1), nodes[0])
 			occupy(ctx, "e8-full1", nodes[1], 8) // rt-s0 full -> no in-domain receiver
 			occupy(ctx, "e8-s2", nodes[2], 2)    // rt-s1 static receiver
@@ -369,16 +355,14 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 			pod := runningPodsOfJob(ctx, hardJob)[0]
 			Expect(nodeOfPod(pod)).NotTo(Equal(nodes[0]), "pod must leave the drained source")
 			Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
-				"fully-vacated hard tier-1 pod must be allowed to land in rt-s1 (H1 anchor clear)")
+				"fully-vacated hard tier-1 pod must be allowed to land in rt-s1 (anchor clear)")
 		})
 	})
 
 	Context("E9: PodGroup anti-affinity with a static peer (US-02)", func() {
 		It("keeps the migrating PodGroup out of the static peer's HyperNode domain", func() {
-			// B fills n2 entirely -> full node, never a drain target, so B is
-			// static. A is the only movable member; its required anti-affinity
-			// against B must keep A inside rt-s0 (n1 is the only in-domain
-			// receiver).
+			// B is a full static node (never drains); A is the only movable member
+			// and its required anti-affinity must keep it in rt-s0 (n1 receiver).
 			jobA := occupyMovableVCJob(ctx, "e9-a", nodes[0], 2)
 			jobB := occupy(ctx, "e9-b", nodes[2], 8) // full node -> static peer
 			occupy(ctx, "e9-s1", nodes[1], 2)        // rt-s0 static receiver for A
@@ -405,15 +389,10 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 
 	Context("E11: the only feasible receiver violates the constraint -> no migration (US-02)", func() {
 		It("rejects the unit as infeasible and plans no violating move", func() {
-			// A (movable, on n0) is Required anti-affine to B, which sits static and
-			// full on n2. A's only capacity receiver is n3: n1 is full (no in-domain
-			// receiver) and n3 carries the only slack — but n3 lies in rt-s1, B's
-			// tier-1 domain, which the anti-affinity forbids. The cluster is
-			// genuinely fragmented (4 occupied nodes vs 3 optimal, requests
-			// [2,8,8,2]), so the planner must run candidate evaluation and reject
-			// the unit — a constraint-blind planner would move A to n3, free n0, and
-			// report ExecutionCompleted, so this scenario discriminates the
-			// feasibility check from the old no-check behavior.
+			// A is Required anti-affine to static full B (n2); its only slack
+			// receiver n3 sits in B's rt-s1 domain, so A must be rejected as
+			// infeasible. Fragmentation is real (4 occupied vs 3 optimal), so the
+			// feasibility check is exercised.
 			jobA := occupyMovableVCJob(ctx, "e11-a", nodes[0], 2)
 			jobB := occupy(ctx, "e11-b", nodes[2], 8) // static full peer -> B never drains
 			occupy(ctx, "e11-full1", nodes[1], 8)     // rt-s0 full -> no in-domain receiver
@@ -440,12 +419,9 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 
 	Context("E12: SubGroup unit inherits the Job-level hard topology (US-02)", func() {
 		It("keeps the SubJob pod inside the Job-entry anchored subtree", func() {
-			// Job-level hard tier-3 topology, subGroupPolicy taskA declares none.
-			// The SubJob unit's allowed domains are the intersection of the
-			// Job-entry (anchored to rt-s3) and SubJob-entry (abstains -> whole
-			// cluster) gradients, so the pod must stay within rt-s3 = {n0,n1}.
-			// n2 has slack a constraint-blind planner would use, discriminating
-			// the Job-entry inheritance from a naive per-SubJob view.
+			// Job-level hard tier-3 topology; taskA's SubJob declares none, so its
+			// allowed domain is the Job-entry anchor rt-s3={n0,n1}; n2's slack would
+			// tempt a planner ignoring the Job-entry inheritance.
 			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e12", ptr.To(3),
 				repackSubGroupTask{name: "task-a", cards: 4, reps: 1}), nodes[0])
 			occupy(ctx, "e12-s1", nodes[1], 2)    // in-rt-s3 receiver (tier-3 ancestor = rt-s3)
@@ -470,10 +446,9 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 
 	Context("E13: both-moving self-harm is rejected at planning (US-02)", func() {
 		It("never moves the mutually anti-affine PodGroups into one domain", func() {
-			// A (rt-s0) and B (rt-s1) are mutually anti-affine and both are drain
-			// targets. A's only potential receiver is rt-s1 (B's domain), so
-			// freeing n0 would force a violation -> A is infeasible and stays;
-			// B drains within rt-s1 (n3). This holds for either processing order.
+			// Mutually anti-affine A (rt-s0) and B (rt-s1), both drain targets; A's
+			// only receiver is B's domain, so A is infeasible and stays while B
+			// drains within rt-s1. Order-independent.
 			jobA := occupyMovableVCJob(ctx, "e13-a", nodes[0], 4)
 			jobB := occupyMovableVCJob(ctx, "e13-b", nodes[2], 4)
 			occupy(ctx, "e13-full1", nodes[1], 8)
@@ -503,9 +478,9 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 
 	Context("E16: positive both-moving, each within its own domain (US-02)", func() {
 		It("drains both anti-affine PodGroups and lands each in a distinct domain", func() {
-			// A and B are mutually anti-affine in separate domains; each source
-			// has an in-domain receiver, so both may drain independently. The
-			// plan-state incremental rerun must keep them apart or Execute fails.
+			// Mutually anti-affine A and B in separate domains each have an
+			// in-domain receiver, so both may drain independently while staying
+			// apart.
 			jobA := occupyMovableVCJob(ctx, "e16-a", nodes[0], 4)
 			jobB := occupyMovableVCJob(ctx, "e16-b", nodes[2], 4)
 			occupy(ctx, "e16-s1", nodes[1], 2)
@@ -536,10 +511,8 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 	var ctx *e2eutil.TestContext
 	var nodes []string
 
-	// A three-node tier-1 domain gives E10a/E17/E18 an in-domain receiver for a
-	// same-domain gang, which the standard two-node tree cannot express; the
-	// one-node rt-s1 is the decoy domain (the forbidden/other domain for
-	// anti-affinity).
+	// A three-node rt-s0 gives E10a/E17/E18 an in-domain receiver a two-node
+	// tree cannot; the one-node rt-s1 is the decoy/forbidden domain.
 	BeforeEach(func() {
 		ctx = e2eutil.InitTestContext(e2eutil.Options{})
 		nodes = npuFixture(ctx, 4)
@@ -557,14 +530,10 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 	Context("E10a: SubGroup affinity is preserved after repack (US-02)", func() {
 		It("keeps the affinity-linked subjobs in one HyperNode domain", func() {
-			// taskA/taskB are Required-affine and spread over n0/n1 (rt-s0).
-			// rt-s1 is full and rt-s0's n2 fits only one 5-card pod, so the
-			// affinity pair cannot co-land on a fresh node: whichever subjob
-			// drains is pinned to its peer's domain rt-s0 and moves to the
-			// in-domain receiver n2, the peer stays -> both remain in rt-s0.
-			// Which of the pair's sources frees depends on candidate ordering,
-			// but the single-domain invariant holds either way and the decoy
-			// domain B never settles a pod.
+			// Required-affine taskA/taskB spread over n0/n1 (rt-s0). They cannot
+			// co-land on a fresh node, so the draining subjob is pinned to its peer's
+			// domain and moves to the in-domain receiver n2; whichever source frees,
+			// the single-domain invariant holds.
 			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e10a", nil,
 				repackSubGroupTask{name: "task-a", cards: 5, reps: 1},
 				repackSubGroupTask{name: "task-b", cards: 5, reps: 1}), nodes[0], nodes[1])
@@ -593,10 +562,9 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 	Context("E10b: SubGroup anti-affinity is preserved after repack (US-02)", func() {
 		It("keeps the anti-affine subjobs in distinct HyperNode domains", func() {
-			// taskA/taskB are Required-anti-affine and start in distinct domains
-			// (rt-s0 and rt-s1, forced by the constraint under holdNodesExcept).
-			// The drained subjob's only allowed receivers are in the other
-			// subjob's complement, so the domain split survives the run.
+			// Required-anti-affine taskA/taskB start in distinct domains (rt-s0 and
+			// rt-s1, forced under holdNodesExcept); the drained subjob may move only
+			// to the other's complement, so the split survives.
 			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e10b", nil,
 				repackSubGroupTask{name: "task-a", cards: 5, reps: 1},
 				repackSubGroupTask{name: "task-b", cards: 5, reps: 1}), nodes[0], nodes[3])
@@ -621,11 +589,9 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 	Context("E17: partial-evacuation anchor keeps the pod in its original subtree (US-02)", func() {
 		It("keeps a partially-evacuated tier-1 gang inside its anchored domain", func() {
-			// A hard tier-1 gang of two 5-card replicas spreads over n0 and n1
-			// (rt-s0). Only one node is drained, so the gang retains a residual
-			// pod and the H1 anchor keeps the migrating replica inside rt-s0 (n2
-			// is the in-domain receiver) - never the decoy rt-s1, which the real
-			// scheduler would also reject for a hard tier-1 gang with a residual.
+			// Hard tier-1 gang of two 5-card replicas over n0/n1 (rt-s0). Draining
+			// one node leaves a residual pod, so the anchor keeps the migrating
+			// replica inside rt-s0 (n2 receiver), never the decoy rt-s1.
 			job := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e17", 5, 1, 2), nodes[0], nodes[1])
 			occupy(ctx, "e17-s2", nodes[2], 2)
 			occupy(ctx, "e17-full3", nodes[3], 8)
@@ -651,23 +617,13 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 	Context("E18: a no-hard-item ==true job keeps whole-unit single-domain (US-02)", func() {
 		It("keeps a SubGroupPolicy job's pods within one HyperNode domain", func() {
-			// taskA carries a PartitionPolicy (so RequiresHyperNodeAllocate()==true
-			// via ContainsSubJobPolicy) but no hard topology. The two pods spread
-			// over n0/n1 (rt-s0). Draining one frees its node; the only receiver
-			// with slack is n2 — inside rt-s0 (n3 in rt-s1 is full), so the
-			// drained pod necessarily lands back in the source domain and the
-			// whole unit ends in rt-s0, accepted by the real scheduler.
+			// ==true unit (PartitionPolicy, no hard topology) spread over n0/n1
+			// (rt-s0); the only slack receiver is in-domain, so the drained pod
+			// lands back in rt-s0.
 			//
-			// Discrimination caveat: because the only feasible receiver is in the
-			// source domain, this case cannot tell a correct single-domain
-			// placement from a buggy multi-domain/scatter one — a scatter
-			// implementation would also land on n2. Moreover, the "single domain"
-			// for this soft ==true unit is ClusterTop (the whole cluster): its
-			// allowed range covers both tier-1 domains, so a cross-domain receiver
-			// would legitimately split the unit across rt-s0 and rt-s1 (see E19).
-			// The in-domain assertion below is therefore geometry-dependent, not a
-			// general invariant; the real M3 anchor discriminator needs a HARD unit
-			// with a feasible cross-domain sole receiver, which E20 covers.
+			// Not a strong discriminator: a soft ==true unit may range over the
+			// whole cluster (E19), so a scatter impl would also pass; E20 is the
+			// hard-unit discriminator.
 			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e18", nil,
 				repackSubGroupTask{name: "task-a", cards: 5, reps: 2}), nodes[0], nodes[1])
 			occupy(ctx, "e18-s2", nodes[2], 2)
@@ -693,25 +649,13 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 		Context("E19: soft ==true unit schedules within ClusterTop -> cross-domain move is legitimate (US-02)", func() {
 			It("moves the drained pod across tier-1 domains when the only receiver is in another domain", func() {
-				// A soft ==true unit (taskA carries a PartitionPolicy, so
-				// RequiresHyperNodeAllocate()==true via ContainsSubJobPolicy, but no
-				// hard topology) has no anchor: its allowed range is the whole
-				// candidate universe, i.e. ClusterTop — the highest HyperNode that
-				// contains every node. The real scheduler places such a unit anywhere
-				// within the cluster, so a cross-tier-1-domain move is legitimate even
-				// when the unit keeps a residual pod in rt-s0.
+				// Soft ==true unit (PartitionPolicy, no hard topology) has no anchor:
+				// allowed range is ClusterTop (whole cluster), so a cross-domain move
+				// is legitimate even with a residual pod.
 				//
-				// rt-s0 has NO slack (n2 is full) and the only receiver with slack is
-				// n3 in rt-s1 — a cross-domain sole receiver. The correct planner uses
-				// it: drain n0, land the evicted pod on n3 (rt-s1), keep the residual
-				// in rt-s0. Both pods stay within the unit's allowed range (ClusterTop),
-				// so the run completes ExecutionCompleted rather than rejecting.
-				//
-				// This is the flip side of E20: the same geometry with a HARD tier-1
-				// unit must reject, because the hard anchor pins the gang to rt-s0.
-				// Together the pair discriminates "soft schedules cluster-wide vs hard
-				// is anchored" — E18 alone cannot, since its only feasible receiver is
-				// in-domain.
+				// rt-s0 has no slack (n2 full); sole receiver n3 is in rt-s1, where the
+				// drained pod lands. Flip side of E20: the same geometry with a HARD
+				// unit must reject, since the anchor pins the gang to rt-s0.
 				job := createMovableJob(ctx, subGroupJobSpec(ctx, "e19", nil,
 					repackSubGroupTask{name: "task-a", cards: 5, reps: 2}), nodes[0], nodes[1])
 				occupy(ctx, "e19-full2", nodes[2], 8) // rt-s0 full -> no in-domain receiver
@@ -741,20 +685,12 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 
 		Context("E20: hard tier-1 unit with residual -> sole cross-domain receiver is rejected (US-02, F4)", func() {
 			It("anchors the partially-evacuated hard gang to its source domain and plans no violating move", func() {
-				// The real M3 anchor discriminator: E19's geometry (rt-s0 has no
-				// slack, the only feasible receiver n3 sits in rt-s1) applied to a
-				// HARD tier-1 unit. Only one of the two replicas is drained, so the
-				// gang keeps a residual pod and the H1 anchor is NOT cleared: the
-				// allowed domain narrows to rt-s0. rt-s0's only free capacity would
-				// be the drained source itself (excluded as a receiver), n1 holds the
-				// residual (3 free < 5), n2 is full -> no feasible in-domain receiver
-				// -> the drain candidate is infeasible and no node is freed. A buggy
-				// anchor-less planner would drain n0 and land the pod on n3, splitting
-				// the hard gang across rt-s0/rt-s1 (which the real scheduler rejects
-				// for a hard tier-1 gang with a residual), so this spec discriminates
-				// anchor enforcement. Contrast E19: the same geometry with a soft
-				// ==true unit legitimately crosses into rt-s1 (schedules within
-				// ClusterTop).
+				// Real anchor discriminator: E19's geometry (no rt-s0 slack, sole
+				// receiver n3 in rt-s1) with a HARD tier-1 unit. Draining one replica
+				// leaves a residual, so the anchor is NOT cleared; rt-s0's only
+				// capacity would be the excluded drained source -> infeasible, nothing
+				// drains. An anchor-less planner would split the gang, which the
+				// scheduler rejects (contrast soft E19).
 				job := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e20", 5, 1, 2), nodes[0], nodes[1])
 				occupy(ctx, "e20-full2", nodes[2], 8) // rt-s0 full -> no in-domain receiver
 				occupy(ctx, "e20-s3", nodes[3], 2)    // sole receiver has slack but sits in rt-s1

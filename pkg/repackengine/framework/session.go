@@ -188,9 +188,9 @@ func (s *Session) Nodes() []*schedapi.NodeInfo { return s.configuration.Snapshot
 // PodGroup ownership boundary, then applies the AND of all registered policy
 // callbacks. With no callbacks, every valid PodGroup task is movable.
 //
-// A pod pinned via spec.nodeName is immovable: the scheduler honors the pin
-// outside its filter stack, so Repack can never relocate it to another node.
-// Treating it as immovable excludes it from VictimsOf and marks its node
+// A pod pinned via spec.nodeName is immovable — the scheduler honors the pin
+// outside its filter stack — so treating it as such excludes it from VictimsOf
+// and marks its node
 // unfreeable, matching what Execute can actually achieve.
 func (s *Session) Movable() api.Movable {
 	fns := s.movableFns

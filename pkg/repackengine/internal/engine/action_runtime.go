@@ -216,14 +216,12 @@ func (r *actionRuntime) RecordPlanComputed(run *repackv1alpha1.RepackRun) {
 
 // collectPinnedTasks returns the scheduler task UIDs whose owning vcjob template
 // pins spec.nodeName, restricted to gangs in scope. A pinned pod can never be
-// relocated — the vcjob controller recreates an evicted replacement from the
-// same template — so the planner must never select it as a victim.
+// relocated — the vcjob controller recreates an evicted replacement from the same
+// template — so the planner must never select it as a victim.
 //
-// Only vcjob templates are inspected; native workloads (Deployment/StatefulSet)
-// are not yet covered. They pin via temporary taints rather than nodeName, so a
-// template pin there is unexpected, but would go undetected and the replacement
-// recreated onto the same node. The live pod alone cannot distinguish a pin
-// (every bound pod carries spec.nodeName).
+// Only vcjob templates are inspected: native workloads pin via temporary taints,
+// not nodeName, so a template pin there is unexpected but would go undetected (the
+// live pod alone cannot distinguish a pin — every bound pod carries spec.nodeName).
 func collectPinnedTasks(ctx context.Context, volcanoClient vcclientset.Interface, ssn *schedframework.Session, scope *enginescope.Matcher) (sets.Set[schedapi.TaskID], error) {
 	pinned := sets.New[schedapi.TaskID]()
 	type jobKey struct{ namespace, name string }

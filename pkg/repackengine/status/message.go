@@ -26,7 +26,6 @@ import (
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	state "volcano.sh/repack-controller/pkg/state"
-	engineconf "volcano.sh/volcano/pkg/repackengine/conf"
 	placementexecutor "volcano.sh/volcano/pkg/repackengine/executor/placement"
 )
 
@@ -60,8 +59,8 @@ func CompletionMessage(run *repackv1alpha1.RepackRun, targetResource v1.Resource
 			resource, summary.FragBefore, summary.ScopeNodes, summary.ScopePodGroups)
 	case state.ReasonInsufficientImprovement:
 		return fmt.Sprintf(
-			"No repack performed for %s: cluster fragmentation is %d%%, but no feasible plan within the resolved scope met the required %d percentage-point improvement.",
-			resource, summary.FragBefore, engineconf.MinFragImprovement(run))
+			"No repack performed for %s: cluster fragmentation is %d%%, but no feasible plan within the resolved scope met the repack run's benefit requirement (whole-node freed or fragmentation-rate threshold), so no migration was planned.",
+			resource, summary.FragBefore)
 	case state.ReasonRequiredNodeBlocksNotMet:
 		required, size, tier := blockRequirement(run)
 		return fmt.Sprintf(

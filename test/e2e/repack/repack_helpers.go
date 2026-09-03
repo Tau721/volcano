@@ -154,10 +154,8 @@ func occupyMovableVCJob(ctx *e2eutil.TestContext, name, initialNode string, card
 	return occupy(ctx, name, "", cards)
 }
 
-// occupyMovableResource is the movable counterpart of occupyResource: it places
-// the Pod deterministically on initialNode (other nodes tainted during the
-// initial scheduling decision) without persisting spec.nodeName, so a
-// replacement is free to follow Repack's live receiver selection.
+// occupyMovableResource is occupyResource's movable variant: deterministic
+// initial placement on initialNode, no spec.nodeName, so replacements stay free.
 func occupyMovableResource(ctx *e2eutil.TestContext, name, initialNode string, res v1.ResourceName, cards int) *batchv1alpha1.Job {
 	releaseNodes := holdNonTargetNodes(ctx, initialNode)
 	defer releaseNodes()
@@ -182,9 +180,8 @@ func occupyVCJobReplicas(ctx *e2eutil.TestContext, name, node string, cardsPerPo
 	return job
 }
 
-// occupyVCJobReplicasMovable is the movable counterpart of occupyVCJobReplicas:
-// it places the replicas deterministically on initialNode without persisting
-// spec.nodeName, so a replacement is free to follow Repack's receiver selection.
+// occupyVCJobReplicasMovable is occupyVCJobReplicas' movable variant: same
+// deterministic initial placement, no spec.nodeName.
 func occupyVCJobReplicasMovable(ctx *e2eutil.TestContext, name, initialNode string, cardsPerPod int, replicas, minAvailable int32) *batchv1alpha1.Job {
 	releaseNodes := holdNonTargetNodes(ctx, initialNode)
 	defer releaseNodes()
@@ -363,10 +360,8 @@ func holdNonTargetNodes(ctx *e2eutil.TestContext, target string) func() {
 	}
 }
 
-// patchNodeTaint applies taint to nodeName unless already present, retrying on
-// resourceVersion conflicts (the live scheduler/kubelet keeps bumping node
-// resourceVersions, so a plain read-modify-write intermittently 409s). Returns
-// whether the taint was newly added.
+// patchNodeTaint applies taint unless already present, retrying on resourceVersion
+// conflicts (live node updates bump it constantly); reports whether it was added.
 func patchNodeTaint(ctx *e2eutil.TestContext, nodeName string, taint v1.Taint) (bool, error) {
 	added := false
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {

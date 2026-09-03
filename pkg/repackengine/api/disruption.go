@@ -37,8 +37,7 @@ type PodGroupViewer interface {
 }
 
 // PlanContext carries lookups shared by every scoring strategy in a comparison.
-// It is built by the engine Session and passed to the plan score functions
-// that plugins register.
+// The engine Session builds it and passes it to registered plan score functions.
 type PlanContext struct {
 	TargetResource v1.ResourceName // accelerator resource being defragmented
 	PodGroupViews  PodGroupViewer  // per-PodGroup facts; nil-safe via PodGroupView()
@@ -61,32 +60,23 @@ func (context *PlanContext) Resource() v1.ResourceName {
 	return context.TargetResource
 }
 
-// CandidatePlan is one rearrangement under comparison. CommittedMoves are the
-// moves already selected in this planning pass; Moves are the candidate's
-// incremental moves. Keeping the slices separate avoids copying the growing
-// committed prefix for every candidate during disruption scoring. Aggregates are
-// computed once and cached.
-//
-// The freed-node accessors (IncrementalFromNodes / FreedNodes) cache their
-// deduplicated results on the same lazily-filled pattern as MoveAggregate, but
-// with a single field each: the node set is independent of the target resource,
-// so no resource key is needed in the cache.
+// CandidatePlan is one rearrangement under comparison: committedMoves are the
+// moves already selected in this pass, moves the candidate's incremental moves.
+// Keeping them separate avoids copying the committed prefix for every candidate.
 type CandidatePlan struct {
 	committedMoves    []*Move
 	moves             []*Move
 	aggregateResource v1.ResourceName
 	aggregate         *PlanMoveAggregate
-	// incrementalFromNodes / freedNodes cache the deduplicated source-node
-	// views; nil means "not computed yet" (a nil result never overwrites the
-	// cached value, so they are only assigned non-nil slices).
+	// incrementalFromNodes / freedNodes lazily cache the deduplicated source-node
+	// views; nil means "not computed yet".
 	incrementalFromNodes []string
 	freedNodes           []string
 }
 
-// NewCandidatePlan creates an immutable candidate view for plugins. The private,
-// full slice expressions freeze the visible lengths without copying the growing
-// committed prefix for every candidate; callers retain ownership and must treat
-// existing Move records as immutable after construction.
+// NewCandidatePlan creates an immutable candidate view for plugins. Full slice
+// expressions freeze the visible lengths without copying; callers must treat
+// existing Move records as immutable afterwards.
 func NewCandidatePlan(committedMoves, moves []*Move) *CandidatePlan {
 	return &CandidatePlan{
 		committedMoves: committedMoves[:len(committedMoves):len(committedMoves)],
@@ -132,15 +122,11 @@ func (plan *CandidatePlan) MoveAggregate(context *PlanContext) *PlanMoveAggregat
 }
 
 // IncrementalFromNodes returns the distinct source nodes freed by THIS
-// candidate's own incremental moves (moves, excluding committedMoves). It is the
-// per-candidate anchor of the HyperNode block scores: the consolidation domain
-// unit is a single node, so the incremental moves share exactly one From (the
-// design doc pins this single-node-unit constraint — see §4.1.3). FreedNodes
-// must NOT be used as this anchor: it includes nodes freed by earlier committed
-// moves, which would make the anchor ambiguous.
-//
-// To==From (non-relocation) moves are excluded, consistent with addMove.
-// Returns nil when nothing freed; deduplicated, sorted, cached.
+// candidate's own incremental moves (excluding committedMoves). It is the
+// per-candidate anchor of the HyperNode block scores: the consolidation unit is a
+// single node, so these moves share exactly one From. FreedNodes must NOT be used
+// here — it also covers earlier committed moves, which would make the anchor
+// ambiguous. Excludes To==From moves; deduplicated; nil when nothing freed.
 func (plan *CandidatePlan) IncrementalFromNodes() []string {
 	if plan == nil {
 		return nil
@@ -152,13 +138,10 @@ func (plan *CandidatePlan) IncrementalFromNodes() []string {
 	return plan.incrementalFromNodes
 }
 
-// FreedNodes returns the distinct source nodes freed by the whole prospective
-// plan — committedMoves plus the candidate's incremental moves, deduplicated.
-// This is the "freeInH counts the nodes freed so far, including this candidate"
-// view the block scores use, and is consistent in meaning with
-// RepackPlan.FreedNodes (the finished plan's field). Superset of
-// IncrementalFromNodes. To==From (non-relocation) moves are excluded, as in
-// addMove. Cached on first call; nil when nothing freed.
+// FreedNodes returns the distinct source nodes the whole prospective plan frees —
+// committedMoves plus this candidate's moves. This is the view the block scores
+// use (freed so far, including this candidate) and matches RepackPlan.FreedNodes.
+// Superset of IncrementalFromNodes; excludes To==From moves; nil when nothing freed.
 func (plan *CandidatePlan) FreedNodes() []string {
 	if plan == nil {
 		return nil
@@ -170,10 +153,9 @@ func (plan *CandidatePlan) FreedNodes() []string {
 	return plan.freedNodes
 }
 
-// distinctFromNodes deduplicates the From of every relocation across the given
-// move sets, sorted for determinism. Empty From (not yet placed) and To==From
-// (not actually relocated) moves are not freed-node evidence — the To==From
-// exclusion matches addMove and is defensive: drain unit moves never produce it.
+// distinctFromNodes deduplicates the From of every relocation across the move
+// sets, sorted for determinism. Empty From and To==From moves are not freed-node
+// evidence (the To==From exclusion is defensive: drain unit moves never produce it).
 func (plan *CandidatePlan) distinctFromNodes(moveSets ...[]*Move) []string {
 	set := sets.New[string]()
 	for _, moves := range moveSets {

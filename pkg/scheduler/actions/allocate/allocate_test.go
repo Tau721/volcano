@@ -6400,11 +6400,9 @@ func TestInvalidateSubJobNomination(t *testing.T) {
 	})
 }
 
-// TestDeriveNominatedHyperNode covers the derivation that seeds
-// SubJobInfo.NominatedHyperNode from the pending tasks' nominatedNodeName so a
-// repack placement nomination (written before the gate is opened) pins the
-// subJob to the receiver's HyperNode instead of letting binpack re-pick the
-// vacated source domain.
+// TestDeriveNominatedHyperNode seeds SubJobInfo.NominatedHyperNode from the
+// pending tasks' nominatedNodeName, pinning the subJob to the receiver's
+// HyperNode instead of letting binpack re-pick the vacated source domain.
 func TestDeriveNominatedHyperNode(t *testing.T) {
 	node := func(name string) *api.NodeInfo {
 		ni := api.NewNodeInfo(nil)
@@ -6412,9 +6410,8 @@ func TestDeriveNominatedHyperNode(t *testing.T) {
 		return ni
 	}
 	n0, n1, n2, n3 := node("n0"), node("n1"), node("n2"), node("n3")
-	// Standard overlapping-leaf tree: rt-s0 (tier-1) and rt-s3 (tier-3) both hold
-	// {n0,n1} but sit on different branches; rt-s1={n2,n3}; rt-s2 is the tier-2
-	// ancestor of rt-s0/rt-s1.
+	// Overlapping-leaf tree: rt-s0 (tier-1) and rt-s3 (tier-3) share {n0,n1} on
+	// different branches; rt-s1={n2,n3}; rt-s2 is the tier-2 ancestor of both.
 	ssn := &framework.Session{
 		RealNodesList: map[string][]*api.NodeInfo{
 			"rt-s0":                       {n0, n1},
@@ -6477,18 +6474,16 @@ func TestDeriveNominatedHyperNode(t *testing.T) {
 	})
 
 	t.Run("two replicas on overlapping leaves still agree on one domain", func(t *testing.T) {
-		// The F1 defect: rt-s0 and rt-s3 overlap on {n0,n1}; map iteration made
-		// n0 and n1 resolve to different domains, so the multi-replica
-		// nomination yielded "" and the replacement was never pinned.
+		// F1: rt-s0 and rt-s3 overlap on {n0,n1}; map iteration once split n0/n1
+		// across domains, yielding "" so the replacement was never pinned.
 		t1 := newPendingTask("ns/j", "t1", "n0", 1000)
 		t2 := newPendingTask("ns/j", "t2", "n1", 1000)
 		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{}, newSubJobWorksheet(t1, t2)))
 	})
 
 	t.Run("a partially-evacuated tier-3 subJob resolves receivers inside its own anchor", func(t *testing.T) {
-		// Residual anchors the subJob to rt-s3; n0 is shared with rt-s0, but
-		// resolving to rt-s0 would inflate AllocatedHyperNode to the cluster top
-		// via LCA. Anchor-aware resolution must stay in rt-s3.
+		// The residual anchor rt-s3 shares n0 with rt-s0, but resolving to rt-s0
+		// would inflate AllocatedHyperNode via LCA; resolution must stay in rt-s3.
 		task := newPendingTask("ns/j", "t", "n0", 1000)
 		assert.Equal(t, "rt-s3", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{AllocatedHyperNode: "rt-s3"}, newSubJobWorksheet(task)))
 	})
@@ -6499,15 +6494,15 @@ func TestDeriveNominatedHyperNode(t *testing.T) {
 	})
 
 	t.Run("an anchor unrelated to the receiver does not filter candidates", func(t *testing.T) {
-		// A fully-evacuated / cross-domain move: the anchor's subtree holds no
-		// candidate for n0, so all candidates remain and deepest tier wins.
+		// Cross-domain move: the anchor's subtree holds no n0 candidate, so all
+		// candidates remain and deepest tier wins.
 		task := newPendingTask("ns/j", "t", "n0", 1000)
 		assert.Equal(t, "rt-s0", alloc.deriveNominatedHyperNode(ssn, &api.SubJobInfo{AllocatedHyperNode: "rt-s1"}, newSubJobWorksheet(task)))
 	})
 }
 
-// TestAllocateFromNomination_FallsBackWhenHyperNodeMissing: pinned hyperNode
-// no longer in topology => fall back and nomination cleared.
+// TestAllocateFromNomination_FallsBackWhenHyperNodeMissing: a pinned hyperNode
+// missing from the topology falls back and clears the nomination.
 func TestAllocateFromNomination_FallsBackWhenHyperNodeMissing(t *testing.T) {
 	jobID := api.JobID("ns/job-missing-hn")
 	task := newPendingTask(jobID, "t1", "n1", 1000)
@@ -6545,9 +6540,8 @@ func TestValidateNomination_MissBranches(t *testing.T) {
 		taskNominatedNodeName string
 		// nodes populates ssn.Nodes.
 		nodes map[string]*api.NodeInfo
-		// leafNodeName decides which node lives in the pinned hyperNode's
-		// RealNodesList entry. The node may or may not also exist in ssn.Nodes
-		// (the "not in ssn.Nodes" case relies on the asymmetry).
+		// leafNodeName is the node in the pinned hyperNode's RealNodesList; it may
+		// or may not also exist in ssn.Nodes (that asymmetry drives the ghost case).
 		leafNodeName string
 		// taskResMilliCPU is the task's requested resource.
 		taskResMilliCPU float64
@@ -6669,9 +6663,8 @@ func TestAllocateFromNomination_HappyPath(t *testing.T) {
 	assert.Equal(t, "hn-pinned", got)
 }
 
-// TestAllocateFromNomination_AllocateErrorFallsBack: allocateResourcesForTask
-// returns non-nil (because the node already has the task's PodKey, so
-// node.AddTask errors) => stmt.Discard + fall back.
+// TestAllocateFromNomination_AllocateErrorFallsBack: node.AddTask errors (the
+// node already carries the task's PodKey), so the fast path discards and falls back.
 func TestAllocateFromNomination_AllocateErrorFallsBack(t *testing.T) {
 	jobID := api.JobID("ns/job-quickpath-allocate-err")
 	task := newPendingTask(jobID, "t1", "n1", 1000)
@@ -6702,4 +6695,45 @@ func TestAllocateFromNomination_AllocateErrorFallsBack(t *testing.T) {
 	// Defer invalidates the nomination on every failure path.
 	assert.Equal(t, "", subJob.NominatedHyperNode)
 	assert.Equal(t, "", task.Pod.Status.NominatedNodeName)
+}
+
+// TestSelectBestHyperNodeForJob_TieDeterministic: a fully-nominated subJob scores
+// 0 for every outer candidate, so without a deterministic tie-break the winner
+// follows Go map order; repeating the selection proves order-independence.
+func TestSelectBestHyperNodeForJob_TieDeterministic(t *testing.T) {
+	alloc := &Action{}
+	job := &api.JobInfo{UID: api.JobID("ns/job-tie")}
+
+	t.Run("all-zero tie resolves to lexicographically smallest", func(t *testing.T) {
+		scores := map[string]float64{"rt-c": 0, "rt-a": 0, "rt-b": 0}
+		for i := 0; i < 100; i++ {
+			best, err := alloc.selectBestHyperNodeForJob(scores, job)
+			assert.NoError(t, err)
+			assert.Equal(t, "rt-a", best)
+		}
+	})
+
+	t.Run("strictly better score wins regardless of name order", func(t *testing.T) {
+		// "rt-a" is lexicographically smallest but loses: strict ">" dominates.
+		scores := map[string]float64{"rt-a": 1, "rt-z": 2, "rt-m": 1}
+		for i := 0; i < 100; i++ {
+			best, err := alloc.selectBestHyperNodeForJob(scores, job)
+			assert.NoError(t, err)
+			assert.Equal(t, "rt-z", best)
+		}
+	})
+
+	t.Run("tie within the winning score keeps the smallest name", func(t *testing.T) {
+		scores := map[string]float64{"rt-b": 5, "rt-a": 5, "rt-c": 3}
+		for i := 0; i < 100; i++ {
+			best, err := alloc.selectBestHyperNodeForJob(scores, job)
+			assert.NoError(t, err)
+			assert.Equal(t, "rt-a", best)
+		}
+	})
+
+	t.Run("empty scores returns error", func(t *testing.T) {
+		_, err := alloc.selectBestHyperNodeForJob(map[string]float64{}, job)
+		assert.Error(t, err)
+	})
 }

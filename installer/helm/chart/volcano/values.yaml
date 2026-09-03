@@ -49,7 +49,7 @@ custom:
   # Optional order-independent Repack capability plugin command-line override. Empty uses
   # repack-engine.conf; command-line values take precedence over the file. The repack
   # action requires at least one domain provider (currently nodeconsolidation).
-  # Example: [workloadscope, repackbudget, nodeconsolidation, workloaddisruption, gangdisruption, binpack]
+  # Example: [workloadscope, repackbudget, nodeconsolidation, networktopologyaware, workloaddisruption, gangdisruption, binpack]
   repack_plugins: []
   repack_log_level: 3
   scheduler_metrics_enable: true

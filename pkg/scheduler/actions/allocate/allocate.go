@@ -851,13 +851,18 @@ func (alloc *Action) preferJobSoftTopologyScoreCandidates(job *api.JobInfo, scor
 	return preferred
 }
 
-// selectBestHyperNodeForJob return the best hyperNode for the job,
-// it will score and select the best hyperNode among all available hyperNodes.
+// selectBestHyperNodeForJob picks the highest-scoring HyperNode among
+// subJobsAllocationScores, breaking ties by lexicographically smallest name.
+// The deterministic tie-break matters because Go map order is random and the
+// nomination fast path (allocateFromNomination) scores every candidate 0 —
+// without it a fully-nominated job's AllocatedHyperNode anchor would depend on
+// iteration order and the same plan would not reproduce.
 func (alloc *Action) selectBestHyperNodeForJob(subJobsAllocationScores map[string]float64, job *api.JobInfo) (string, error) {
 	highestScore := math.Inf(-1)
 	bestHyperNode := ""
 	for hyperNode, score := range subJobsAllocationScores {
-		if score > highestScore {
+		if score > highestScore ||
+			(score == highestScore && bestHyperNode != "" && hyperNode < bestHyperNode) {
 			highestScore = score
 			bestHyperNode = hyperNode
 		}
@@ -948,9 +953,8 @@ func (alloc *Action) allocateFromNomination(subJob *api.SubJobInfo, subJobWorksh
 		}
 	}
 
-	// Validation ran on a clone of tasks; drain the real worksheet so
-	// allocateForSubJob's caller observes Empty() and does not re-enqueue
-	// this subJob into the gradient search.
+	// Validation ran on a task clone; drain the real worksheet so the caller sees
+	// Empty() and does not re-enqueue this subJob into the gradient search.
 	for !subJobWorksheet.tasks.Empty() {
 		subJobWorksheet.tasks.Pop()
 	}
@@ -1029,21 +1033,16 @@ func invalidateSubJobNomination(subJob *api.SubJobInfo, subJobWorksheet *SubJobW
 	}
 }
 
-// deriveNominatedHyperNode returns the HyperNode to which the worksheet's
-// pending tasks are nominated, or "" when there is no usable nomination.
-//
-// A repack placement nomination writes pod.status.nominatedNodeName on the
-// replacement before opening its placement gate; honoring it keeps the
-// replacement on the receiver the engine planned. All nominated tasks must
-// agree on the same domain — an inconsistent set, or a node outside the
-// topology, yields "" and the caller falls back to gradient allocation.
+// deriveNominatedHyperNode returns the HyperNode the worksheet's pending tasks
+// are nominated to, or "" when unusable. All nominated tasks must resolve to the
+// same leaf domain; an inconsistent set, or a node outside the topology, yields
+// "" and the caller falls back to gradient allocation.
 func (alloc *Action) deriveNominatedHyperNode(ssn *framework.Session, subJob *api.SubJobInfo, subJobWorksheet *SubJobWorksheet) string {
 	if subJobWorksheet == nil || subJobWorksheet.tasks == nil {
 		return ""
 	}
-	// The subJob's current allocated domain anchors leaf resolution: a
-	// partially-evacuated subJob must resolve its receivers inside that subtree,
-	// so the nomination does not inflate AllocatedHyperNode to the cluster top.
+	// A partially-evacuated subJob must resolve its receivers inside its current
+	// allocated subtree, so the nomination does not inflate AllocatedHyperNode.
 	var anchor string
 	if subJob != nil {
 		anchor = subJob.AllocatedHyperNode
@@ -1059,13 +1058,13 @@ func (alloc *Action) deriveNominatedHyperNode(ssn *framework.Session, subJob *ap
 		if nominated == "" {
 			continue
 		}
-		hn := leafHyperNodeForNode(ssn, nominated, anchor)
-		if hn == "" {
+		hyperNode := leafHyperNodeForNode(ssn, nominated, anchor)
+		if hyperNode == "" {
 			return ""
 		}
 		if pinned == "" {
-			pinned = hn
-		} else if pinned != hn {
+			pinned = hyperNode
+		} else if pinned != hyperNode {
 			return ""
 		}
 	}
@@ -1073,35 +1072,30 @@ func (alloc *Action) deriveNominatedHyperNode(ssn *framework.Session, subJob *ap
 }
 
 // leafHyperNodeForNode returns the smallest HyperNode whose real-node leaf set
-// contains the node, or "" when the node is under no HyperNode. RealNodesList
-// holds full descendant node sets per HyperNode (ancestors union their children),
-// so the smallest set containing the node is its leaf domain. The cluster top is
-// skipped: its leaf set is the whole cluster, so pinning to it would be a no-op.
-//
-// Selection is deterministic (smallest set, then deepest tier, then name) so
-// overlapping equal-size leaves and multi-replica nominations cannot resolve to
-// different domains through map iteration order.
-//
-// When the subJob already occupies a HyperNode (anchorName), candidates are
-// restricted to that anchor's subtree so a partially-evacuated subJob resolves
-// its receivers within its own domain; a fully-evacuated subJob (empty anchor)
-// falls back to the deepest-leaf rule.
+// contains the node, or "" when the node is under none. RealNodesList holds full
+// descendant sets per HyperNode (ancestors union their children), so the smallest
+// containing set is the node's leaf domain; the cluster top is skipped since its
+// set is the whole cluster (pinning to it would be a no-op). The pick is
+// deterministic — smallest set, then deepest tier, then name — so map iteration
+// order cannot resolve overlapping candidates differently. With a non-empty
+// anchor, candidates are restricted to that anchor's subtree so a
+// partially-evacuated subJob stays within its own domain.
 func leafHyperNodeForNode(ssn *framework.Session, nodeName, anchorName string) string {
 	candidates := make([]string, 0, len(ssn.RealNodesList))
-	for hn, nodes := range ssn.RealNodesList {
-		if hn == framework.ClusterTopHyperNode || !nodeInHyperNode(nodes, nodeName) {
+	for hyperNode, nodes := range ssn.RealNodesList {
+		if hyperNode == framework.ClusterTopHyperNode || !nodeInHyperNode(nodes, nodeName) {
 			continue
 		}
-		candidates = append(candidates, hn)
+		candidates = append(candidates, hyperNode)
 	}
 	if len(candidates) == 0 {
 		return ""
 	}
 	if anchorName != "" {
 		restricted := candidates[:0]
-		for _, hn := range candidates {
-			if withinAnchorSubtree(ssn, hn, anchorName) {
-				restricted = append(restricted, hn)
+		for _, hyperNode := range candidates {
+			if withinAnchorSubtree(ssn, hyperNode, anchorName) {
+				restricted = append(restricted, hyperNode)
 			}
 		}
 		if len(restricted) > 0 {
@@ -1124,8 +1118,8 @@ func leafHyperNodeForNode(ssn *framework.Session, nodeName, anchorName string) s
 // tierOfNamedHyperNode returns the tier of the named HyperNode, or math.MaxInt
 // when it is absent from ssn.HyperNodes.
 func tierOfNamedHyperNode(ssn *framework.Session, name string) int {
-	if hni := ssn.HyperNodes[name]; hni != nil {
-		return hni.Tier()
+	if hyperNodeInfo := ssn.HyperNodes[name]; hyperNodeInfo != nil {
+		return hyperNodeInfo.Tier()
 	}
 	return math.MaxInt
 }
@@ -1144,8 +1138,8 @@ func withinAnchorSubtree(ssn *framework.Session, candidate, anchor string) bool 
 // hyperNodeParent returns the Parent link of the named HyperNode, or "" when it
 // is not present in ssn.HyperNodes.
 func hyperNodeParent(ssn *framework.Session, name string) string {
-	if hni := ssn.HyperNodes[name]; hni != nil {
-		return hni.Parent
+	if hyperNodeInfo := ssn.HyperNodes[name]; hyperNodeInfo != nil {
+		return hyperNodeInfo.Parent
 	}
 	return ""
 }

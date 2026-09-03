@@ -36,10 +36,9 @@ import (
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 )
 
-// pinnedSessionJob builds a scheduler JobInfo whose tasks carry the pod labels
-// (volcano.sh/job-name / volcano.sh/job-namespace / volcano.sh/task-spec) that
-// map them back to their vcjob task specs, plus a matching vcjob in the fake
-// client. taskPinned names which task-spec templates pin spec.nodeName.
+// pinnedSessionJob builds a scheduler JobInfo whose tasks carry pod labels that
+// map them to their vcjob task specs, plus a matching vcjob. taskPinned names
+// which task-spec templates pin spec.nodeName.
 func pinnedSessionJob(t *testing.T, jobName, namespace string, taskPinned map[string]bool) (*schedframework.Session, *fake.Clientset, schedapi.JobID) {
 	t.Helper()
 	jobID := schedapi.JobID(namespace + "/" + jobName)
@@ -81,10 +80,9 @@ func pinnedSessionJob(t *testing.T, jobName, namespace string, taskPinned map[st
 	return ssn, client, jobID
 }
 
-// collectPinnedTasks must resolve the vcjob task templates (not the live pods)
-// into task UIDs: only the template distinguishes a spec.nodeName pin, because
-// the scheduler writes nodeName into every bound pod. The pinned task of the
-// in-scope job is returned; an out-of-scope job is ignored entirely.
+// collectPinnedTasks resolves vcjob task templates (not live pods) to task UIDs:
+// only the template reveals a spec.nodeName pin, since the scheduler writes
+// nodeName into every bound pod. Out-of-scope jobs are ignored.
 func TestCollectPinnedTasks(t *testing.T) {
 	ssn, client, jobID := pinnedSessionJob(t, "myjob", "ns", map[string]bool{"pinned": true, "free": false})
 
@@ -124,8 +122,8 @@ func TestCollectPinnedTasks(t *testing.T) {
 	})
 
 	t.Run("missing vcjob is skipped, not fatal", func(t *testing.T) {
-		// Client holds no vcjob for this job: the Get fails and the helper must
-		// skip the job (nothing recreates its pods glued to a node) without error.
+		// No vcjob for this job: the Get fails and the helper must skip it — there
+		// is no template to recreate its glued pods — without error.
 		orphan := &schedframework.Session{
 			Jobs: map[schedapi.JobID]*schedapi.JobInfo{
 				"ns/ghost": {
@@ -152,9 +150,8 @@ func TestCollectPinnedTasks(t *testing.T) {
 	})
 
 	t.Run("a non-NotFound template read error fails the cycle closed", func(t *testing.T) {
-		// The F2 defect: any read failure other than NotFound silently made every
-		// pod movable, so the planner could drain pinned Pods. The error must
-		// propagate so the planning cycle fails with ReasonScopeResolutionFailed.
+		// F2: a non-NotFound read failure once made every pod movable, letting
+		// the planner drain pinned Pods; the error must fail the cycle closed.
 		ssnErr, clientErr, _ := pinnedSessionJob(t, "errjob", "ns", map[string]bool{"pinned": true})
 		clientErr.PrependReactor("get", "jobs", func(k8stesting.Action) (bool, runtime.Object, error) {
 			return true, nil, fmt.Errorf("simulated template read failure")

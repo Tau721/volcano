@@ -14,10 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package adapter isolates scheduler-framework details from Repack planning
-// actions, plugins and planners. It adapts a live volcano-scheduler Session into the framework's
-// abstractions: a Snapshot (cluster view) and the gang-info source for scope
-// resolution, allowing api/ and framework/ to remain independently testable.
+// Package adapter isolates scheduler-framework details from Repack planning:
+// it adapts a live volcano-scheduler Session into the framework's Snapshot
+// abstraction, keeping api/ and framework/ independently testable.
 package adapter
 
 import (
@@ -35,10 +34,9 @@ import (
 	enginescope "volcano.sh/volcano/pkg/repackengine/scope"
 )
 
-// SessionSnapshot adapts a live scheduler Session to framework.Snapshot. The
-// standalone engine could instead build a Snapshot from informers; this is the
-// in-scheduler-cache implementation. It applies the resolved scope.nodes filter
-// so the planner only ever sees in-scope drain candidates.
+// SessionSnapshot adapts a live scheduler Session to framework.Snapshot (the
+// in-scheduler-cache implementation). It applies the scope.nodes filter so the
+// planner only ever sees in-scope drain candidates.
 type SessionSnapshot struct {
 	ssn      *schedframework.Session
 	resource v1.ResourceName
@@ -106,29 +104,24 @@ func (s *SessionSnapshot) HyperNodeTierNameMap() map[string]int {
 }
 
 // FeasibleRelocation simulates evicting `victims` and relocating them onto
-// `receivers`, with feasibility decided by the scheduler's full filter stack
-// (SimulatePredicateFn), on clones only — never mutating the shared session.
-// `committed` are earlier moves this pass; their pods count as present so
-// capacity/topology stay consistent. `receivers` are tried in the order given
-// (first that fits wins); the caller sets the preference order.
+// `receivers`, on clones only — never mutating the shared session. Feasibility
+// uses the full filter stack (SimulatePredicateFn); `committed` are earlier
+// moves this pass, their pods counted as present so capacity/topology stay
+// consistent; receivers are tried in the given order (first fit wins).
 //
-// Dual-mode: victims of gangs hitting RequiresHyperNodeAllocate are placed by
-// domain trial — the whole gang lands within a single allowed HyperNode domain,
-// tier ascending, first fit — while ==false victims keep per-victim greedy
-// cross-domain placement. A failing gang reverts the whole unit's plan-state
-// commits (mixed gang atomicity).
-//
-// Returns the per-victim placements (from -> to) and whether every victim fit.
+// Dual-mode: victims of gangs hitting RequiresHyperNodeAllocate land within a
+// single allowed HyperNode domain (tier ascending, first fit); other victims
+// keep per-victim greedy placement. A failing gang reverts the whole unit's
+// plan-state commits (mixed gang atomicity). Returns the placements and whether
+// every victim fit.
 func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*api.Move, victims []*schedapi.TaskInfo, receivers []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	if ctx.Err() != nil {
 		return nil, false
 	}
-	// Reconcile the plan state with moves already committed this pass (normally
-	// a no-op: the previous call already applied them; ==false moves never enter
-	// plan state).
+	// Reconcile plan state with committed moves (normally a no-op: the previous
+	// call applied them; ==false moves never enter plan state).
 	s.applyCommittedToPlanState(committed)
-	// Whole-unit rollback baseline: any gang trial failing later reverts the
-	// plan state to exactly this point (mixed gang atomicity).
+	// Baseline: a failing gang trial later reverts plan state to exactly this point.
 	baseline := s.planState().Save()
 
 	// Pods already placed on each receiver in this pass (prior committed moves).
@@ -144,10 +137,9 @@ func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*a
 
 	relocationMoves := make([]*api.Move, 0, len(victims))
 
-	// ==true gang units first, each by domain trial and committed to the plan
-	// state before the next unit is tried; the serial commit narrows a
-	// Required-affinity-linked peer's allowed domains to the settled domain, so
-	// co-migrating members stay co-located. ==false victims follow greedily.
+	// ==true gang units first, committed to plan state before the next is tried;
+	// the serial commit narrows a Required-affinity-linked peer to the settled
+	// domain, keeping co-migrating members co-located. Others follow greedily.
 	units := s.groupVictimsByGang(victims)
 	for _, unit := range units {
 		if !unit.requiresHyperNodeAllocate(s) {
@@ -181,10 +173,9 @@ func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*a
 	return relocationMoves, true
 }
 
-// applyCommittedToPlanState applies the ==true moves among committed to the
-// plan state. It is a safety net: the plan state normally already reflects
-// prior committed moves (applied on the success path of each prior call);
-// ==false moves never enter plan state.
+// applyCommittedToPlanState applies the ==true moves among committed to plan
+// state — a safety net: prior calls normally already applied them, and ==false
+// moves never enter plan state.
 func (s *SessionSnapshot) applyCommittedToPlanState(committed []*api.Move) {
 	var planMoves []*api.Move
 	for _, m := range committed {
@@ -218,9 +209,8 @@ func (s *SessionSnapshot) buildRelocationCycleState(ctx context.Context, victim 
 		return nil, err
 	}
 	state := s.ssn.GetCycleState(victim.UID).Clone()
-	// Keep one clone per source node: several victims can come off the same node,
-	// and cloning it per task is expensive and makes simulation hooks see stale
-	// co-located pods. Run the hook, then update the working copy.
+	// Clone each source node once: several victims may leave it, and cloning per
+	// task is expensive and would make simulation hooks see stale co-located pods.
 	sourceNodeCopies := make(map[string]*schedapi.NodeInfo)
 	for _, task := range sourceTasksToRemove {
 		if err := ctx.Err(); err != nil {
@@ -304,10 +294,9 @@ func (s *SessionSnapshot) victimFitsReceiver(ctx context.Context, victim *scheda
 	if ctx.Err() != nil {
 		return false
 	}
-	// Cheap preflight before cloning NodeInfo/CycleState: a receiver that cannot
-	// fit the target accelerator request after prior placements cannot pass the
-	// full predicate either. Non-target resources and all predicates remain
-	// authoritative below, so passing never makes a placement feasible by itself.
+	// Cheap preflight before cloning NodeInfo/CycleState: if the target-accelerator
+	// request cannot fit after prior placements, the full predicate cannot pass
+	// either. Other resources and predicates stay authoritative below.
 	if !s.receiverHasTargetResourceCapacity(victim, node, previouslyPlacedTasks) {
 		return false
 	}

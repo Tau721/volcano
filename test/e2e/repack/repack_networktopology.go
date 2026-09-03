@@ -14,17 +14,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// HyperNode-aware repack e2e scenarios E1-E7 (docs/design/repack-hypernode-aware.md
-// §5.1.2). A real HyperNode tree is built over the kind worker nodes (route B:
-// real nodes carrying the fake NPU resource), and each spec drives a RepackRun
-// with spec.networkTopology to verify the block-shaped defragmentation contract:
-// E1/E7 Execute main path + post-repack scheduling, E2/E5 the two rejection
-// gates (blocks-infeasible, frag-improvement), E3 the R1 no-op without the
-// field, E4 the R16 apiserver CEL/enum/minimum rejection, E6 the spread-mode
-// preference for HyperNode members over unmanaged nodes. A second Describe at
-// the bottom (custom tree) hosts E-RS, the §4.1.3.4 receiver steering: the
-// drained pod must land on a no-H receiver rather than the tight own-H receiver
-// (which the standard 4-node tree cannot express).
+// HyperNode-aware repack e2e scenarios E1-E7 over a real HyperNode tree built
+// on the kind workers, each driving a RepackRun with spec.networkTopology to
+// verify the block-shaped contract: E1/E7 Execute main path + post-repack
+// scheduling, E2/E5 the two rejection gates (blocks-infeasible,
+// frag-improvement), E3 the no-topology no-op, E4 the apiserver CEL/enum/
+// minimum rejection, E6 spread preferring HyperNode members over unmanaged
+// nodes. A second Describe (custom tree) hosts E-RS, receiver steering to a
+// no-H receiver over the tight own-H one.
 package repack
 
 import (
@@ -57,11 +54,9 @@ import (
 //	          /                          \
 //	rt-s0 (tier 1: {n0, n1})       rt-s1 (tier 1: {n2, n3})
 //
-// Tier 1 covers all four nodes (E1/E2/E5/E7 target it). Tier 3 is deliberately
-// partial — only nodes[0], nodes[1] belong to a HyperNode at that tier — which
-// is exactly the E6 scenario (target tier partly unmanaged). Each spec builds its
-// own copy in BeforeEach; the engine cache syncs it during the occupy cycle that
-// precedes every repack run, so the session always sees a settled tree.
+// Tier 1 covers all four nodes (E1/E2/E5/E7 target it). Tier 3 is partial — only
+// nodes[0], nodes[1] — the E6 unmanaged-nodes scenario. Each spec builds its own
+// copy in BeforeEach; the engine cache syncs it before the run's session opens.
 func setupRepackTopology(ctx *e2eutil.TestContext, nodes []string) {
 	Expect(len(nodes)).To(BeNumerically(">=", 4), "the HyperNode tree needs 4 worker nodes")
 	hyperNodes := []struct {
@@ -95,11 +90,8 @@ func setupRepackTopology(ctx *e2eutil.TestContext, nodes []string) {
 		Expect(e2eutil.SetupHyperNode(ctx, spec)).NotTo(HaveOccurred(), "create HyperNode %s", hn.name)
 	}
 
-	// Poll the apiserver so the created HyperNodes are durably readable before
-	// any spec submits a RepackRun against them. The engine informer picks them
-	// up within its sync period; every spec performs a full occupy+wait cycle
-	// before its run is processed, so the cache is settled by the time a session
-	// opens (design §5.1.2: poll HyperNodes().Get after creating).
+	// Poll until the created HyperNodes are readable: the engine informer syncs
+	// within its period, and each spec's occupy+wait cycle precedes its run.
 	for _, hn := range hyperNodes {
 		name := hn.name
 		Eventually(func() error {
@@ -111,7 +103,7 @@ func setupRepackTopology(ctx *e2eutil.TestContext, nodes []string) {
 
 // tierNodeToHyperNode indexes real node -> HyperNode for a single tier by
 // listing all HyperNodes and expanding their members. A node belongs to at most
-// one HyperNode at a tier; the first hit wins (mirrors the plugin's R5 guard).
+// one HyperNode at a tier; the first hit wins.
 func tierNodeToHyperNode(ctx *e2eutil.TestContext, tier int) map[string]string {
 	hyperNodes, err := ctx.Vcclient.TopologyV1alpha1().HyperNodes().List(context.TODO(), metav1.ListOptions{})
 	Expect(err).NotTo(HaveOccurred())
@@ -135,21 +127,21 @@ func tierNodeToHyperNode(ctx *e2eutil.TestContext, tier int) map[string]string {
 // of the plugin's totalBlocksInTier, read back from the live cluster.
 func freedBlocksAtTier(ctx *e2eutil.TestContext, freed []string, tier, size int) int {
 	nodeToH := tierNodeToHyperNode(ctx, tier)
-	freedInH := make(map[string]int)
+	freedInHyperNode := make(map[string]int)
 	for _, node := range freed {
 		if hn := nodeToH[node]; hn != "" {
-			freedInH[hn]++
+			freedInHyperNode[hn]++
 		}
 	}
 	total := 0
-	for _, count := range freedInH {
+	for _, count := range freedInHyperNode {
 		total += count / size
 	}
 	return total
 }
 
-// invalidTopologies enumerates the R16 violations the real apiserver must reject
-// at creation (design §5.1.2 E4). nodeBlockSize is a pointer (omitempty) with
+// invalidTopologies enumerates the invalid configs the real apiserver must
+// reject at creation (E4). nodeBlockSize is a pointer (omitempty) with
 // default=1, so an explicit 0 is distinguishable from "absent" and reaches the
 // minimum:1 rule — both 0 and -1 are rejected; omitting the field applies the
 // default 1 and is valid.
@@ -214,10 +206,8 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 	var ctx *e2eutil.TestContext // per-spec context (namespace workload isolation)
 	var nodes []string           // worker node names the H-tree is built over
 
-	// Each spec builds its OWN H-tree in BeforeEach: e2eutil.CleanupTestContext
-	// wipes ALL HyperNodes cluster-wide (CleanupHyperNodes -> DeleteCollection),
-	// so a BeforeAll-shared tree would be destroyed by the first spec's AfterEach
-	// and every later spec would silently degrade to node-level planning.
+	// Each spec rebuilds its own tree: CleanupTestContext wipes ALL HyperNodes
+	// cluster-wide, so a shared BeforeAll tree would die at the first AfterEach.
 	BeforeEach(func() {
 		ctx = e2eutil.InitTestContext(e2eutil.Options{})
 		nodes = npuFixture(ctx, 4) // advertise fake NPUs on the same 4 worker nodes
@@ -233,10 +223,9 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 
 	Context("E1: block-shaped Execute main path (US-01)", func() {
 		It("frees a complete block in the target tier and realizes the plan", func() {
-			// 4 fragmented nodes x 1 card -> Execute must consolidate onto one
-			// node, freeing 3 nodes that form >= 1 block of size 2 in tier 1
-			// (requiredNodeBlocks=1). Which 3 nodes is the receiver-tie dependent,
-			// but 3 nodes and >= 1 complete block hold in every outcome.
+			// 4x1-card fragments must consolidate onto one node, freeing 3 nodes
+			// that form >= 1 block of size 2 in tier 1. Which 3 is receiver-tie
+			// dependent, but the count and the block hold in every outcome.
 			for i := 0; i < 4; i++ {
 				occupyMovableVCJob(ctx, fmt.Sprintf("e1-w%d", i), nodes[i], 1)
 			}
@@ -271,7 +260,7 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 		})
 	})
 
-	Context("E2: required blocks unmet -> no defragmentation (R10 reject, R11)", func() {
+	Context("E2: required blocks unmet -> no defragmentation", func() {
 		It("leaves the cluster untouched when the block target is infeasible", func() {
 			// Movable workloads (no spec.nodeName), so the planner produces a
 			// plan freeing nodes; the block-count gate must reject it.
@@ -294,8 +283,8 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 
 			got := waitTerminal(ctx, run.Name)
 			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
-			// The block-count gate (R10) rejects with its own reason, not the
-			// fragmentation-improvement InsufficientImprovement (design §4.1.3.3).
+			// The block-count gate rejects with its own reason, not the
+			// fragmentation-improvement InsufficientImprovement.
 			Expect(completeReason(got)).To(Equal("RequiredNodeBlocksNotMet"))
 			Expect(got.Status.Plan).NotTo(BeNil())
 			Expect(len(got.Status.Plan.FreedNodes)).To(Equal(0), "no block can be formed -> nothing freed")
@@ -304,7 +293,7 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 		})
 	})
 
-	Context("E3: no networkTopology -> node-level semantics (R1)", func() {
+	Context("E3: no networkTopology -> node-level semantics", func() {
 		It("defragments at node granularity when networkTopology is absent", func() {
 			for i := 0; i < 4; i++ {
 				// Movable fixture: a nodeName-pinned vcjob template is treated as
@@ -312,8 +301,8 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 				occupyMovableVCJob(ctx, fmt.Sprintf("e3-w%d", i), nodes[i], 1)
 			}
 
-			// The same fragmented 4x1-card cluster as E1/E2, but WITHOUT
-			// networkTopology: the block callbacks must not participate and the
+			// Same fragmented 4x1-card cluster as E1/E2 but WITHOUT
+			// networkTopology: the block callbacks must not participate, so the
 			// run degrades to the node-level plan.
 			run, err := newRun("e3", repackv1alpha1.RepackModeDryRun).
 				goal(npuResource).
@@ -329,7 +318,7 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 		})
 	})
 
-	Context("E4: invalid networkTopology is rejected at admission (R16)", func() {
+	Context("E4: invalid networkTopology is rejected at admission", func() {
 		It("rejects each invalid configuration at Create", func() {
 			// Admission is apiserver-side (CEL enum + minimums), so these runs are
 			// never persisted and no engine involvement is exercised.
@@ -344,7 +333,7 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 		})
 	})
 
-	Context("E5: blocks OK but fragmentation improvement below gate (R11)", func() {
+	Context("E5: blocks OK but fragmentation improvement below gate", func() {
 		It("rejects a plan whose block target is met but frag improvement is not", func() {
 			for i := 0; i < 4; i++ {
 				occupy(ctx, fmt.Sprintf("e5-w%d", i), nodes[i], 1)
@@ -375,18 +364,14 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 		})
 	})
 
-	Context("E6: spread prefers HyperNode members over unmanaged nodes (R6)", func() {
+	Context("E6: spread prefers HyperNode members over unmanaged nodes", func() {
 		It("frees the tier-3 HyperNode members, not the unmanaged nodes", func() {
-			// Deterministic partial-H layout: tier-3 HyperNode rt-s3 =
-			// {nodes[0], nodes[1]}; nodes[2], nodes[3] belong to NO tier-3
-			// HyperNode. Cards 4/5/3/3. In spread mode the H members score far
-			// above the unmanaged nodes (block progress 1e6 vs 0, distribution
-			// -0 vs -blocksInHMax), so the greedy planner frees exactly
-			// {nodes[0], nodes[1]}: whatever the first receiver tie (nodes[2] or
-			// nodes[3]), the second H member then absorbs the remaining slack and
-			// the unmanaged victims are left with no receiver -> stuck.
-			// Movable fixtures (see E1): nodeName-pinned templates are immovable,
-			// so the spread planner must be able to drain these victims.
+			// Partial-H layout: rt-s3 = {nodes[0], nodes[1]} at tier 3; nodes[2],
+			// nodes[3] belong to no tier-3 HyperNode. In spread mode the members
+			// outscore the unmanaged nodes, so the greedy planner frees exactly
+			// {nodes[0], nodes[1]}: after the first member takes a receiver, the
+			// other absorbs the remaining slack and the unmanaged victims are left
+			// with no receiver. Movable fixtures (see E1) so they can actually drain.
 			occupyMovableVCJob(ctx, "e6-w0", nodes[0], 4)
 			occupyMovableVCJob(ctx, "e6-w1", nodes[1], 5)
 			occupyMovableVCJob(ctx, "e6-w2", nodes[2], 3)
@@ -441,12 +426,10 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 			freed := sets.New[string](got.Status.Result.FreedNodes...)
 			Expect(freed.Len()).To(Equal(3))
 
-			// A job requesting a full node (8 cards) with a hard tier-1 topology
-			// constraint can only land on a node the run freed: only freed nodes
-			// have 8 free cards (the consolidated receiver keeps 4/8 used), and
-			// every node is a tier-1 member so the hard-topology constraint is
-			// satisfiable. The job must therefore move Pending -> Running onto
-			// repacked space — the direct measure of the US-01 acceptance.
+			// An 8-card hard-tier-1 job can only land on a freed node: only those
+			// have 8 free cards, and all nodes are tier-1 members so the constraint
+			// is satisfiable. Pending -> Running onto repacked space is the direct
+			// measure of US-01 acceptance.
 			quantity := resource.MustParse("8")
 			topoJob := e2eutil.CreateJob(ctx, &e2eutil.JobSpec{
 				Name:      "e7-topo",
@@ -474,16 +457,14 @@ var _ = Describe("Repack HyperNode-aware network topology", Serial, func() {
 	})
 })
 
-// E-RS: receiver steering (design §4.1.3.4). US-01's block shaping constrains
-// which node to free (candidate scoring + block-count gate) but, before this
-// enhancement, NOT where the freed pod lands: the receiver choice was
-// block-agnostic, so the drained pod could fall back onto the same HyperNode's
-// other Partial node (filling it Full, shrinking that H's future freeable
-// pool) or into another HyperNode. nodeBlockPreserve now steers relocations
-// away from the target tier's HyperNodes: no-H ({3}) > other-H ({2}) > own-H
-// ({1}), decided at the Topology key before bestFit. This spec needs a tree
-// the shared 4-node setup cannot express (a no-H receiver alongside an
-// own-H receiver), so it builds its own.
+// E-RS: receiver steering. Block shaping picks which node to free but, without
+// nodeBlockPreserve, not where the drained pod lands — it could fall back onto
+// the same HyperNode's other Partial node (filling it Full, shrinking that H's
+// future freeable pool) or into another HyperNode. The preference steers
+// relocations away from the target tier's HyperNodes: no-H ({3}) > other-H
+// ({2}) > own-H ({1}), decided at the Topology key before bestFit. Needs a tree
+// the shared setup cannot express (a no-H receiver next to an own-H receiver),
+// so it builds its own.
 var _ = Describe("Repack HyperNode-aware receiver steering (custom tree)", Serial, func() {
 	var ctx *e2eutil.TestContext
 	var nodes []string
@@ -507,21 +488,16 @@ var _ = Describe("Repack HyperNode-aware receiver steering (custom tree)", Seria
 
 	Context("E-RS: drained pod steers to the no-H receiver, not the own-H one (US-01)", func() {
 		It("relocates onto the no-H node while the tight own-H receiver stays Partial", func() {
-			// Layout (tier 1, size 2, requiredNodeBlocks 1):
-			//   nodes[0] (a1): 1 movable card  -> the only feasible victim
-			//   nodes[1] (a2): 7 movable cards -> own-H receiver, slack=1
-			//   nodes[2] (a3): idle            -> completes the block with a1
-			//   nodes[3] (out1): 1 movable card -> no-H receiver, slack=7
+			// Layout (tier 1, size 2): a1 on nodes[0] (1 card, the only feasible
+			// victim), a2 on nodes[1] (7 cards, own-H receiver, slack 1), nodes[2]
+			// idle, out1 on nodes[3] (1 card, no-H receiver, slack 7).
 			//
-			// maxPerRun.resources[npu]=1 prunes a2 (7 cards > 1) and out1's
-			// later drain (cumulative 2 > 1), so exactly a1 drains: idle a3 +
-			// freed a1 = 2 -> 1 complete block (the R10 gate counts idleInH,
-			// so a3's pre-existing idle completes the block; freedBlocksAtTier
-			// over FreedNodes alone would read 0 and is deliberately not
-			// asserted here). The drained pod must then land on out1 (no-H,
-			// {3}), NOT a2 (own-H, {1}) — bestFit would reverse that (a2
-			// slack=1 -> {-1} > out1 slack=7 -> {-7}), so this is decisive
-			// proof the Topology-key preference steers the relocation.
+			// maxPerRun prunes a2 (7 > 1) and out1's later drain, so exactly a1
+			// drains; idle a3 + freed a1 form the required block (the gate counts
+			// idle-in-H nodes — freedBlocksAtTier over FreedNodes alone would read
+			// 0, so it is not asserted). The drained pod must land on out1 ({3}),
+			// not a2 ({1}): bestFit would prefer a2 (slack 1 > 7), so this proves
+			// the Topology-key preference steers the relocation.
 			occupyMovableVCJob(ctx, "e8-a1", nodes[0], 1)
 			occupyMovableVCJob(ctx, "e8-a2", nodes[1], 7)
 			occupyMovableVCJob(ctx, "e8-out1", nodes[3], 1)
