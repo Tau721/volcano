@@ -713,4 +713,131 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 			})
 		})
 	})
+
+	Context("E21: ==true whole-gang drain stays whole-or-nothing in one tier-1 domain (US-02, R28 regression)", func() {
+		It("co-locates every replacement of a hard tier-1 gang on a single domain when one can host the unit", func() {
+			// §4.2.4 Execute regression: rt-s0 (n2) leaves room for exactly one
+			// replacement, so a per-pod reconcile would split pod1->rt-s0,
+			// pod2->rt-s1. The unit must land whole on rt-s1 (n3).
+			job := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e21", 2, 1, 2), nodes[0])
+			occupy(ctx, "e21-full1", nodes[1], 8) // rt-s0 node with no slack
+			occupy(ctx, "e21-s2", nodes[2], 6)    // rt-s0 leaves exactly one 2-card pod's worth
+			occupy(ctx, "e21-s3", nodes[3], 2)    // rt-s1 leaves 6 cards: the whole gang fits
+
+			run, err := newRun("e21", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(Equal(sets.New[string](nodes[0])),
+				"the whole-gang source n0 must be the only drained node")
+
+			waitRunningPodCount(ctx, job, 2)
+			expectSameTierDomain(ctx, job, 1)
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
+					"the whole unit must land in rt-s1: rt-s0 cannot host the pair")
+			}
+
+			// Every SelectedNodeName must fall inside one tier-1 HyperNode.
+			Expect(got.Status.Relocations).NotTo(BeEmpty())
+			nodeToH := tierNodeToHyperNode(ctx, 1)
+			domains := sets.New[string]()
+			for _, nomination := range got.Status.Relocations {
+				Expect(nomination.Placement.Phase).To(Equal(repackv1alpha1.PodPlacementPlaced))
+				Expect(nomination.Placement.ReplacementPodName).NotTo(BeEmpty())
+				Expect(nomination.Placement.SelectedNodeName).NotTo(BeEmpty())
+				Expect(nomination.Placement.ActualNodeName).To(Equal(nomination.Placement.SelectedNodeName),
+					"the scheduler must bind each replacement to the node the engine chose")
+				hyperNode, ok := nodeToH[nomination.Placement.SelectedNodeName]
+				Expect(ok).To(BeTrue(), "SelectedNodeName %s must belong to a tier-1 HyperNode",
+					nomination.Placement.SelectedNodeName)
+				domains.Insert(hyperNode)
+			}
+			Expect(domains.Len()).To(Equal(1), "all replacement selections must share one tier-1 domain (got %v)",
+				domains.UnsortedList())
+			Expect(domains.Has("rt-s1")).To(BeTrue(), "the single domain must be the whole-gang receiver rt-s1")
+		})
+
+		It("gives up a hard gang whole when no single domain hosts it even though a cross-domain split would fit", func() {
+			// Whole-or-nothing: no single domain hosts the gang though a split would
+			// fit capacity-wise; the engine must give up whole, not plan a subset.
+			// DryRun (never Execute-cooldown-serialized) still exercises the refusal.
+			job := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e21b", 2, 1, 2), nodes[0])
+			occupy(ctx, "e21b-full1", nodes[1], 8) // rt-s0 node with no slack
+			occupy(ctx, "e21b-s2", nodes[2], 6)    // rt-s0: one 2-card pod only
+			occupy(ctx, "e21b-s3", nodes[3], 6)    // rt-s1: one 2-card pod only
+			before := runningPodCount(ctx)
+
+			run, err := newRun("e21b", repackv1alpha1.RepackModeDryRun).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("InsufficientImprovement"))
+			Expect(got.Status.Plan).NotTo(BeNil())
+			Expect(got.Status.Plan.Summary.FragBeforePercent).To(BeNumerically(">", 0),
+				"fragmentation must be real so the whole-or-nothing check is exercised")
+			Expect(len(got.Status.Plan.FreedNodes)).To(Equal(0), "no node may be freed for a unit no single domain can host")
+			Expect(len(got.Status.Plan.Moves)).To(Equal(0),
+				"no subset may be moved across domains: a split would be capacity-feasible, so this refusal proves no-split")
+			Expect(len(got.Status.Relocations)).To(Equal(0),
+				"no replacement of the gang may exist, so no SelectedNodeName is ever written for a subset")
+			Expect(runningPodCount(ctx)).To(Equal(before), "no pod may be evicted")
+			waitRunningPodCount(ctx, job, 2)
+		})
+	})
+
+	Context("==true whole-gang reconcile reproduces the plan domain (empty-sibling regression)", func() {
+		It("does not drift to a sibling domain that only turns feasible after eviction", func() {
+			// n1 is empty: empty nodes are no drain receiver, so the plan cannot use
+			// rt-s0 and must pick rt-s1. At reconcile the evicted source frees n0 but
+			// n1 turns idle, making rt-s0 feasible again — a gradient first-fit would
+			// drift the whole unit back onto it.
+			job := createMovableJob(ctx, hardTopologyJobSpec(ctx, "e21c", 2, 1, 2), nodes[0])
+			occupy(ctx, "e21c-full2", nodes[2], 8) // rt-s0's only occupied node full
+			occupy(ctx, "e21c-s3", nodes[3], 2)    // rt-s1 leaves 6 cards: whole gang fits
+
+			run, err := newRun("e21c", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(Equal(sets.New[string](nodes[0])),
+				"the whole-gang source n0 must be the only drained node")
+
+			waitRunningPodCount(ctx, job, 2)
+			expectSameTierDomain(ctx, job, 1)
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
+					"the whole unit must land on the planned rt-s1, not the now-idle rt-s0")
+			}
+
+			// Every SelectedNodeName stays on the plan's node and domain.
+			Expect(got.Status.Relocations).NotTo(BeEmpty())
+			nodeToH := tierNodeToHyperNode(ctx, 1)
+			domains := sets.New[string]()
+			for _, relocation := range got.Status.Relocations {
+				Expect(relocation.Placement.Phase).To(Equal(repackv1alpha1.PodPlacementPlaced))
+				Expect(relocation.Placement.ReplacementPodName).NotTo(BeEmpty())
+				Expect(relocation.Placement.SelectedNodeName).NotTo(BeEmpty())
+				Expect(relocation.Placement.SelectedNodeName).To(Equal(relocation.PlannedNodeName),
+					"reconcile must not drift the selection off the plan's receiver")
+				hyperNode, ok := nodeToH[relocation.Placement.SelectedNodeName]
+				Expect(ok).To(BeTrue(), "SelectedNodeName %s must belong to a tier-1 HyperNode",
+					relocation.Placement.SelectedNodeName)
+				domains.Insert(hyperNode)
+			}
+			Expect(domains.Len()).To(Equal(1), "all replacement selections must share one tier-1 domain (got %v)",
+				domains.UnsortedList())
+			Expect(domains.Has("rt-s1")).To(BeTrue(), "the single domain must be the plan's whole-gang receiver rt-s1")
+		})
+	})
 })
