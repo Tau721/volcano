@@ -952,7 +952,7 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		}, repackTimeout, repackPoll).Should(Equal(repackv1alpha1.PodPlacementWaitingForNodeSelection), "gate must remain while no immediately idle receiver exists")
 		got := waitTerminal(ctx, run.Name)
 		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackFailed))
-		Expect(completeReason(got)).To(Equal("PlacementTimedOut"))
+		Expect(completeReason(got)).To(Equal("ExecutionTimedOut"))
 		Expect(got.Status.Relocations[0].Placement.Phase).To(Equal(repackv1alpha1.PodPlacementTimedOut))
 		Expect(got.Status.Result).NotTo(BeNil())
 		Expect(got.Status.Result.MetricsVerified).To(BeFalse())
@@ -1020,7 +1020,9 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 
 	// A replacement can bind successfully while unrelated concurrent work lands
 	// on the planned source node. Success is defined by the exact freed-node set,
-	// not only by replacement health, so this must be an operator-visible failure.
+	// not only by replacement health, so this must be an operator-visible failure
+	// once the unified Execute deadline closes the node-freeing observation
+	// window.
 	It("fails when a replacement is placed but the exact planned node is not freed", func() {
 		restoreEngine := pauseRepackEngine(ctx)
 		defer restoreEngine()
@@ -1037,14 +1039,16 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 
 		got := waitTerminal(ctx, run.Name)
 		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackFailed))
-		Expect(completeReason(got)).To(Equal("BenefitNotRealized"))
+		Expect(completeReason(got)).To(Equal("ExecutionTimedOut"),
+			"the bound replacement cannot free the occupied planned node, so the unified Execute deadline must fail the Run")
 		Expect(got.Status.Relocations[0].Placement.Phase).To(Equal(repackv1alpha1.PodPlacementPlaced),
 			"replacement health alone must not turn an unrealized plan into success")
 		Expect(got.Status.Result).NotTo(BeNil())
-		Expect(got.Status.Result.MetricsVerified).To(BeTrue())
+		Expect(got.Status.Result.MetricsVerified).To(BeFalse(),
+			"the planned node was never verified free, so the benefit is unverified")
 		Expect(got.Status.Result.FreedNodes).NotTo(ContainElement(nodes[0]))
-		Expect(got.Status.Message).To(ContainSubstring(nodes[0]),
-			"status.message must identify the planned node that remained occupied")
+		Expect(got.Status.Message).To(ContainSubstring("result verification"),
+			"status.message must explain that the planned node-freeing result could not be verified")
 		Eventually(func() bool {
 			pod, err := ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Get(
 				context.TODO(), replacement.Name, metav1.GetOptions{})

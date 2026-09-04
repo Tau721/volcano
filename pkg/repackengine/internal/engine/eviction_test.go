@@ -350,8 +350,82 @@ func TestExecutionDeadlineStopsFurtherEvictionAndMarksRunFailed(t *testing.T) {
 	if latest.Status.Relocations[0].Eviction.Phase != repackv1alpha1.PodEvictionRejected {
 		t.Fatalf("eviction phase=%q, want Rejected", latest.Status.Relocations[0].Eviction.Phase)
 	}
+	if latest.Status.Relocations[0].Placement.Phase != repackv1alpha1.PodPlacementTimedOut {
+		t.Fatalf("placement phase=%q, want TimedOut so the terminal journal is internally consistent",
+			latest.Status.Relocations[0].Placement.Phase)
+	}
 	if latest.Status.Result == nil || latest.Status.Result.MetricsVerified {
 		t.Fatalf("result=%+v, want unverified timeout result", latest.Status.Result)
+	}
+}
+
+func TestTimeoutExecutionFinalizesEveryRelocationPhase(t *testing.T) {
+	now := time.Unix(3000, 0)
+	// Four relocations covering the states a deadline can catch:
+	//  0: Pending eviction + waiting replacement  -> Rejected + TimedOut
+	//  1: InProgress eviction + waiting replacement -> Rejected + TimedOut
+	//  2: Accepted eviction + waiting replacement (no replacement Pod yet) -> TimedOut
+	//  3: Accepted eviction + already Placed -> stays Placed
+	run := testEvictionRun("timeout-finalize", []string{"a", "b", "c", "d"})
+	run.Status.ExecutionDeadline = &metav1.Time{Time: now.Add(-time.Second)}
+	phases := []struct {
+		eviction   repackv1alpha1.PodEvictionPhase
+		placement  repackv1alpha1.PodPlacementPhase
+		replacement bool
+	}{
+		{repackv1alpha1.PodEvictionPending, repackv1alpha1.PodPlacementWaitingForReplacement, false},
+		{repackv1alpha1.PodEvictionInProgress, repackv1alpha1.PodPlacementWaitingForReplacement, false},
+		{repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodPlacementWaitingForReplacement, false},
+		{repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodPlacementPlaced, true},
+	}
+	for index := range run.Status.Relocations {
+		relocation := &run.Status.Relocations[index]
+		relocation.Eviction.Phase = phases[index].eviction
+		relocation.Placement.Phase = phases[index].placement
+		if phases[index].replacement {
+			relocation.Placement.ReplacementPodName = "replacement"
+			relocation.Placement.ReplacementPodUID = "replacement-uid"
+			relocation.Placement.ActualNodeName = "target"
+		}
+	}
+	volcanoClient := vcfake.NewSimpleClientset(run.DeepCopy())
+	engine := &Engine{
+		volcanoClient:   volcanoClient,
+		config:          Config{ExecutionTimeout: 10 * time.Minute},
+		now:             func() time.Time { return now },
+		evictionRetries: make(map[string]evictionRetryState),
+	}
+
+	// A nil kubernetesClient skips the live observation; every relocation must
+	// still be finalized into a terminal eviction and placement phase.
+	if err := engine.timeoutExecution(context.Background(), run, 0, nil); err != nil {
+		t.Fatalf("timeoutExecution error = %v", err)
+	}
+	latest, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []struct {
+		eviction  repackv1alpha1.PodEvictionPhase
+		placement repackv1alpha1.PodPlacementPhase
+	}{
+		{repackv1alpha1.PodEvictionRejected, repackv1alpha1.PodPlacementTimedOut},
+		{repackv1alpha1.PodEvictionRejected, repackv1alpha1.PodPlacementTimedOut},
+		{repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodPlacementTimedOut},
+		{repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodPlacementPlaced},
+	}
+	if len(latest.Status.Relocations) != len(want) {
+		t.Fatalf("relocation count = %d, want %d", len(latest.Status.Relocations), len(want))
+	}
+	for index := range want {
+		relocation := latest.Status.Relocations[index]
+		if relocation.Eviction.Phase != want[index].eviction {
+			t.Fatalf("relocation %d eviction = %q, want %q", index, relocation.Eviction.Phase, want[index].eviction)
+		}
+		if relocation.Placement.Phase != want[index].placement {
+			t.Fatalf("relocation %d placement = %q, want %q (terminal Run must not contain a non-terminal placement)",
+				index, relocation.Placement.Phase, want[index].placement)
+		}
 	}
 }
 

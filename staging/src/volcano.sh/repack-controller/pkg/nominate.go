@@ -743,10 +743,13 @@ func placementClaimCanBeRecoveredForPod(
 
 // hasPotentialNominationForPod reports whether a currently unmatched gated Pod
 // may become claimable after victim deletion or PodGroup recreation mapping.
-// Hash-bearing relocations require exact scheduling-requirements equality;
-// hashless relocations retain the documented homogeneous-PodGroup fallback.
-// This narrow test prevents an unrelated concurrent scale-out Pod from waiting
-// behind every unfinished placement in the workload.
+// Hash-bearing relocations require exact scheduling-requirements equality —
+// except an exact same-name match (VictimPodName), which follows the
+// matchNomination precedence and stays gated even when a template change
+// altered the hash during the InProgress -> Accepted window; hashless
+// relocations retain the documented homogeneous-PodGroup fallback. This narrow
+// test prevents an unrelated concurrent scale-out Pod from waiting behind every
+// unfinished placement in the workload.
 func (n *Nominator) hasPotentialNominationForPod(
 	ctx context.Context,
 	run *repackv1alpha1.RepackRun,
@@ -787,8 +790,83 @@ func (n *Nominator) hasPotentialNominationForPod(
 	if len(sourcePodGroups) == 0 {
 		return false, nil
 	}
-	return hasClaimableNominationForSourcePodGroups(
-		run, pod.Namespace, sourcePodGroups, candidateSchedulingRequirementsHash, now), nil
+	if hasClaimableNominationForSourcePodGroups(
+		run, pod.Namespace, sourcePodGroups, candidateSchedulingRequirementsHash, now) {
+		return true, nil
+	}
+	// The replacement Pod can race ahead of the engine's durable transition: a
+	// workload controller recreates the Pod the moment the eviction is accepted,
+	// which may be before the engine has persisted Eviction=Accepted (and thus
+	// before the intent becomes "claimable"). Such a Pod is still unambiguously
+	// a candidate — it lives in a source PodGroup leased by this Run. Keep it
+	// gated and retry rather than releasing the gate, so the placement protocol
+	// survives the transient instead of letting the replacement schedule freely.
+	return hasPotentialSourceNomination(
+		run, pod.Namespace, sourcePodGroups, pod.Name, candidateSchedulingRequirementsHash, now), nil
+}
+
+// hasPotentialSourceNomination reports whether any relocation for the given
+// source PodGroups still has unfinished eviction work that a pending replacement
+// Pod could claim — including the transient InProgress state, which the strict
+// claimable check treats as not-yet-available. Pending is included too as a
+// robustness guard: the engine persists its durable InProgress barrier before
+// issuing the Eviction API call, so under normal timing a replacement Pod is
+// never observed while the intent is still Pending. If that ordering is ever
+// disturbed (a future refactor, or a crash landing between the barrier write and
+// the eviction), a replacement racing ahead must still not lose its gate and
+// schedule freely.
+//
+// candidatePodName mirrors the exact-name precedence of matchNomination: a
+// same-name rebuild (StatefulSet ordinals / vcjob) is the strongest Pod
+// identity and must stay gated even when a template change altered the
+// scheduling-requirements hash during the InProgress -> Accepted window —
+// once Accepted is durable, matchNomination's exact-name rule claims it
+// regardless of the hash.
+func hasPotentialSourceNomination(
+	run *repackv1alpha1.RepackRun,
+	namespace string,
+	sourcePodGroups []string,
+	candidatePodName, candidateSchedulingRequirementsHash string,
+	now time.Time,
+) bool {
+	if !placementRunActive(run) || executionDeadlinePassed(run, now) {
+		return false
+	}
+	names := make(map[string]struct{}, len(sourcePodGroups))
+	for _, name := range sourcePodGroups {
+		names[name] = struct{}{}
+	}
+	for index := range run.Status.Relocations {
+		nomination := &run.Status.Relocations[index]
+		if nomination.Namespace != namespace {
+			continue
+		}
+		if _, found := names[nomination.PodGroupName]; !found {
+			continue
+		}
+		if nomination.Placement.ReplacementPodName != "" || nomination.Placement.ReplacementPodUID != "" {
+			continue
+		}
+		switch nomination.Placement.Phase {
+		case repackv1alpha1.PodPlacementPlaced, repackv1alpha1.PodPlacementTimedOut:
+			continue
+		}
+		switch nomination.Eviction.Phase {
+		case repackv1alpha1.PodEvictionPending, repackv1alpha1.PodEvictionInProgress,
+			repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodEvictionIndirectlyRemoved:
+			// Exact-name precedence: a same-name replacement of this victim is
+			// claimable by identity once Accepted is durable, so it must not be
+			// released merely because the template (and thus the hash) changed.
+			if nomination.VictimPodName != "" && nomination.VictimPodName == candidatePodName {
+				return true
+			}
+			if nomination.SchedulingRequirementsHash == "" ||
+				nomination.SchedulingRequirementsHash == candidateSchedulingRequirementsHash {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func hasClaimableNominationForPodGroup(

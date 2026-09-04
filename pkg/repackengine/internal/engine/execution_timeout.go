@@ -70,7 +70,11 @@ func (e *Engine) timeoutExecution(
 		}
 	}
 
-	unfinishedEvictions, unfinishedPlacements := 0, 0
+	// First finalize every unfinished eviction journal. An eviction that never
+	// completed (Pending or InProgress) becomes Rejected; its replacement
+	// placement was never claimable and is finalized separately below so a
+	// terminal Run cannot contain a non-terminal WaitingForReplacement record.
+	unfinishedEvictions := 0
 	for index := range run.Status.Relocations {
 		relocation := &run.Status.Relocations[index]
 		switch relocation.Eviction.Phase {
@@ -78,10 +82,26 @@ func (e *Engine) timeoutExecution(
 			unfinishedEvictions++
 			setEvictionOutcome(relocation, repackv1alpha1.PodEvictionRejected,
 				"Execution deadline reached before this eviction completed.")
-		case repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodEvictionIndirectlyRemoved:
-			if relocation.Placement.Phase != repackv1alpha1.PodPlacementPlaced &&
-				relocation.Placement.Phase != repackv1alpha1.PodPlacementTimedOut {
-				if kubernetesClient != nil && relocation.Placement.ReplacementPodName != "" {
+		}
+	}
+
+	// Then finalize every non-terminal placement across ALL relocations —
+	// including those whose eviction was just rejected above. Only a placement
+	// that actually bound before the deadline (live observation of an Accepted
+	// or IndirectlyRemoved eviction) is kept as Placed; everything else
+	// (WaitingForReplacement, WaitingForNodeSelection, Nominated) becomes
+	// TimedOut so the terminal journal is internally consistent.
+	unfinishedPlacements := 0
+	for index := range run.Status.Relocations {
+		relocation := &run.Status.Relocations[index]
+		if relocation.Placement.Phase == repackv1alpha1.PodPlacementPlaced ||
+			relocation.Placement.Phase == repackv1alpha1.PodPlacementTimedOut {
+			continue
+		}
+		if relocation.Placement.ReplacementPodName != "" {
+			switch relocation.Eviction.Phase {
+			case repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodEvictionIndirectlyRemoved:
+				if kubernetesClient != nil {
 					replacement, err := kubernetesClient.CoreV1().Pods(relocation.Namespace).Get(
 						ctx, relocation.Placement.ReplacementPodName, metav1.GetOptions{})
 					if err == nil && replacement.DeletionTimestamp == nil && replacement.Spec.NodeName != "" &&
@@ -93,10 +113,10 @@ func (e *Engine) timeoutExecution(
 						continue
 					}
 				}
-				unfinishedPlacements++
-				relocation.Placement.Phase = repackv1alpha1.PodPlacementTimedOut
 			}
 		}
+		unfinishedPlacements++
+		relocation.Placement.Phase = repackv1alpha1.PodPlacementTimedOut
 	}
 	initializeExecuteResultFromStatus(run)
 	placementexecutor.MarkBenefitUnverified(run)

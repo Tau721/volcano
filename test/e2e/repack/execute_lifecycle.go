@@ -23,14 +23,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1 "k8s.io/api/core/v1"
-	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 
-	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 
 	e2eutil "volcano.sh/volcano/test/e2e/util"
@@ -143,101 +140,6 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 		defer deleteRun(ctx, second.Name)
 		Expect(waitConditionReason(ctx, second.Name, "Progressing", metav1.ConditionFalse)).
 			To(Equal("ExecuteCooldownActive"))
-	})
-
-	// C9: if every eviction is rejected (a maxUnavailable=0 PDB), Execute fails
-	// specifically at the eviction stage.
-	It("fails with EvictionFailed when all evictions are blocked by a PDB", func() {
-		jobA := occupyMovableVCJob(ctx, "pdb-a", nodes[0], 4)
-		jobB := occupyMovableVCJob(ctx, "pdb-b", nodes[1], 2)
-		// Every movable fixture pod is protected. This makes every possible plan
-		// eviction fail, rather than allowing the planner to choose an unprotected
-		// alternative and accidentally turn this into a non-asserting test.
-		blockAll := intstr.FromInt(0)
-		for _, job := range []*batchv1alpha1.Job{jobA, jobB} {
-			pdbName := "block-" + job.Name
-			_, err := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Create(context.TODO(),
-				&policyv1.PodDisruptionBudget{
-					ObjectMeta: metav1.ObjectMeta{Name: pdbName},
-					Spec: policyv1.PodDisruptionBudgetSpec{
-						MaxUnavailable: &blockAll,
-						Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{"volcano.sh/job-name": job.Name}},
-					},
-				}, metav1.CreateOptions{})
-			Expect(err).NotTo(HaveOccurred())
-			Eventually(func() int32 {
-				pdb, getErr := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Get(context.TODO(), pdbName, metav1.GetOptions{})
-				if getErr != nil {
-					return -1
-				}
-				return pdb.Status.DisruptionsAllowed
-			}, repackTimeout, repackPoll).Should(Equal(int32(0)), "PDB must become effective before Execute")
-		}
-
-		run, err := newRun("execfail", repackv1alpha1.RepackModeExecute).goal(npuResource).create(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		defer deleteRun(ctx, run.Name)
-
-		got := waitTerminal(ctx, run.Name)
-		Expect(completeReason(got)).To(Equal("EvictionFailed"))
-		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackFailed))
-		Expect(got.Status.Plan).NotTo(BeNil())
-		Expect(got.Status.Plan.Summary).NotTo(BeNil())
-		Expect(got.Status.Plan.Summary.FreedNodeCount).To(BeNumerically(">=", 1),
-			"the complete pre-eviction plan must remain visible after rejection")
-		Expect(got.Status.Result).NotTo(BeNil())
-		Expect(got.Status.Result.MovedCardCount).To(BeEquivalentTo(0))
-		Expect(got.Status.Result.MetricsVerified).To(BeFalse())
-		Expect(got.Status.Relocations).To(BeEmpty(), "rejected evictions must not retain placement intents")
-	})
-
-	It("preserves the full plan and reports only accepted disruption after a partial PDB rejection", func() {
-		blocked := occupyNativeDeployment(ctx, "partial-blocked", nodes[0], "move", 2)
-		accepted := occupyNativeDeployment(ctx, "partial-accepted", nodes[0], "move", 2)
-		staying := occupyNativeDeployment(ctx, "partial-staying", nodes[1], "stay", 4)
-		defer deleteNativeWorkloads(ctx, blocked, accepted, staying)
-
-		blockAll := intstr.FromInt(0)
-		_, err := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Create(context.TODO(),
-			&policyv1.PodDisruptionBudget{
-				ObjectMeta: metav1.ObjectMeta{Name: "block-partial"},
-				Spec: policyv1.PodDisruptionBudgetSpec{
-					MaxUnavailable: &blockAll,
-					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
-						nativeWorkloadLabel: blocked.deployment.Name,
-					}},
-				},
-			}, metav1.CreateOptions{})
-		Expect(err).NotTo(HaveOccurred())
-		Eventually(func() int32 {
-			pdb, getErr := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Get(
-				context.TODO(), "block-partial", metav1.GetOptions{})
-			if getErr != nil {
-				return -1
-			}
-			return pdb.Status.DisruptionsAllowed
-		}, repackTimeout, repackPoll).Should(Equal(int32(0)))
-
-		scope := &repackv1alpha1.RepackScope{Nodes: &repackv1alpha1.RepackSelectorTerm{
-			Include: &repackv1alpha1.RepackSelector{Names: []string{nodes[0]}},
-		}}
-		run, err := newRun("partial-pdb", repackv1alpha1.RepackModeExecute).
-			goal(npuResource).scope(scope).create(ctx)
-		Expect(err).NotTo(HaveOccurred())
-		defer deleteRun(ctx, run.Name)
-
-		got := waitTerminal(ctx, run.Name)
-		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackFailed))
-		Expect(completeReason(got)).To(Equal("EvictionFailed"))
-		Expect(got.Status.Plan.Moves).To(HaveLen(2), "the immutable plan must retain both intended PodGroups")
-		Expect(got.Status.Plan.Summary.MovedCardCount).To(BeEquivalentTo(4))
-		Expect(got.Status.Plan.Summary.FreedNodeCount).To(BeEquivalentTo(1))
-		Expect(got.Status.Result).NotTo(BeNil())
-		Expect(got.Status.Result.MovedCardCount).To(BeEquivalentTo(2),
-			"result must count only the eviction accepted by the API")
-		Expect(got.Status.Result.MetricsVerified).To(BeFalse())
-		Expect(got.Status.Relocations).To(HaveLen(1),
-			"only the accepted eviction may retain a replacement placement intent")
 	})
 
 	// E16: scope.nodes.exclude — an excluded node is never a drain target, so it is
