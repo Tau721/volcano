@@ -130,6 +130,15 @@ func (e *Engine) reconcile(ctx context.Context, name string) error {
 	run, err := e.repackRunLister.Get(name)
 	if apierrors.IsNotFound(err) {
 		e.forgetPendingTerminalStatus(name)
+		// A Run deleted before reaching a terminal phase must still release the
+		// K=1 Execute slot it holds. Run GC or an operator can remove a Running
+		// Execute at any time; without this release the in-memory
+		// activeExecuteRunName would pin the slot forever and gate every later
+		// Execute behind AnotherRunActive. markExecuteDone is owner-checked, so
+		// DryRun runs (never holding the slot) and foreign names are untouched.
+		if e.markExecuteDone(name) {
+			e.requeueGatedRuns()
+		}
 		return nil
 	}
 	if err != nil {
