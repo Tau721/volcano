@@ -72,6 +72,7 @@ func TestRequeueGatedRuns(t *testing.T) {
 		t.Errorf("requeued = %v, want %v", got, want)
 	}
 }
+
 // A Run that held the K=1 Execute slot can be deleted before reaching a
 // terminal phase (operator delete, Run GC, or an e2e cleanup tearing down a
 // paused-engine journal). The in-memory slot must be released on that delete —

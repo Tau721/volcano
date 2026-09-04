@@ -369,8 +369,8 @@ func TestTimeoutExecutionFinalizesEveryRelocationPhase(t *testing.T) {
 	run := testEvictionRun("timeout-finalize", []string{"a", "b", "c", "d"})
 	run.Status.ExecutionDeadline = &metav1.Time{Time: now.Add(-time.Second)}
 	phases := []struct {
-		eviction   repackv1alpha1.PodEvictionPhase
-		placement  repackv1alpha1.PodPlacementPhase
+		eviction    repackv1alpha1.PodEvictionPhase
+		placement   repackv1alpha1.PodPlacementPhase
 		replacement bool
 	}{
 		{repackv1alpha1.PodEvictionPending, repackv1alpha1.PodPlacementWaitingForReplacement, false},
