@@ -26,7 +26,9 @@ package framework
 import (
 	"context"
 
+	policyv1 "k8s.io/api/policy/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
+
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -74,4 +76,12 @@ type Snapshot interface {
 	// numeric Spec.Tier; plugins resolve that name through this map. The returned
 	// map is a copy (the values are immutable integers).
 	HyperNodeTierNameMap() map[string]int
+}
+
+// PodDisruptionBudgetReader is an optional Snapshot capability for plugins
+// that need the scheduler cache's read-only PDB view. It deliberately stays
+// outside Snapshot so lightweight and third-party Snapshot implementations do
+// not need to provide Kubernetes informer plumbing.
+type PodDisruptionBudgetReader interface {
+	ListPodDisruptionBudgets() ([]*policyv1.PodDisruptionBudget, error)
 }

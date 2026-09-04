@@ -15,6 +15,7 @@ data:
     actions: "repack"
     plugins:
       - name: workloadscope
+      - name: pdbconstraint
       - name: repackbudget
       - name: nodeconsolidation
       - name: networktopologyaware

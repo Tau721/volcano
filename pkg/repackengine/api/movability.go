@@ -134,7 +134,7 @@ func VictimsOf(node *api.NodeInfo, movable Movable, res v1.ResourceName) []*api.
 		if movable == nil || movable(t) {
 			out = append(out, t)
 		} else {
-			klog.V(5).InfoS("repack: accelerator pod is NOT movable (frozen/out-of-scope), stays on node",
+			klog.V(5).InfoS("repack: accelerator pod is NOT movable under the active constraints, stays on node",
 				"pod", t.Name, "node", node.Name, "podGroup", t.Job)
 		}
 	}

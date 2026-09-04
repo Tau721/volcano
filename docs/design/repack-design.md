@@ -168,7 +168,7 @@ Execute 不执行历史 DryRun 的 plan，而是重新规划。这样避免将�
 | `eviction.gracePeriodSeconds` | Eviction 请求的优雅终止秒数 | 不影响候选选择 |
 | `ttlSecondsAfterFinished` | 终态后自动删除时间 | 类似 Job TTL |
 
-Scope 省略表示在全集群评估，但不代表所有 Pod 都可移动；movability 仍要求目标资源、Volcano Scheduler、PodGroup、控制器可重建性和其他插件规则成立。
+Scope 省略表示在全集群评估，但不代表所有 Pod 都可移动；movability 仍要求目标资源、Volcano Scheduler、PodGroup、控制器可重建性、确定性零中断 PDB 等插件规则成立。
 
 业务用户通常只需维护工作负载标签。VCJob、ModelServing 或通用 pg-controller 应将稳定业务标签继承到 PodGroup，Scope 的 label selector 最终匹配 PodGroup 标签。
 
@@ -320,6 +320,7 @@ Plugin 回调可以保持简洁，但策略语义必须由对应 Plugin 拥有�
 | Plugin | 责任 | 关闭后的影响 |
 |---|---|---|
 | `workloadscope` | 工作负载授权边界 | 不应用用户工作负载 Scope；合法 PodGroup 身份基础边界仍生效 |
+| `pdbconstraint` | 过滤确定性零中断 PDB 保护的目标资源 Pod | 规划期不预过滤，PDB 仍由 Execute 的 Eviction API 最终校验 |
 | `repackbudget` | `maxPerRun` 候选过滤 | 不应用对应预算 |
 | `nodeconsolidation` | 提供部分占用 Node Unit | 当前无 Domain，Action 配置校验失败 |
 | `workloaddisruption` | 工作负载数、迁移资源、Pod 数评分 | 关闭通用中断偏好 |
@@ -327,6 +328,10 @@ Plugin 回调可以保持简洁，但策略语义必须由对应 Plugin 拥有�
 | `binpack` | 大 Pod 优先、稳定节点优先和 best-fit | 关闭装箱质量策略 |
 
 空/满节点裁剪、接收总容量预检和完整 Scheduler 校验是 Planner 不可关闭的正确性边界。
+
+`pdbconstraint` 通过可选的 `PodDisruptionBudgetReader` 读取 Scheduler SharedInformerFactory 维护的 PDB，不创建第二套 informer。Snapshot 构造时缓存已有 informer 的 lister，Plugin 在 Session 打开时只读取一次。仅当 `ObservedGeneration == Generation`、`ExpectedPods > 0`、`DesiredHealthy >= ExpectedPods` 且 Controller 未报告 `DisruptionAllowed=False/SyncFailed` 时，才将 PDB 识别为确定性零中断。`DisruptionsAllowed == 0` 不是规划过滤条件；这类动态额度不足继续由 Eviction retry 处理。
+
+PDB 匹配遵循 `policy/v1` 和 Eviction API 语义：`selector == nil` 不匹配 Pod，显式空 selector 匹配 namespace 内所有 Pod；Pending、Succeeded、Failed 或已带 `deletionTimestamp` 的 Pod 跳过 PDB；`AlwaysAllow` 总是允许未 Ready Pod，默认 `IfHealthyBudget` 在 `CurrentHealthy >= DesiredHealthy && DesiredHealthy > 0` 时也允许未 Ready Pod；已在 `status.disruptedPods` 中的 Pod 不重复阻塞。Reader 缺失、feature gate/informer 不可用、List 失败、status 过期、Controller `SyncFailed` 或 selector 非法均 fail-open，因为 Eviction API 始终是权威安全边界。
 
 ### 7.4 Engine 配置
 
@@ -336,6 +341,7 @@ Repack 使用独立 ConfigMap 挂载 `repack-engine.conf`，同时读取 Schedul
 actions: "repack"
 plugins:
   - name: workloadscope
+  - name: pdbconstraint
   - name: repackbudget
   - name: nodeconsolidation
   - name: workloaddisruption
@@ -362,7 +368,7 @@ plugins:
 
 ### 8.2 初始化
 
-规划开始时一次性完成：
+规划 Session 打开时，`pdbconstraint` 先预计算不可移动的目标资源 Pod 集合；Movable 回调之后只查询该不可变集合，不再访问 informer。Planner 开始时一次性完成：
 
 1. 节点分类，建立源节点和 receiver 集合；
 2. Domain Plugin 枚举 FreeableUnit；
@@ -380,7 +386,7 @@ Domain 输出仍经过防御性校验；空节点、满卡节点或不含节点�
 flowchart TD
     A["活动 Unit"] --> B["剔除已 drain / fill / stuck"]
     B --> C["接收总容量预检"]
-    C --> D["Plugin Candidate Filters\nScope / maxPerRun"]
+    C --> D["Plugin hard filters\nScope / zero-disruption PDB / maxPerRun"]
     D --> E["多策略评分\n0～100 × integer weight"]
     E --> F["按总分从高到低"]
     F --> G{"下一个候选"}
@@ -668,6 +674,8 @@ Engine 对 plan computed、execute prepared、eviction accepted/rejected 和 ter
 |---|---|
 | 配置或目标资源非法 | 创建/启动或 Run 早期快速失败，不进入规划 |
 | Scope 解析失败 | Run Failed，不驱逐 |
+| PDB reader/informer/List 不可用 | 记录 Warning，本轮不应用静态 PDB 规划约束 |
+| PDB status 过期或 selector 非法 | 跳过该 PDB，其他新鲜且合法的约束继续生效 |
 | 无可行候选 | 正常以 `InsufficientImprovement` 完成 |
 | plan 状态写失败 | 不进入 Eviction，重试持久化 |
 | lease 或 active index 写失败 | 不驱逐；保留全 `Pending` journal 并重试准备，已写 lease 可幂等回滚；进入终态后先完成外部清理，再清除未执行 journal |
@@ -685,7 +693,7 @@ Repack 的 RBAC 遵循最小权限：Engine 只获取规划所需资源、更新
 
 - API：碎片率、计划聚合、Gang 受损模型和字段转换；
 - Framework：Plugin 顺序无关、AND/Union/短路、Capability、整数权重和评分范围；
-- Plugin：Scope、预算、Node Domain、中断评分、Gang、binpack；
+- Plugin：Scope、确定性零中断 PDB、预算、Node Domain、中断评分、Gang、binpack；
 - Planner：节点预分类、容量预检、候选顺序、完整模拟、增量状态和规模 benchmark；
 - Engine：gate、status、Eviction journal、规划与驱逐的 context cancellation、worker 优雅退出和终态收益；
 - Controller：replacement 匹配、PodGroup 代际、gate、nomination、Run 级执行截止时间和重启恢复。
@@ -701,7 +709,7 @@ Repack 的 RBAC 遵循最小权限：Engine 只获取规划所需资源、更新
 
 ### 14.3 E2E
 
-E2E 覆盖 DryRun、Execute、Scope、`maxPerRun`、PDB、VCJob、原生工作负载、整个工作负载 Pod 重建、replacement gate、Engine/controller 重启、TTL、selected/actual placement、部分执行结果和重复 DryRun 确定性。
+E2E 覆盖 DryRun、Execute、Scope、`maxPerRun`、确定性零中断 PDB 的全量/部分过滤与放宽、Engine informer 同步、动态 PDB 额度恢复重试、VCJob、原生工作负载、整个工作负载 Pod 重建、replacement gate、Engine/controller 重启、TTL、selected/actual placement、部分执行结果和重复 DryRun 确定性。
 
 ## 15. 代码结构
 
@@ -713,7 +721,7 @@ pkg/repackengine/
   cache/                                   # Scheduler Cache 构建、运行和只读 Session 生命周期
   actions/repack/                          # 完整 Repack Action：规划、模式分流、执行与恢复编排
   planner/drain/                           # Lazy Drain Planner 与性能基准
-  plugins/                                 # 场景策略
+  plugins/                                 # 场景策略，包括 pdbconstraint 静态 PDB 约束
   framework/                               # Session、Action、Plugin 及候选/受害者/接收节点扩展契约
     session.go                             # 按需创建的单轮 Planning Session 与插件生命周期
     action.go / plugin.go                  # ActionContext/ActionResult/Runtime、Plugin 接口及注册表

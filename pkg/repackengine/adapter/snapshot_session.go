@@ -21,11 +21,17 @@ package adapter
 
 import (
 	"context"
+	"fmt"
 
 	v1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/sets"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	policylisters "k8s.io/client-go/listers/policy/v1"
 	fwk "k8s.io/kube-scheduler/framework"
 
+	"volcano.sh/volcano/pkg/features"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 
@@ -38,20 +44,30 @@ import (
 // in-scheduler-cache implementation). It applies the scope.nodes filter so the
 // planner only ever sees in-scope drain candidates.
 type SessionSnapshot struct {
-	ssn      *schedframework.Session
-	resource v1.ResourceName
-	scope    *enginescope.Matcher // nil = all nodes in scope
-	plan     PlanStateCarrier     // job-side plan state for hypernode constraint evaluation
+	ssn       *schedframework.Session
+	resource  v1.ResourceName
+	scope     *enginescope.Matcher // nil = all nodes in scope
+	plan      PlanStateCarrier     // job-side plan state for hypernode constraint evaluation
+	pdbLister policylisters.PodDisruptionBudgetLister
 }
 
 var _ framework.Snapshot = (*SessionSnapshot)(nil)
+var _ framework.PodDisruptionBudgetReader = (*SessionSnapshot)(nil)
 
 // NewSessionSnapshot wraps a Session for the given target resource. scope gates
 // drain targets (nil = all in scope), not the receiver set. plan is the
 // plan-state carrier for hypernode constraint evaluation; nil uses the
 // live-session implementation (injectable for tests).
 func NewSessionSnapshot(ssn *schedframework.Session, resource v1.ResourceName, scope *enginescope.Matcher) *SessionSnapshot {
-	return &SessionSnapshot{ssn: ssn, resource: resource, scope: scope, plan: NewSessionPlanState(ssn)}
+	snapshot := &SessionSnapshot{ssn: ssn, resource: resource, scope: scope, plan: NewSessionPlanState(ssn)}
+	// SchedulerCache registers and starts this informer before opening sessions.
+	// Avoid instantiating an informer after the shared factory has started when
+	// the feature gate is disabled; the plugin deliberately fails open instead.
+	if ssn != nil && ssn.InformerFactory() != nil &&
+		utilfeature.DefaultFeatureGate.Enabled(features.PodDisruptionBudgetsSupport) {
+		snapshot.pdbLister = ssn.InformerFactory().Policy().V1().PodDisruptionBudgets().Lister()
+	}
+	return snapshot
 }
 
 // Nodes returns ALL session nodes (the receiver universe). scope.nodes gates
@@ -101,6 +117,20 @@ func (s *SessionSnapshot) HyperNodeTierNameMap() map[string]int {
 		out[name] = tier
 	}
 	return out
+}
+
+// FeasibleRelocation simulates evicting `victims` and relocating them onto
+// `receivers`, on clones only — never mutating the shared session. Feasibility
+// uses the full filter stack (SimulatePredicateFn); `committed` are earlier
+// moves this pass, their pods counted as present so capacity/topology stay
+
+// ListPodDisruptionBudgets returns the PDB objects already maintained by the
+// scheduler's shared informer factory. It never creates a second informer.
+func (s *SessionSnapshot) ListPodDisruptionBudgets() ([]*policyv1.PodDisruptionBudget, error) {
+	if s == nil || s.pdbLister == nil {
+		return nil, fmt.Errorf("scheduler PDB informer is unavailable")
+	}
+	return s.pdbLister.List(labels.Everything())
 }
 
 // FeasibleRelocation simulates evicting `victims` and relocating them onto

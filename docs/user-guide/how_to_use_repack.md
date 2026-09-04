@@ -99,6 +99,7 @@ Repack 面向一次明确的碎片整理目标：在限定的工作负载驱逐�
 
 - **目标与收益**：指定一种 NPU/GPU 扩展资源，以碎片率下降和完整节点释放衡量容量改善；
 - **工作负载驱逐范围**：按标签或名称选择允许被驱逐的工作负载，并限定可腾空节点；
+- **PDB 静态约束**：在 DryRun 和 Execute 的共享规划阶段过滤确定性零中断 PDB 保护的 NPU/GPU Pod；
 - **调度可行性**：使用 Volcano Scheduler 的调度规则验证接收节点，避免仅按资源数量生成迁移方案；
 - **Gang 中断影响评估**：识别 VCJob、ModelServing 等工作负载的 PodGroup，减少受影响工作负载数量，并评估迁移后 PodGroup 是否仍满足 `MinAvailable`；
 - **节点选择与装箱**：动态选择腾空节点，并按 best-fit 等策略填充接收节点，抑制二次碎片；
@@ -127,9 +128,9 @@ Repack 当前适合由平台主动发起的周期性碎片整理、大规格训�
 - Execute 在集群内串行执行；同一时刻只运行一个 Execute，并在完成后进入冷却时间。DryRun 不受该并发限制。
 - `scope.podGroups` 限定允许被驱逐的工作负载，`scope.nodes` 限定可腾空节点；`scope` 为空表示在全局范围评估。
 - Repack 只整理目标扩展资源。不申请目标资源的 DaemonSet、系统 Pod 和普通 Pod 不会被迁移，也不会阻止目标资源腾空。
-- 请求目标资源但不满足可迁移条件的 Pod 会阻止所在节点被腾空，例如使用 kube-scheduler、缺少 PodGroup、被 `scope` 排除或不满足其他可迁移要求的 Pod。
+- 请求目标资源但不满足可迁移条件的 Pod 会阻止所在节点被腾空，例如使用 kube-scheduler、缺少 PodGroup、被 `scope` 排除或被确定性零中断 PDB 保护的 Pod。
 - Repack 与常规资源调度并行运行，不锁定规划时的节点资源，也不暂停工作负载的创建、删除或调度。并发状态变化可能使实际布局偏离计划，甚至导致计划无法完整执行，属于预期行为。
-- Execute 通过 Kubernetes Eviction API 驱逐 Pod，由 API Server 按实时状态校验 PDB。Repack 不提前规划 PDB 规避策略；PDB 不允许驱逐时，对应迁移可能失败。
+- Repack 会在规划期过滤状态新鲜的确定性零中断 PDB，但不计算动态剩余额度或搜索替代驱逐组合。Execute 仍通过 Kubernetes Eviction API 按实时状态最终校验 PDB；暂时无额度时会退避重试，持续无法完成则受执行超时限制。
 - Repack 不执行抢占、不 cordon 节点，也不通过污点独占已释放容量。
 - Repack 通过 `pod.status.nominatedNodeName` 为重建 Pod 提供候选节点建议，不绑定节点或预留资源。重建 Pod 仍由 Volcano Scheduler 统一调度；发生资源竞争时，可能调度到其他节点或保持 Pending，Repack 不保证其在本次整理周期内恢复调度。
 - Repack 不会根据 Pending 作业自动触发整理，也不会为计划外的后续任务预留已释放资源；周期性整理和大任务提交前整理需要由用户或外部平台流程发起。
@@ -265,6 +266,14 @@ kubectl -n volcano-system logs deploy/volcano-repack-engine --since=10m \
 
 如果目标资源 Pod 使用 `kube-scheduler`、缺少 PodGroup、被 Scope 排除或没有满足原调度约束的接收节点，该节点不会进入可腾空计划。不申请目标资源的 DaemonSet 和普通 Pod 不会因为存在于节点上而直接阻止整理。
 
+#### 确定性零中断 PDB
+
+默认启用的 `pdbconstraint` Plugin 复用 Scheduler Cache 的 PDB 数据。只有当 PDB Controller 已观察当前配置、`status.expectedPods > 0`、`status.desiredHealthy >= status.expectedPods` 且未报告 `DisruptionAllowed=False/SyncFailed` 时，Repack 才确定该 PDB 不允许任何健康 Pod 被主动驱逐。常见配置包括 `maxUnavailable: 0`、`maxUnavailable: 0%` 和 `minAvailable: 100%`。匹配的目标资源 Pod 不进入 plan，其所在节点也不进入后续评分与调度模拟。
+
+`status.disruptionsAllowed == 0` 本身不会触发静态过滤，因为它可能由 NotReady Pod、正在进行的驱逐或尚未 Ready 的 replacement 造成。这类 PDB 继续通过 Execute 阶段的批次退避重试滚动完成。Pending、Succeeded、Failed 或已经带 `deletionTimestamp` 的 Pod 与 Eviction API 一样跳过 PDB 检查。对于未 Ready Pod，`unhealthyPodEvictionPolicy: AlwaysAllow` 总是允许驱逐；默认 `IfHealthyBudget` 在 `status.currentHealthy >= status.desiredHealthy` 且 `desiredHealthy > 0` 时也允许驱逐。已在 `status.disruptedPods` 中的 Pod 不会被视为新的阻塞对象。
+
+PDB informer 不可用、status 未收敛、Controller 报告 `SyncFailed` 或 selector 非法时，本轮对相应约束 fail-open，Eviction API 仍是最终安全边界。平台管理员也可从 Repack Engine 插件列表显式移除 `pdbconstraint`，恢复只在 Execute 阶段处理 PDB 的旧行为。
+
 ### 4. 以 Gang 语义评估工作负载中断影响
 
 在分布式训练和模型推理中，整理方案不应将迁移分散到大量工作负载。即使迁移 Pod 总数相同，从一个工作负载迁移多个 Pod 通常也比从多个工作负载各迁移一个 Pod 具有更小的影响范围。Repack 因此以 PodGroup 作为中断影响统计单元，对每个可行腾空方案计算多维成本。
@@ -301,7 +310,7 @@ kubectl -n volcano-system logs deploy/volcano-repack-engine --since=10m \
 
 例如，三个方案都能释放一个节点并迁移 3 张卡：方案 A 从同一工作负载迁移 3 个 Pod，且迁移后仍满足 `MinAvailable`；方案 B 从 3 个工作负载各迁移 1 个 Pod；方案 C 只影响 1 个工作负载，但迁移后低于 `MinAvailable`。综合评分通常优先方案 A；方案 B 的工作负载影响范围更大，方案 C 在低于 `MinAvailable` 的 PodGroup 数和受影响目标资源量两个维度上的成本更高。
 
-`scope` 和 `maxPerRun` 是硬性限制，中断影响评分只用于在满足限制的候选方案中排序。评分倾向于减少受影响工作负载，并避免使 PodGroup 低于 `MinAvailable`，但不会将其作为禁止条件。不可中断的工作负载应通过 `scope.podGroups.exclude` 明确排除。
+`scope` 和 `maxPerRun` 是硬性限制，中断影响评分只用于在满足限制的候选方案中排序。评分倾向于减少受影响工作负载，并避免使 PodGroup 低于 `MinAvailable`，但不会将其作为禁止条件。不可中断的工作负载应通过 `scope.podGroups.exclude` 明确排除；确定性零中断 PDB 也会作为 Pod 级硬约束生效。
 
 ![Gang 中断影响：优先选择迁移后仍满足 MinAvailable 的腾空方案](../images/repack/gang-disruption-cost.svg)
 
@@ -365,7 +374,7 @@ maxPerRun:
 
 任何超过上限的候选都会在规划阶段被淘汰。首次上线建议从一个工作负载和较小的设备数量开始，结合 DryRun、历史恢复时长、SLA 和运维窗口逐步扩大预算。
 
-Execute 在集群内串行运行，并在一次执行完成后进入冷却时间，避免多轮整理相互影响。Pod 驱逐通过 Kubernetes Eviction API 完成，API Server 会根据实时状态检查 PDB；DryRun 不保证 Execute 时 PDB 仍允许驱逐。
+Execute 在集群内串行运行，并在一次执行完成后进入冷却时间，避免多轮整理相互影响。DryRun 和 Execute 都会过滤当前快照中的确定性零中断 PDB；Pod 驱逐仍通过 Kubernetes Eviction API 完成，API Server 会根据实时状态检查 PDB。DryRun 不保证 Execute 时 PDB 仍允许驱逐。
 
 ![执行预算：候选计划不能突破工作负载与资源双重上限](../images/repack/blast-radius-control.svg)
 
@@ -824,7 +833,7 @@ kubectl get repackrun ascend-execute-001 -w
 kubectl get pod -n repack-demo -o wide -w
 ```
 
-Execute 使用 Kubernetes Eviction API，PDB 仍然生效。若另一个 Execute 正在运行或仍处于执行冷却时间，新 Run 会保持 `Pending`，可通过 Conditions 中的 `AnotherRunActive` 或 `ExecuteCooldownActive` 识别。
+Execute 使用 Kubernetes Eviction API，PDB 仍然按实时状态生效；即使规划时通过，执行前 PDB 收紧也可能使驱逐进入重试。若另一个 Execute 正在运行或仍处于执行冷却时间，新 Run 会保持 `Pending`，可通过 Conditions 中的 `AnotherRunActive` 或 `ExecuteCooldownActive` 识别。
 
 ### 6. 验证 Execute 是否生效
 
@@ -1214,7 +1223,7 @@ status:
 
 ### 为什么三个节点都提示不能腾空？
 
-节点通常包含请求目标资源、但不满足 Repack 可迁移条件的 Pod。重点检查其 `schedulerName`、PodGroup 关联和 `scope.podGroups` 匹配结果。将 Repack Engine 日志级别提高到 `-v=4`，可查看具体阻塞 Pod 和不可腾空原因。PDB 不影响规划阶段的可迁移性判断，但可能在 Execute 驱逐阶段拒绝请求。
+节点通常包含请求目标资源、但不满足 Repack 可迁移条件的 Pod。重点检查其 `schedulerName`、PodGroup 关联、`scope.podGroups` 匹配结果和所在 namespace 的 PDB。将 Repack Engine 日志级别提高到 `-v=4` 或 `-v=5`，可查看具体阻塞 Pod 和不可腾空原因。确定性零中断 PDB 会影响规划阶段；其他 PDB 仍可能在 Execute 驱逐阶段暂时拒绝请求。
 
 ### 节点上的 DaemonSet 会阻止整理吗？
 
@@ -1238,7 +1247,11 @@ VCJob 不需要，Job controller 会复制 VCJob 的 `metadata.labels`。兼容�
 
 ### 为什么 DryRun 是 `Succeeded`，但没有移动计划？
 
-`Succeeded` 表示 Run 正常完成，不表示一定存在迁移。查看 `Complete` Condition：`NoFragmentation` 表示无需整理；`InsufficientImprovement` 表示当前范围、预算、可行性或收益阈值下没有推荐计划。
+`Succeeded` 表示 Run 正常完成，不表示一定存在迁移。查看 `Complete` Condition：`NoFragmentation` 表示无需整理；`InsufficientImprovement` 表示当前范围、PDB 约束、预算、可行性或收益阈值下没有推荐计划。
+
+### 为什么 `disruptionsAllowed: 0` 的 Pod 仍可能出现在计划中？
+
+`disruptionsAllowed` 是实时动态额度，可能因暂时不健康或正在重建而为 0。Repack 只用 PDB Controller 已计算的 `expectedPods` 和 `desiredHealthy` 判断配置是否完全不允许中断。非零中断 PDB 可以进入计划，Execute 会等待额度恢复并重试。
 
 ### 为什么 Execute 的最终腾空节点数少于 DryRun？
 

@@ -48,6 +48,7 @@ Repack 当前以释放完整目标资源节点为直接收益，以 Scope 和 `m
 - 通过工作负载与节点 Scope 限定允许驱逐的业务和允许腾空的节点；
 - 通过 `maxPerRun` 限制单次影响的工作负载数量和目标资源迁移量；
 - 复用 Volcano Scheduler 的完整调度过滤语义验证每个计划落点；
+- 在规划阶段过滤新鲜状态已确认的零中断 PDB，避免产生确定无法执行的计划；
 - 感知 PodGroup/Gang 中断边界，减少受影响工作负载，并降低突破 `MinAvailable` 的概率；
 - 记录计划、逐 Pod 驱逐、替身 Pod 识别、建议节点、实际节点和实际收益；
 - 保持 Action 主流程稳定，通过 Plugin 扩展 Scope、预算、Domain、评分和装箱策略；
@@ -62,7 +63,7 @@ Repack 当前以释放完整目标资源节点为直接收益，以 Scope 和 `m
 - 不自动监听 Pending 作业并触发整理；
 - 不执行抢占、节点 `cordon` 或通过污点独占释放容量；
 - 不修改工作负载的资源请求、并行度或拓扑约束；
-- 不提前搜索绕开 PDB 的替代驱逐组合；
+- 不计算 PDB 动态剩余额度，也不搜索绕开 PDB 的替代驱逐组合；规划期仅过滤确定性零中断 PDB；
 - 不对上层控制器的级联重建成本进行通用建模；
 - 当前不实现 HyperNode Domain、多节点联合腾空或多跳交换；这些能力通过 Domain Plugin 和后续状态模型演进。
 
@@ -151,8 +152,8 @@ Engine 的 Reconcile 负责对象读取、Execute 串行门禁和 ActionResult �
 
 一次规划采用“低成本裁剪、候选评分、惰性完整校验”的增量流程：
 
-1. 从 scheduler snapshot 解析目标资源、Scope、PodGroup 和节点状态；
-2. 排除空目标资源节点、满卡节点和包含不可迁移目标资源 Pod 的节点；
+1. 从 scheduler snapshot 解析目标资源、Scope、PodGroup、PDB 和节点状态；
+2. 排除空目标资源节点、满卡节点和包含 Scope/确定性零中断 PDB 所阻止的目标资源 Pod 的节点；
 3. Domain Plugin 生成可腾空 Unit，当前实现为单节点；
 4. 在评分前检查执行预算和接收端目标资源总容量；
 5. 从工作负载影响、Gang 破坏、受损资源、迁移资源和 Pod 数等维度计算候选分数；
@@ -169,7 +170,13 @@ Repack 以 PodGroup 作为工作负载影响统计单元。对于每个候选计
 - 未突破 `MinAvailable` 时，受影响资源按实际迁移量计算；
 - 突破 `MinAvailable` 时，该 PodGroup 被记为 Gang breach，并按整个 PodGroup 的目标资源规模计算受损资源。
 
-该模型不把破坏 Gang 作为绝对禁止条件，而是让系统在多个可行候选之间优先选择影响工作负载更少、Gang 中断成本更低的方案。不可中断业务必须由 Scope 排除。
+该模型不把破坏 Gang 作为绝对禁止条件，而是让系统在多个可行候选之间优先选择影响工作负载更少、Gang 中断成本更低的方案。明确不可中断的业务应使用 Scope 排除；如果工作负载已配置并收敛为零中断 PDB，`pdbconstraint` 也会在规划期阻止对应 Pod。
+
+### Static PDB Constraint
+
+Repack 复用 Scheduler Cache 的 PDB informer，在每个 Planning Session 打开时只读取一次。当 PDB status 已观测当前 generation、`ExpectedPods > 0`、`DesiredHealthy >= ExpectedPods` 且 Controller 未报告 `SyncFailed` 时，将其视为配置上不允许任何健康 Pod 主动中断的确定性约束。匹配该 PDB 的目标资源 Pod 不可移动，因此所在节点不进入评分和 Scheduler simulation。
+
+Pod 级判断与 Eviction API 对齐：Pending、终态或删除中的 Pod 跳过 PDB；未 Ready Pod 遵循 `unhealthyPodEvictionPolicy`，默认 `IfHealthyBudget` 还会结合 `CurrentHealthy` 与 `DesiredHealthy` 判断。`DisruptionsAllowed == 0` 可能只是工作负载暂时不健康或 replacement 尚未 Ready，不用作静态过滤条件。这类非零中断 PDB 仍允许进入计划，由 Execute 时的 Eviction API 和现有批次退避重试逐步完成。PDB 缓存、Controller 同步或 selector 异常时 fail-open，Eviction API 仍作为最终权威校验。
 
 ![Gang 中断成本模型](images/repack/gang-damage-stepfn.svg)
 
@@ -189,8 +196,9 @@ Execute 在驱逐前持久化完整 plan 和逐 Pod relocation journal，形成 
 ### Safety Boundaries
 
 - Scope 和 `maxPerRun` 是硬约束，候选评分不能突破；
+- 新鲜的确定性零中断 PDB 在 DryRun 和 Execute 的共享规划阶段过滤；
 - 每个计划迁移都必须通过完整 Scheduler 可行性检查；
-- Execute 通过 Eviction API 遵守 PDB；
+- Execute 通过 Eviction API 按实时状态最终校验 PDB；
 - 单集群 Execute 采用 K=1 串行门控并带冷却时间；
 - 计划不预留资源，运行时竞争可能使实际结果偏离计划；
 - 计划与实际结果分离保存，部分执行失败不会覆盖原始决策；
@@ -247,7 +255,7 @@ Repack 默认关闭，通过 Helm 显式开启。建议按以下顺序逐步放�
 ## Future Work
 
 - HyperNode Domain 和按训练 TP/EP、推理 Prefill/Decode role 所需卡数倍数定义的拓扑收益；
-- 规划期 PDB 感知与更多工作负载中断成本信号；
+- 更完整的 PDB 动态额度、组合与驱逐顺序建模，以及更多工作负载中断成本信号；
 - 自动触发和策略化周期运行；
 - 多资源联合整理；
 - 在保持规划时延边界的前提下改进全局计划质量。

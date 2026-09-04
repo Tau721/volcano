@@ -24,7 +24,9 @@ import (
 	"time"
 
 	v1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
@@ -36,6 +38,7 @@ import (
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/binpack"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/gangdisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/nodeconsolidation"
+	_ "volcano.sh/volcano/pkg/repackengine/plugins/pdbconstraint"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/repackbudget"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloaddisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloadscope"
@@ -111,7 +114,9 @@ func (*fakeActionRuntime) RecordPlanComputed(*repackv1alpha1.RepackRun) {}
 const testResource = v1.ResourceName("nvidia.com/gpu")
 
 type actionSnapshot struct {
-	nodes []*schedapi.NodeInfo
+	nodes            []*schedapi.NodeInfo
+	pdbs             []*policyv1.PodDisruptionBudget
+	feasibilityCalls int
 }
 
 func (s *actionSnapshot) Nodes() []*schedapi.NodeInfo       { return s.nodes }
@@ -119,7 +124,11 @@ func (*actionSnapshot) NodeInScope(*schedapi.NodeInfo) bool { return true }
 func (*actionSnapshot) PodGroupView(schedapi.JobID) api.PodGroupView {
 	return api.PodGroupView{MinAvailable: 1, Running: 1, Footprint: 1}
 }
-func (*actionSnapshot) FeasibleRelocation(_ context.Context, _ []*api.Move, victims []*schedapi.TaskInfo, receivers []*schedapi.NodeInfo) ([]*api.Move, bool) {
+func (s *actionSnapshot) ListPodDisruptionBudgets() ([]*policyv1.PodDisruptionBudget, error) {
+	return s.pdbs, nil
+}
+func (s *actionSnapshot) FeasibleRelocation(_ context.Context, _ []*api.Move, victims []*schedapi.TaskInfo, receivers []*schedapi.NodeInfo) ([]*api.Move, bool) {
+	s.feasibilityCalls++
 	if len(receivers) == 0 {
 		return nil, false
 	}
@@ -159,7 +168,7 @@ func actionNode(name string, capacity int64, task *schedapi.TaskInfo) *schedapi.
 
 func actionSession(minNodesFreed int) *framework.Session {
 	return actionSessionWithPlugins(minNodesFreed, []string{
-		"workloadscope", "repackbudget", "nodeconsolidation",
+		"workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation",
 		"workloaddisruption", "gangdisruption", "binpack",
 	})
 }
@@ -212,12 +221,12 @@ func TestRepackActionRejectsBelowBenefitButPreservesCurrentMetric(t *testing.T) 
 
 func TestPluginConfigurationOrderDoesNotAffectPlan(t *testing.T) {
 	forward := []string{
-		"workloadscope", "repackbudget", "nodeconsolidation",
+		"workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation",
 		"workloaddisruption", "gangdisruption", "binpack",
 	}
 	reversed := []string{
 		"binpack", "gangdisruption", "workloaddisruption",
-		"nodeconsolidation", "repackbudget", "workloadscope",
+		"nodeconsolidation", "repackbudget", "pdbconstraint", "workloadscope",
 	}
 	forwardSession := actionSessionWithPlugins(1, forward)
 	defer framework.CloseSession(forwardSession)
@@ -237,7 +246,7 @@ func TestPluginConfigurationOrderDoesNotAffectPlan(t *testing.T) {
 
 func TestOptionalPluginCombinationsPreserveMainFlowAndReceiverInvariants(t *testing.T) {
 	optional := []string{
-		"workloadscope", "repackbudget", "workloaddisruption", "gangdisruption", "binpack",
+		"workloadscope", "pdbconstraint", "repackbudget", "workloaddisruption", "gangdisruption", "binpack",
 	}
 	for mask := 0; mask < 1<<len(optional); mask++ {
 		plugins := []string{"nodeconsolidation"}
@@ -260,6 +269,104 @@ func TestOptionalPluginCombinationsPreserveMainFlowAndReceiverInvariants(t *test
 				t.Fatalf("plugins=%v produced invalid move=%+v; empty/full nodes must never participate", plugins, move)
 			}
 		}
+	}
+}
+
+func TestPDBConstraintFiltersDrainCandidatesBeforeSimulation(t *testing.T) {
+	strict := actionPDB("strict", map[string]string{"protected": "true"}, 2, 2)
+	ssn, snapshot, protected := actionPDBSession([]*policyv1.PodDisruptionBudget{strict}, true)
+	defer framework.CloseSession(ssn)
+
+	buildPlan(ssn)
+	if ssn.Plan() == nil {
+		t.Fatal("an unprotected drain candidate should still produce a plan")
+	}
+	for _, move := range ssn.Plan().Moves {
+		if move != nil && move.Task != nil && move.Task.UID == protected.UID {
+			t.Fatalf("strict PDB task unexpectedly entered plan: %+v", move)
+		}
+	}
+	if snapshot.feasibilityCalls == 0 {
+		t.Fatal("the remaining unprotected candidate should reach scheduler simulation")
+	}
+}
+
+func TestPDBConstraintAllCandidatesBlockedSkipsSimulation(t *testing.T) {
+	strict := actionPDB("strict-all", nil, 2, 2)
+	ssn, snapshot, _ := actionPDBSession([]*policyv1.PodDisruptionBudget{strict}, true)
+	defer framework.CloseSession(ssn)
+
+	buildPlan(ssn)
+	if ssn.Plan() != nil {
+		t.Fatalf("plan=%+v, want all strict-PDB candidates filtered", ssn.Plan())
+	}
+	if snapshot.feasibilityCalls != 0 {
+		t.Fatalf("feasibility calls=%d, want zero when all candidates are statically blocked", snapshot.feasibilityCalls)
+	}
+}
+
+func TestPDBConstraintIgnoresDynamicZeroAllowanceAndCanBeDisabled(t *testing.T) {
+	// DesiredHealthy < ExpectedPods means the PDB has static disruption
+	// capacity even when its current DisruptionsAllowed happens to be zero.
+	dynamicZero := actionPDB("dynamic-zero", nil, 2, 1)
+	dynamicZero.Status.DisruptionsAllowed = 0
+	ssn, _, _ := actionPDBSession([]*policyv1.PodDisruptionBudget{dynamicZero}, true)
+	buildPlan(ssn)
+	if ssn.Plan() == nil {
+		t.Fatal("dynamic zero allowance must remain plannable")
+	}
+	framework.CloseSession(ssn)
+
+	strict := actionPDB("strict-disabled", nil, 2, 2)
+	disabled, _, _ := actionPDBSession([]*policyv1.PodDisruptionBudget{strict}, false)
+	defer framework.CloseSession(disabled)
+	buildPlan(disabled)
+	if disabled.Plan() == nil {
+		t.Fatal("removing pdbconstraint should restore the previous planning behavior")
+	}
+}
+
+func actionPDBSession(pdbs []*policyv1.PodDisruptionBudget, enableConstraint bool) (*framework.Session, *actionSnapshot, *schedapi.TaskInfo) {
+	protected := actionPodTask("protected", "protected", "true", 2)
+	unprotected := actionPodTask("unprotected", "protected", "false", 4)
+	full := actionPodTask("full", "protected", "false", 8)
+	snapshot := &actionSnapshot{nodes: []*schedapi.NodeInfo{
+		actionNode("protected-node", 8, protected),
+		actionNode("unprotected-node", 8, unprotected),
+		actionNode("empty", 8, nil),
+		actionNode("full", 8, full),
+	}, pdbs: pdbs}
+	plugins := []string{"nodeconsolidation", "binpack"}
+	if enableConstraint {
+		plugins = append(plugins, "pdbconstraint")
+	}
+	ssn := framework.OpenSession(framework.SessionConfig{
+		Snapshot: snapshot, Resource: testResource, Mode: repackv1alpha1.RepackModeDryRun, MinNodesFreed: 1,
+	}, framework.PluginOptions(plugins...))
+	return ssn, snapshot, protected
+}
+
+func actionPodTask(name, labelKey, labelValue string, resourceValue int64) *schedapi.TaskInfo {
+	resource := actionResource(resourceValue)
+	pod := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", UID: types.UID(name), Labels: map[string]string{labelKey: labelValue}},
+		Status: v1.PodStatus{Conditions: []v1.PodCondition{{
+			Type: v1.PodReady, Status: v1.ConditionTrue,
+		}}},
+	}
+	return &schedapi.TaskInfo{
+		UID: schedapi.TaskID(name), Job: schedapi.JobID("ns/" + name), Name: name, Namespace: "ns",
+		InitResreq: resource, Resreq: resource, Pod: pod,
+	}
+}
+
+func actionPDB(name string, matchLabels map[string]string, expectedPods, desiredHealthy int32) *policyv1.PodDisruptionBudget {
+	return &policyv1.PodDisruptionBudget{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "ns", Generation: 1},
+		Spec:       policyv1.PodDisruptionBudgetSpec{Selector: &metav1.LabelSelector{MatchLabels: matchLabels}},
+		Status: policyv1.PodDisruptionBudgetStatus{
+			ObservedGeneration: 1, ExpectedPods: expectedPods, DesiredHealthy: desiredHealthy,
+		},
 	}
 }
 

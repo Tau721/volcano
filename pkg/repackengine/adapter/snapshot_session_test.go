@@ -21,10 +21,15 @@ import (
 	"testing"
 
 	v1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	utilfeature "k8s.io/apiserver/pkg/util/feature"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 
 	schedulingapi "volcano.sh/apis/pkg/apis/scheduling"
+	"volcano.sh/volcano/pkg/features"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
+	schedcache "volcano.sh/volcano/pkg/scheduler/cache"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
@@ -107,6 +112,41 @@ func TestSessionSnapshot_Nodes(t *testing.T) {
 	snap := NewSessionSnapshot(ssn, gpu, nil)
 	if len(snap.Nodes()) != 2 {
 		t.Fatalf("expected 2 nodes, got %d", len(snap.Nodes()))
+	}
+}
+
+func TestSessionSnapshot_ListPodDisruptionBudgets(t *testing.T) {
+	schedulerCache := schedcache.NewDefaultMockSchedulerCache("test-scheduler")
+	pdb := &policyv1.PodDisruptionBudget{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "strict"}}
+	informer := schedulerCache.SharedInformerFactory().Policy().V1().PodDisruptionBudgets().Informer()
+	if err := informer.GetStore().Add(pdb); err != nil {
+		t.Fatalf("add PDB to informer store: %v", err)
+	}
+
+	ssn := schedframework.OpenSession(schedulerCache, nil, nil)
+	defer schedframework.CloseSessionReadOnly(ssn)
+	snapshot := NewSessionSnapshot(ssn, gpu, nil)
+	pdbs, err := snapshot.ListPodDisruptionBudgets()
+	if err != nil {
+		t.Fatalf("ListPodDisruptionBudgets() error: %v", err)
+	}
+	if len(pdbs) != 1 || pdbs[0].Namespace != "ns" || pdbs[0].Name != "strict" {
+		t.Fatalf("PDBs=%v, want ns/strict from scheduler informer store", pdbs)
+	}
+}
+
+func TestSessionSnapshot_ListPodDisruptionBudgetsUnavailable(t *testing.T) {
+	if _, err := (&SessionSnapshot{}).ListPodDisruptionBudgets(); err == nil {
+		t.Fatal("nil scheduler Session must return an error")
+	}
+
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.PodDisruptionBudgetsSupport, false)
+	schedulerCache := schedcache.NewDefaultMockSchedulerCache("test-scheduler")
+	ssn := schedframework.OpenSession(schedulerCache, nil, nil)
+	defer schedframework.CloseSessionReadOnly(ssn)
+	snapshot := NewSessionSnapshot(ssn, gpu, nil)
+	if _, err := snapshot.ListPodDisruptionBudgets(); err == nil {
+		t.Fatal("disabled PodDisruptionBudgetsSupport feature gate must return an error")
 	}
 }
 

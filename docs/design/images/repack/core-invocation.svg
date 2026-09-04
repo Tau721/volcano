@@ -1,6 +1,6 @@
 <svg viewBox="0 0 940 620" xmlns="http://www.w3.org/2000/svg" font-family="ui-sans-serif, system-ui, sans-serif" role="img">
   <title>Repack Action 的外层调用链</title>
-  <desc>engine reconcile→gate→process：打开调度器 Session、解析 Scope、构造 Snapshot；再打开引擎 Session 注册 Plugin 回调、运行 Repack Action；Action 调用 Lazy Drain Planner 并生成计划，Engine 持久化后提交 Execute。</desc>
+  <desc>engine reconcile→gate→process：打开调度器 Session、解析 Scope、构造包含 PDB reader 的 Snapshot；再打开引擎 Session 注册 Plugin 回调、运行 Repack Action；Action 调用 Lazy Drain Planner 并生成计划，Engine 持久化后提交 Execute。</desc>
   <style>
     .t{fill:#111827;} .s{fill:#5b6472;}
     .m{font-family:ui-monospace,Menlo,monospace;}
@@ -36,7 +36,7 @@
   <rect x="40" y="282" width="410" height="72" rx="6" class="card"/>
   <text x="245" y="299" text-anchor="middle" font-size="10" class="t m">framework.OpenSession(cfg, plugins)</text>
   <text x="245" y="317" text-anchor="middle" font-size="8.8" class="s">逐个 plugin.OnSessionOpen 注册回调</text>
-  <text x="245" y="332" text-anchor="middle" font-size="8.5" class="s m">workloadscope · repackbudget · nodeconsolidation</text>
+  <text x="245" y="332" text-anchor="middle" font-size="7.8" class="s m">workloadscope · pdbconstraint · repackbudget · nodeconsolidation</text>
   <text x="245" y="347" text-anchor="middle" font-size="8.5" class="s">组合候选过滤、评分与接收排序</text>
   <rect x="468" y="282" width="430" height="72" rx="6" class="card"/>
   <text x="683" y="299" text-anchor="middle" font-size="10" class="t m">RunActions(["repack"], esn)</text>

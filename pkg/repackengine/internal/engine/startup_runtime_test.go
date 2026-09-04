@@ -34,6 +34,7 @@ import (
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/gangdisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/networktopologyaware"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/nodeconsolidation"
+	_ "volcano.sh/volcano/pkg/repackengine/plugins/pdbconstraint"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/repackbudget"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloaddisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloadscope"
@@ -57,7 +58,7 @@ func TestNewEngineAppliesDefaults(t *testing.T) {
 	if len(e.config.Plugins) == 0 {
 		t.Error("default Plugins should be non-empty")
 	}
-	wantPlugins := []string{"workloadscope", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "binpack"}
+	wantPlugins := []string{"workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "binpack"}
 	if got := configuredPluginNames(e.config.Plugins); !reflect.DeepEqual(got, wantPlugins) {
 		t.Errorf("default Plugins=%v, want %v", got, wantPlugins)
 	}

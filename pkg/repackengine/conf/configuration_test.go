@@ -25,6 +25,7 @@ import (
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/binpack"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/gangdisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/nodeconsolidation"
+	_ "volcano.sh/volcano/pkg/repackengine/plugins/pdbconstraint"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/repackbudget"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloaddisruption"
 	_ "volcano.sh/volcano/pkg/repackengine/plugins/workloadscope"
@@ -136,6 +137,12 @@ func TestValidatePluginOptionsAllowsOptionalPolicies(t *testing.T) {
 	}
 	if err := ValidatePluginOptions(framework.PluginOptions("repackbudget")); err != nil {
 		t.Fatalf("repackbudget should be independently configurable: %v", err)
+	}
+	if err := ValidatePluginOptions(framework.PluginOptions("pdbconstraint")); err != nil {
+		t.Fatalf("pdbconstraint should be independently configurable: %v", err)
+	}
+	if err := ValidatePluginOptions([]framework.PluginOption{{Name: "pdbconstraint", Arguments: framework.Arguments{"unexpected": true}}}); err == nil || !strings.Contains(err.Error(), "unexpected") {
+		t.Fatalf("pdbconstraint argument error=%v, want unknown-argument rejection", err)
 	}
 	if err := ValidatePluginOptions(framework.PluginOptions("workloadscope", "workloadscope", "repackbudget")); err == nil || !strings.Contains(err.Error(), "more than once") {
 		t.Fatalf("duplicate error=%v, want duplicate-plugin rejection", err)

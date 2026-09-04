@@ -23,9 +23,11 @@ import (
 	. "github.com/onsi/gomega"
 
 	v1 "k8s.io/api/core/v1"
+	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
@@ -140,6 +142,106 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 		defer deleteRun(ctx, second.Name)
 		Expect(waitConditionReason(ctx, second.Name, "Progressing", metav1.ConditionFalse)).
 			To(Equal("ExecuteCooldownActive"))
+	})
+
+	// C9: a fresh maxUnavailable=0 PDB is a static planning constraint. Repack
+	// excludes the protected source before scheduler simulation or eviction.
+	It("returns an empty plan when every source is protected by a zero-disruption PDB", func() {
+		protectedA := occupyNativeDeployment(ctx, "pdb-a", nodes[0], "protected", 4)
+		protectedB := occupyNativeDeployment(ctx, "pdb-b", nodes[1], "protected", 2)
+		staying := occupyNativeDeployment(ctx, "pdb-staying", nodes[2], "staying", 2)
+		defer deleteNativeWorkloads(ctx, protectedA, protectedB, staying)
+
+		// Every movable fixture pod is protected, so every possible source must be
+		// excluded before the planner reaches scheduler simulation or eviction.
+		blockAll := intstr.FromInt(0)
+		for _, workload := range []*nativeWorkload{protectedA, protectedB} {
+			pdbName := "block-" + workload.deployment.Name
+			_, err := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Create(context.TODO(),
+				&policyv1.PodDisruptionBudget{
+					ObjectMeta: metav1.ObjectMeta{Name: pdbName},
+					Spec: policyv1.PodDisruptionBudgetSpec{
+						MaxUnavailable: &blockAll,
+						Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{nativeWorkloadLabel: workload.deployment.Name}},
+					},
+				}, metav1.CreateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+			waitZeroDisruptionPDBReady(ctx, pdbName)
+		}
+		scope := &repackv1alpha1.RepackScope{Nodes: &repackv1alpha1.RepackSelectorTerm{
+			Include: &repackv1alpha1.RepackSelector{Names: []string{nodes[0], nodes[1]}},
+		}}
+		waitPDBConstraintObserved(ctx, "pdb-sync-all", scope, func(probe *repackv1alpha1.RepackRun) bool {
+			return probe.Status.Phase == repackv1alpha1.RepackSucceeded &&
+				completeReason(probe) == "InsufficientImprovement" &&
+				probe.Status.Plan != nil && len(probe.Status.Plan.Moves) == 0
+		})
+
+		run, err := newRun("pdb-filtered", repackv1alpha1.RepackModeExecute).goal(npuResource).scope(scope).create(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		defer deleteRun(ctx, run.Name)
+
+		got := waitTerminal(ctx, run.Name)
+		Expect(completeReason(got)).To(Equal("InsufficientImprovement"))
+		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+		Expect(got.Status.Plan).NotTo(BeNil())
+		Expect(got.Status.Plan.Summary).NotTo(BeNil())
+		Expect(got.Status.Plan.Moves).To(BeEmpty())
+		Expect(got.Status.Plan.Summary.FreedNodeCount).To(BeEquivalentTo(0))
+		Expect(got.Status.Result).NotTo(BeNil())
+		Expect(got.Status.Result.MovedCardCount).To(BeEquivalentTo(0))
+		Expect(got.Status.Result.MetricsVerified).To(BeTrue())
+		Expect(got.Status.Relocations).To(BeEmpty(), "planning-filtered Pods must not create placement intents")
+	})
+
+	It("filters a zero-disruption source and executes an unprotected source", func() {
+		blocked := occupyNativeDeployment(ctx, "partial-blocked", nodes[0], "blocked", 1)
+		accepted := occupyNativeDeployment(ctx, "partial-accepted", nodes[1], "move", 2)
+		staying := occupyNativeDeployment(ctx, "partial-staying", nodes[2], "stay", 5)
+		defer deleteNativeWorkloads(ctx, blocked, accepted, staying)
+
+		blockAll := intstr.FromInt(0)
+		_, err := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Create(context.TODO(),
+			&policyv1.PodDisruptionBudget{
+				ObjectMeta: metav1.ObjectMeta{Name: "block-partial"},
+				Spec: policyv1.PodDisruptionBudgetSpec{
+					MaxUnavailable: &blockAll,
+					Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
+						nativeWorkloadLabel: blocked.deployment.Name,
+					}},
+				},
+			}, metav1.CreateOptions{})
+		Expect(err).NotTo(HaveOccurred())
+		waitZeroDisruptionPDBReady(ctx, "block-partial")
+
+		scope := &repackv1alpha1.RepackScope{Nodes: &repackv1alpha1.RepackSelectorTerm{
+			Include: &repackv1alpha1.RepackSelector{Names: []string{nodes[0], nodes[1]}},
+		}}
+		waitPDBConstraintObserved(ctx, "pdb-sync-partial", scope, func(probe *repackv1alpha1.RepackRun) bool {
+			return probe.Status.Plan != nil &&
+				len(probe.Status.Plan.Moves) == 1 &&
+				len(probe.Status.Plan.FreedNodes) == 1 &&
+				probe.Status.Plan.FreedNodes[0] == nodes[1]
+		})
+		run, err := newRun("partial-pdb", repackv1alpha1.RepackModeExecute).
+			goal(npuResource).scope(scope).create(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		defer deleteRun(ctx, run.Name)
+
+		got := waitTerminal(ctx, run.Name)
+		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+		Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+		Expect(got.Status.Plan.Moves).To(HaveLen(1), "only the unprotected source may enter the plan")
+		Expect(got.Status.Plan.Moves[0].Pods).To(HaveLen(1))
+		Expect(got.Status.Plan.Moves[0].Pods[0].FromNode).To(Equal(nodes[1]))
+		Expect(got.Status.Plan.Summary.MovedCardCount).To(BeEquivalentTo(2))
+		Expect(got.Status.Plan.Summary.FreedNodeCount).To(BeEquivalentTo(1))
+		Expect(got.Status.Plan.FreedNodes).To(ConsistOf(nodes[1]))
+		Expect(got.Status.Result).NotTo(BeNil())
+		Expect(got.Status.Result.MovedCardCount).To(BeEquivalentTo(2))
+		Expect(got.Status.Result.MetricsVerified).To(BeTrue())
+		Expect(got.Status.Relocations).To(HaveLen(1),
+			"only the unprotected source may retain a replacement placement intent")
 	})
 
 	// E16: scope.nodes.exclude — an excluded node is never a drain target, so it is
@@ -339,6 +441,47 @@ var _ = Describe("Repack Execute, scope, maxPerRun & lifecycle", Serial, func() 
 		Expect(err).NotTo(HaveOccurred(), "run should be GC-deleted after its TTL")
 	})
 })
+
+func waitZeroDisruptionPDBReady(ctx *e2eutil.TestContext, name string) {
+	Eventually(func() bool {
+		pdb, err := ctx.Kubeclient.PolicyV1().PodDisruptionBudgets(ctx.Namespace).Get(
+			context.TODO(), name, metav1.GetOptions{})
+		if err != nil {
+			return false
+		}
+		return pdb.Status.ObservedGeneration == pdb.Generation &&
+			pdb.Status.ExpectedPods > 0 &&
+			pdb.Status.DesiredHealthy >= pdb.Status.ExpectedPods &&
+			pdb.Status.DisruptionsAllowed == 0
+	}, repackTimeout, repackPoll).Should(BeTrue(),
+		"PDB %s must have a fresh zero-disruption status before Execute", name)
+}
+
+// waitPDBConstraintObserved closes the gap between observing fresh PDB status
+// through the API client and the Repack Engine's independent informer seeing
+// the same update. A successful DryRun probe is the synchronization point used
+// by the following Execute assertions.
+func waitPDBConstraintObserved(
+	ctx *e2eutil.TestContext,
+	name string,
+	scope *repackv1alpha1.RepackScope,
+	matches func(*repackv1alpha1.RepackRun) bool,
+) {
+	Eventually(func() bool {
+		builder := newRun(name, repackv1alpha1.RepackModeDryRun).goal(npuResource)
+		if scope != nil {
+			builder.scope(scope)
+		}
+		probe, err := builder.create(ctx)
+		if err != nil {
+			return false
+		}
+		result := waitTerminal(ctx, probe.Name)
+		deleteRun(ctx, probe.Name)
+		return matches(result)
+	}, repackTimeout, repackPoll).Should(BeTrue(),
+		"repack-engine did not observe the expected PDB planning constraint")
+}
 
 func deleteNativeWorkloads(ctx *e2eutil.TestContext, workloads ...*nativeWorkload) {
 	for _, workload := range workloads {

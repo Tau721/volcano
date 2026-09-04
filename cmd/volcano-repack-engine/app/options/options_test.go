@@ -18,6 +18,7 @@ package options
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,5 +59,15 @@ func TestExecutionTimeoutReplacesNominationTTLFlag(t *testing.T) {
 	}
 	if option.ExecutionTimeout != 7*time.Minute {
 		t.Fatalf("ExecutionTimeout=%s, want 7m", option.ExecutionTimeout)
+	}
+}
+
+func TestRepackPluginsHelpListsTheDefaultSet(t *testing.T) {
+	option := NewServerOption()
+	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
+	option.AddFlags(flags)
+	usage := flags.Lookup("repack-plugins").Usage
+	if !strings.Contains(usage, "workloadscope,pdbconstraint,repackbudget,nodeconsolidation,workloaddisruption,gangdisruption,binpack") {
+		t.Fatalf("repack-plugins usage=%q, want complete default plugin set", usage)
 	}
 }
