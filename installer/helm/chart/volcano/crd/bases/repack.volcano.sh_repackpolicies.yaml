@@ -1,3 +1,1125 @@
-# RepackPolicy CRD is deferred to a later iteration; the first stage ships only
-# RepackRun. This file is intentionally emptied — delete it with `git rm` and
-# regenerate via `make manifests` (the build sandbox cannot remove files).
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.20.0
+  name: repackpolicies.repack.volcano.sh
+spec:
+  group: repack.volcano.sh
+  names:
+    kind: RepackPolicy
+    listKind: RepackPolicyList
+    plural: repackpolicies
+    shortNames:
+    - rpp
+    - repackpolicy
+    singular: repackpolicy
+  scope: Cluster
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.suspend
+      name: SUSPEND
+      type: boolean
+    - description: Healthy condition reason
+      jsonPath: .status.conditions[?(@.type=="Healthy")].reason
+      name: STATUS
+      type: string
+    - jsonPath: .status.lastTriggerTime
+      name: LAST-TRIGGER
+      type: date
+    - jsonPath: .status.lastEvaluationTime
+      name: LAST-EVAL
+      type: date
+    - jsonPath: .metadata.creationTimestamp
+      name: AGE
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          RepackPolicy is a template-based RepackRun generator (CronJob→Job pattern).
+          It is cluster-scoped and user-mutable.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: |-
+              RepackPolicySpec declares when to derive a RepackRun and the template to use.
+              The RepackRunSpec inside RunTemplate is the single source of truth for run
+              shape (zero schema drift); whether a derived run is DryRun or Execute is fully
+              decided by runTemplate.spec.mode.
+            properties:
+              failedRunsHistoryLimit:
+                default: 3
+                description: |-
+                  FailedRunsHistoryLimit keeps the most recent failed derived runs. Default 3
+                  (CronJob's failed side defaults to 1; we take 3 to stay symmetric).
+                format: int32
+                minimum: 0
+                type: integer
+              runTemplate:
+                description: RunTemplate is the template for derived RepackRuns.
+                properties:
+                  metadata:
+                    description: ObjectMeta carries labels/annotations merged onto
+                      derived runs.
+                    properties:
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      finalizers:
+                        items:
+                          type: string
+                        type: array
+                      labels:
+                        additionalProperties:
+                          type: string
+                        type: object
+                      name:
+                        type: string
+                      namespace:
+                        type: string
+                    type: object
+                  spec:
+                    description: |-
+                      Spec is the run spec itself (reused RepackRunSpec). Field-level validation
+                      on RepackRunSpec carries in (template is pre-validated against run rules);
+                      RepackRun's root spec-immutability transition rule does not, so this template
+                      stays mutable and can evolve with the Policy.
+                    properties:
+                      eviction:
+                        description: |-
+                          Eviction configures how Execute issues Kubernetes Eviction requests. It is
+                          ignored by DryRun because no Pod is evicted in that mode.
+                        properties:
+                          gracePeriodSeconds:
+                            description: |-
+                              GracePeriodSeconds overrides the graceful-termination period requested for
+                              every Pod eviction in this Run. Unset preserves each Pod's
+                              spec.terminationGracePeriodSeconds; 0 requests immediate termination.
+                            format: int64
+                            minimum: 0
+                            type: integer
+                        type: object
+                      goals:
+                        description: |-
+                          Goals is the per-resource fragmentation target: exactly one entry
+                          (a run defragments a single accelerator resource); multi-resource is reserved.
+                        items:
+                          description: RepackGoal is one resource's fragmentation
+                            target.
+                          properties:
+                            minFragImprovementPercent:
+                              description: |-
+                                MinFragImprovementPercent is the required minimum drop in this resource's
+                                fragmentation, in percentage points (0-100). 0 = any benefit counts.
+                              format: int32
+                              maximum: 100
+                              minimum: 0
+                              type: integer
+                            resource:
+                              description: |-
+                                Resource is the accelerator to defragment (e.g. nvidia.com/gpu). Only
+                                fully-qualified extended resources (a name containing "/") are supported;
+                                core compute resources such as cpu, memory, ephemeral-storage and pods are
+                                rejected, because repack only consolidates scalar accelerator capacity.
+                              type: string
+                              x-kubernetes-validations:
+                              - message: goals.resource must be a fully-qualified
+                                  accelerator/extended resource (e.g. nvidia.com/gpu);
+                                  core resources like cpu, memory and ephemeral-storage
+                                  are not supported
+                                rule: self.contains('/')
+                          required:
+                          - resource
+                          type: object
+                        maxItems: 1
+                        type: array
+                      maxPerRun:
+                        description: MaxPerRun caps the blast radius of a single run.
+                        properties:
+                          podGroups:
+                            description: PodGroups caps distinct PodGroups moved (cross-resource
+                              count).
+                            format: int32
+                            minimum: 0
+                            type: integer
+                          resources:
+                            additionalProperties:
+                              anyOf:
+                              - type: integer
+                              - type: string
+                              pattern: ^(\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))(([KMGTPE]i)|[numkMGTPE]|([eE](\+|-)?(([0-9]+(\.[0-9]*)?)|(\.[0-9]+))))?$
+                              x-kubernetes-int-or-string: true
+                            description: Resources caps accelerator cards moved per
+                              resource.
+                            type: object
+                        type: object
+                      mode:
+                        description: Mode selects DryRun (simulate + report) or Execute
+                          (act).
+                        enum:
+                        - DryRun
+                        - Execute
+                        type: string
+                      networkTopology:
+                        description: |-
+                          NetworkTopology optionally enables HyperNode-level fragmentation
+                          optimization. When set, the run frees at least RequiredNodeBlocks blocks of
+                          NodeBlockSize nodes within the target HyperNode tier, so topology-constrained
+                          AI workloads can schedule. When omitted, no HyperNode-level optimization is
+                          performed and the run keeps the existing Node-level semantics.
+                        properties:
+                          hyperNodeTier:
+                            description: |-
+                              HyperNodeTier is the target HyperNode tier (numeric), matching
+                              HyperNode.Spec.Tier. Mutually exclusive with HyperNodeTierName; exactly one
+                              must be configured (enforced by CEL).
+                            type: integer
+                          hyperNodeTierName:
+                            description: |-
+                              HyperNodeTierName is the target HyperNode tier name, matching
+                              HyperNode.Spec.TierName. Mutually exclusive with HyperNodeTier; exactly one
+                              must be configured (enforced by CEL).
+                            type: string
+                          mode:
+                            description: |-
+                              Mode expresses how blocks should be distributed across HyperNodes: binpack
+                              concentrates blocks onto as few HyperNodes as possible; spread disperses
+                              them. Omitted = no distribution preference.
+                            enum:
+                            - binpack
+                            - spread
+                            type: string
+                          nodeBlockSize:
+                            default: 1
+                            description: |-
+                              NodeBlockSize is the number of nodes in one block. A block must lie entirely
+                              inside a single HyperNode of the target tier: nodes from different HyperNodes
+                              cannot be combined into one block. It is a pointer so that an explicit 0 is
+                              distinguishable from "omitted": 0 is rejected by the minimum:1 rule (a block
+                              must hold at least one node), while omitting the field applies the default 1
+                              (each node is a block).
+                            minimum: 1
+                            type: integer
+                          requiredNodeBlocks:
+                            default: 0
+                            description: |-
+                              RequiredNodeBlocks is the minimum number of blocks the defragmentation must
+                              free. The target is met only when at least RequiredNodeBlocks blocks are
+                              freed; if it cannot be met, the plan is infeasible and no defragmentation is
+                              performed. 0 (default) relaxes the gate entirely: the block semantics degrade
+                              to pure soft guidance. Must be non-negative.
+                            minimum: 0
+                            type: integer
+                        type: object
+                        x-kubernetes-validations:
+                        - message: hyperNodeTier and hyperNodeTierName are mutually
+                            exclusive; configure exactly one
+                          rule: (has(self.hyperNodeTier) && !has(self.hyperNodeTierName))
+                            || (!has(self.hyperNodeTier) && has(self.hyperNodeTierName))
+                      scope:
+                        description: Scope bounds which PodGroups may move and which
+                          nodes participate.
+                        properties:
+                          nodes:
+                            description: RepackSelectorTerm is an include/exclude
+                              pair (exclude wins).
+                            properties:
+                              exclude:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                              include:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            type: object
+                          podGroups:
+                            description: RepackSelectorTerm is an include/exclude
+                              pair (exclude wins).
+                            properties:
+                              exclude:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                              include:
+                                description: RepackSelector matches by label selector
+                                  and/or explicit names (union).
+                                properties:
+                                  names:
+                                    description: Names are "namespace/name" for PodGroups,
+                                      or node names for nodes.
+                                    items:
+                                      type: string
+                                    maxItems: 1024
+                                    type: array
+                                  selector:
+                                    description: |-
+                                      A label selector is a label query over a set of resources. The result of matchLabels and
+                                      matchExpressions are ANDed. An empty label selector matches all objects. A null
+                                      label selector matches no objects.
+                                    properties:
+                                      matchExpressions:
+                                        description: matchExpressions is a list of
+                                          label selector requirements. The requirements
+                                          are ANDed.
+                                        items:
+                                          description: |-
+                                            A label selector requirement is a selector that contains values, a key, and an operator that
+                                            relates the key and values.
+                                          properties:
+                                            key:
+                                              description: key is the label key that
+                                                the selector applies to.
+                                              type: string
+                                            operator:
+                                              description: |-
+                                                operator represents a key's relationship to a set of values.
+                                                Valid operators are In, NotIn, Exists and DoesNotExist.
+                                              type: string
+                                            values:
+                                              description: |-
+                                                values is an array of string values. If the operator is In or NotIn,
+                                                the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                                                the values array must be empty. This array is replaced during a strategic
+                                                merge patch.
+                                              items:
+                                                type: string
+                                              type: array
+                                              x-kubernetes-list-type: atomic
+                                          required:
+                                          - key
+                                          - operator
+                                          type: object
+                                        type: array
+                                        x-kubernetes-list-type: atomic
+                                      matchLabels:
+                                        additionalProperties:
+                                          type: string
+                                        description: |-
+                                          matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                                          map is equivalent to an element of matchExpressions, whose key field is "key", the
+                                          operator is "In", and the values array contains only "value". The requirements are ANDed.
+                                        type: object
+                                    type: object
+                                    x-kubernetes-map-type: atomic
+                                type: object
+                            type: object
+                        type: object
+                      ttlSecondsAfterFinished:
+                        description: |-
+                          TTLSecondsAfterFinished: auto-DELETE this Run that long after it finishes
+                          (like Job). Unset = not auto-deleted.
+                        format: int64
+                        minimum: 0
+                        type: integer
+                    required:
+                    - mode
+                    type: object
+                required:
+                - spec
+                type: object
+              successfulRunsHistoryLimit:
+                default: 3
+                description: |-
+                  SuccessfulRunsHistoryLimit keeps the most recent successful derived runs
+                  (flat, CronJob successfulJobsHistoryLimit-style). Default 3.
+                format: int32
+                minimum: 0
+                type: integer
+              suspend:
+                default: false
+                description: Suspend pauses triggering (running runs are unaffected).
+                  Default false.
+                type: boolean
+              trigger:
+                description: Trigger is when a new RepackRun is derived (either source
+                  firing suffices).
+                properties:
+                  cronSchedule:
+                    description: CronSchedule fires on a standard 5-field cron expression;
+                      empty disables.
+                    type: string
+                    x-kubernetes-validations:
+                    - message: cronSchedule cannot contain TZ or CRON_TZ (RepackPolicy
+                        has no timeZone field); a policy always runs in the controller's
+                        local time
+                      rule: '!self.contains(''TZ'')'
+                  onFragAbovePercent:
+                    description: |-
+                      OnFragAbovePercent fires when the cluster-wide fragmentation rate for the
+                      template's resource exceeds this 0-100 threshold (strictly greater than;
+                      equal does not fire). 0 fires on any fragmentation (FragRate > 0). Unset disables.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                type: object
+                x-kubernetes-validations:
+                - message: trigger must set at least one of cronSchedule or onFragAbovePercent
+                  rule: (has(self.cronSchedule) && self.cronSchedule != '') || has(self.onFragAbovePercent)
+            required:
+            - runTemplate
+            - trigger
+            type: object
+          status:
+            description: |-
+              RepackPolicyStatus mirrors CronJob's status, plus conditions for the Policy's
+              own health, lastEvaluationTime for the reactive trigger, and lastRunStatus
+              snapshotting the most recent terminal derived run so an operator can see the
+              last outcome without querying RepackRuns.
+            properties:
+              conditions:
+                description: |-
+                  Conditions are standard Kubernetes conditions. RepackPolicy uses a single
+                  type "Healthy": Healthy=True/ReconcileSucceeded means the last reconcile
+                  completed as expected; Healthy=False/ReconcileFailed means it errored.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              inProgress:
+                description: InProgress lists derived runs not yet terminal (Pending
+                  or Running).
+                items:
+                  description: ObjectReference contains enough information to let
+                    you inspect or modify the referred object.
+                  properties:
+                    apiVersion:
+                      description: API version of the referent.
+                      type: string
+                    fieldPath:
+                      description: |-
+                        If referring to a piece of an object instead of an entire object, this string
+                        should contain a valid JSON/Go field access statement, such as desiredState.manifest.containers[2].
+                        For example, if the object reference is to a container within a pod, this would take on a value like:
+                        "spec.containers{name}" (where "name" refers to the name of the container that triggered
+                        the event) or if no container name is specified "spec.containers[2]" (container with
+                        index 2 in this pod). This syntax is chosen only to have some well-defined way of
+                        referencing a part of an object.
+                      type: string
+                    kind:
+                      description: |-
+                        Kind of the referent.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+                      type: string
+                    name:
+                      description: |-
+                        Name of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                    namespace:
+                      description: |-
+                        Namespace of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+                      type: string
+                    resourceVersion:
+                      description: |-
+                        Specific resourceVersion to which this reference is made, if any.
+                        More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#concurrency-control-and-consistency
+                      type: string
+                    uid:
+                      description: |-
+                        UID of the referent.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
+              lastEvaluationTime:
+                description: |-
+                  LastEvaluationTime is when the trigger sources were last evaluated
+                  (covers cronSchedule and onFragAbovePercent).
+                format: date-time
+                type: string
+              lastRunStatus:
+                description: |-
+                  LastRunStatus is the most recent terminal (Succeeded/Failed) derived run's
+                  context + full status snapshot (see LastRunStatus). Written once when the
+                  run turns terminal, then overwritten by the next terminal run.
+                properties:
+                  completionTime:
+                    description: CompletionTime is when the run first reached a terminal
+                      phase (TTL anchor).
+                    format: date-time
+                    type: string
+                  conditions:
+                    description: |-
+                      Conditions are the authoritative facts (Job-style:
+                      Progressing/Complete/Failed). Admission is CEL-only, so there is no
+                      Admitted condition. Progressing=False explains why a Pending run is
+                      waiting. The Complete condition's reason also encodes whether repacking
+                      was worthwhile.
+                    items:
+                      description: Condition contains details for one aspect of the
+                        current state of this API Resource.
+                      properties:
+                        lastTransitionTime:
+                          description: |-
+                            lastTransitionTime is the last time the condition transitioned from one status to another.
+                            This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                          format: date-time
+                          type: string
+                        message:
+                          description: |-
+                            message is a human readable message indicating details about the transition.
+                            This may be an empty string.
+                          maxLength: 32768
+                          type: string
+                        observedGeneration:
+                          description: |-
+                            observedGeneration represents the .metadata.generation that the condition was set based upon.
+                            For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                            with respect to the current state of the instance.
+                          format: int64
+                          minimum: 0
+                          type: integer
+                        reason:
+                          description: |-
+                            reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                            Producers of specific condition types may define expected values and meanings for this field,
+                            and whether the values are considered a guaranteed API.
+                            The value should be a CamelCase string.
+                            This field may not be empty.
+                          maxLength: 1024
+                          minLength: 1
+                          pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                          type: string
+                        status:
+                          description: status of the condition, one of True, False,
+                            Unknown.
+                          enum:
+                          - "True"
+                          - "False"
+                          - Unknown
+                          type: string
+                        type:
+                          description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                          maxLength: 316
+                          pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                          type: string
+                      required:
+                      - lastTransitionTime
+                      - message
+                      - reason
+                      - status
+                      - type
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - type
+                    x-kubernetes-list-type: map
+                  executionDeadline:
+                    description: |-
+                      ExecutionDeadline bounds the complete Execute workflow, starting immediately
+                      before the first eviction batch. It covers eviction retries, replacement
+                      placement, binding observation, and result verification.
+                    format: date-time
+                    type: string
+                  message:
+                    description: Message is the current one-line operator summary.
+                    type: string
+                  mode:
+                    description: Mode is the run's repack mode (DryRun/Execute, from
+                      runTemplate.spec.mode).
+                    enum:
+                    - DryRun
+                    - Execute
+                    type: string
+                  name:
+                    description: |-
+                      Name of the run that produced this snapshot (named {policy}-{YYYYMMDDHHmmss}),
+                      retained for tracing after the run is TTL/GC-deleted.
+                    type: string
+                  phase:
+                    description: Phase is a derived projection of conditions.
+                    enum:
+                    - Pending
+                    - Running
+                    - Succeeded
+                    - Failed
+                    type: string
+                  plan:
+                    description: |-
+                      Plan is the immutable plan-time decision in both modes. DryRun reports what
+                      would be done; Execute preserves the complete pre-eviction plan so rejected
+                      or alternatively placed actions remain auditable. Actual Execute metrics
+                      live in Result.
+                    properties:
+                      freedNodes:
+                        description: FreedNodes are the names of nodes the plan empties.
+                        items:
+                          type: string
+                        maxItems: 2048
+                        type: array
+                      moves:
+                        description: |-
+                          Moves is the per-PodGroup relocation detail; fromNode/toNode live per-pod
+                          inside pods[]. moves is a pure plan (identical in DryRun and Execute).
+                        items:
+                          description: |-
+                            RepackMove is one PodGroup's relocation. fromNode/toNode are per-pod (a gang's
+                            pods may be spread across nodes / move to multiple targets), so they live in
+                            pods[]; the PodGroup level keeps identity + aggregate.
+                          properties:
+                            cards:
+                              description: Cards is this PodGroup's total accelerator
+                                cards moved (= sum of pods[].cards).
+                              format: int64
+                              type: integer
+                            namespace:
+                              description: Namespace of this PodGroup (owner and pods
+                                share it).
+                              type: string
+                            owner:
+                              description: |-
+                                Owner is the user-facing workload owning this PodGroup (PodGroup is an
+                                internal object). Taken from the PG controller ownerReference (not walked
+                                up); empty for ownerless bare pods.
+                              properties:
+                                apiVersion:
+                                  type: string
+                                kind:
+                                  type: string
+                                name:
+                                  type: string
+                              type: object
+                            podGroupName:
+                              description: PodGroupName is the precise scheduling-dimension
+                                identity (matches scope).
+                              type: string
+                            pods:
+                              description: Pods is the per-pod relocation detail (only
+                                relocated pods appear).
+                              items:
+                                description: PodMove is one pod's planned relocation
+                                  (pure plan; DryRun/Execute identical).
+                                properties:
+                                  cards:
+                                    description: Cards is the accelerator cards (GPU/NPU)
+                                      this pod occupies.
+                                    format: int64
+                                    type: integer
+                                  fromNode:
+                                    description: FromNode is where the pod currently
+                                      runs.
+                                    type: string
+                                  name:
+                                    description: Name is the pod name (a plan-time
+                                      snapshot for random-named controllers).
+                                    type: string
+                                  toNode:
+                                    description: ToNode is the pod's PLANNED target
+                                      node (soft nomination, no reservation).
+                                    type: string
+                                type: object
+                              maxItems: 4096
+                              type: array
+                          required:
+                          - namespace
+                          - podGroupName
+                          type: object
+                        maxItems: 4096
+                        type: array
+                      summary:
+                        description: Summary is the flat, at-a-glance layer (UI lists
+                          / alerts / printers read this).
+                        properties:
+                          fragAfterPercent:
+                            format: int32
+                            maximum: 100
+                            minimum: 0
+                            type: integer
+                          fragBeforePercent:
+                            description: |-
+                              Cluster-wide fragmentation before the run and predicted after the complete
+                              plan, in percentage points (0-100). Only nodes providing the target resource
+                              participate; scope limits actions, not this cluster health metric.
+                            format: int32
+                            maximum: 100
+                            minimum: 0
+                            type: integer
+                          freedNodeCount:
+                            description: FreedNodeCount is the number of nodes the
+                              complete plan predicts it will free.
+                            format: int32
+                            type: integer
+                          movedCardCount:
+                            description: MovedCardCount is the total accelerator cards
+                              the complete plan would move.
+                            format: int64
+                            type: integer
+                          resolvedScope:
+                            description: |-
+                              ResolvedScope reports the effective action scope after selector resolution.
+                              It does not change the cluster-wide fragmentation metric's denominator.
+                            properties:
+                              nodeCount:
+                                description: |-
+                                  NodeCount is the number of in-scope nodes providing the target resource and
+                                  eligible to be selected as drain targets.
+                                format: int32
+                                type: integer
+                              podGroupCount:
+                                description: |-
+                                  PodGroupCount is the number of PodGroups selected by podGroup scope that
+                                  currently consume the target resource. Later feasibility and disruption
+                                  checks may still prevent them from moving.
+                                format: int32
+                                type: integer
+                            required:
+                            - nodeCount
+                            - podGroupCount
+                            type: object
+                        required:
+                        - fragAfterPercent
+                        - fragBeforePercent
+                        - freedNodeCount
+                        - movedCardCount
+                        type: object
+                    type: object
+                  relocations:
+                    description: |-
+                      Relocations are the durable per-Pod execution records produced by Execute:
+                      one entry per relocated Pod, consumed by the placement reconciler per the
+                      replacement matching contract (victimPodName exact match ->
+                      schedulingRequirementsHash -> homogeneous PodGroup fallback). See the
+                      design proposal §5.2.2.
+                    items:
+                      description: |-
+                        PodRelocationStatus records the immutable plan identity and the independently
+                        reconciled eviction and replacement placement state for one relocated Pod.
+                      properties:
+                        eviction:
+                          description: Eviction is the engine-owned durable victim
+                            eviction state.
+                          properties:
+                            message:
+                              description: Message contains operator-readable rejection
+                                or recovery detail.
+                              type: string
+                            phase:
+                              description: Phase is the current eviction lifecycle
+                                phase.
+                              enum:
+                              - Pending
+                              - InProgress
+                              - Accepted
+                              - IndirectlyRemoved
+                              - Rejected
+                              type: string
+                          required:
+                          - phase
+                          type: object
+                        namespace:
+                          description: Namespace of the target pod (PodGroup shares
+                            this namespace).
+                          type: string
+                        placement:
+                          description: Placement is the controller-owned replacement
+                            placement state.
+                          properties:
+                            actualNodeName:
+                              description: |-
+                                ActualNodeName is populated after the replacement is bound. Comparing it
+                                with SelectedNodeName reveals an alternative scheduler placement.
+                              type: string
+                            phase:
+                              description: Phase is the current replacement placement
+                                lifecycle phase.
+                              enum:
+                              - WaitingForReplacement
+                              - WaitingForNodeSelection
+                              - Nominated
+                              - Placed
+                              - TimedOut
+                              type: string
+                            replacementPodName:
+                              description: |-
+                                ReplacementPodName and ReplacementPodUID identify the concrete replacement
+                                Pod held by the placement gate.
+                              type: string
+                            replacementPodUID:
+                              description: |-
+                                UID is a type that holds unique ID values, including UUIDs.  Because we
+                                don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                                intent and helps make sure that UIDs and names do not get conflated.
+                              type: string
+                            selectedNodeName:
+                              description: |-
+                                SelectedNodeName is the receiver selected from the live scheduler snapshot.
+                                It is written before the placement gate is removed.
+                              type: string
+                          required:
+                          - phase
+                          type: object
+                        plannedNodeName:
+                          description: |-
+                            PlannedNodeName is the immutable plan-time target node. It is retained for
+                            audit even if a later placement reconciliation selects another receiver.
+                          type: string
+                        podGroupName:
+                          description: PodGroupName the pod belongs to.
+                          type: string
+                        replacementPodGroupName:
+                          description: |-
+                            ReplacementPodGroupName is the latest PodGroup generation that recreates
+                            this relocation's replacement Pod. It remains empty when the workload reuses
+                            the original PodGroup name. The placement controller owns this runtime field
+                            and may advance it after another full-group recreation; PodGroupName remains
+                            the immutable plan-time identity for audit.
+                          type: string
+                        schedulingRequirementsHash:
+                          description: |-
+                            SchedulingRequirementsHash is an opaque hash of normalized scheduling
+                            requirements from the victim Pod. It is populated only when the PodGroup
+                            defines SubGroup policies and is compared only for equality when matching a
+                            renamed replacement Pod. Empty means the PodGroup is treated as homogeneous.
+                          type: string
+                        victimPodName:
+                          description: |-
+                            VictimPodName is the evicted pod's name: audit + exact fast-path when the
+                            controller recreates the replacement with the same name.
+                          type: string
+                        victimPodUID:
+                          description: |-
+                            VictimPodUID identifies the exact Pod instance selected by the plan. The
+                            engine uses it as an eviction precondition and during crash recovery so a
+                            same-name replacement is never evicted by a replayed request.
+                          type: string
+                      required:
+                      - eviction
+                      - namespace
+                      - placement
+                      - plannedNodeName
+                      type: object
+                    maxItems: 4096
+                    type: array
+                  resource:
+                    description: |-
+                      Resource is the target accelerator resource (RepackRun.spec.goals[0].resource);
+                      empty when the template leaves goals unset.
+                    type: string
+                  result:
+                    description: |-
+                      Result is the Execute-only observed outcome. It is absent for DryRun and
+                      when Execute failed before any eviction was attempted.
+                    properties:
+                      fragAfterPercent:
+                        description: |-
+                          FragAfterPercent is the observed cluster-wide fragmentation after Execute.
+                          When MetricsVerified is false, it conservatively equals plan.fragBeforePercent.
+                        format: int32
+                        maximum: 100
+                        minimum: 0
+                        type: integer
+                      freedNodeCount:
+                        description: |-
+                          FreedNodeCount is the number of plan.freedNodes actually free of the target
+                          resource in the verified terminal snapshot.
+                        format: int32
+                        type: integer
+                      freedNodes:
+                        description: |-
+                          FreedNodes are the plan.freedNodes verified free of the target resource in
+                          the terminal scheduler snapshot. The list is sorted for deterministic
+                          status and lets operators compare the realized node set with plan.freedNodes.
+                        items:
+                          type: string
+                        maxItems: 2048
+                        type: array
+                      metricsVerified:
+                        description: |-
+                          MetricsVerified reports whether FragAfterPercent, FreedNodeCount, and
+                          FreedNodes came from a coherent scheduler snapshot after replacement binding.
+                        type: boolean
+                      movedCardCount:
+                        description: MovedCardCount is the accelerator-card total
+                          for accepted Pod evictions.
+                        format: int64
+                        type: integer
+                    required:
+                    - fragAfterPercent
+                    - freedNodeCount
+                    - metricsVerified
+                    - movedCardCount
+                    type: object
+                  startTime:
+                    description: StartTime is when the run first entered Running.
+                    format: date-time
+                    type: string
+                  trigger:
+                    description: |-
+                      Trigger is the source that fired (cronSchedule|onFragAbovePercent), matching
+                      the derived run's RepackTriggerLabel. Always set: a run is only created by a
+                      firing source.
+                    type: string
+                required:
+                - mode
+                - name
+                - trigger
+                type: object
+              lastSuccessfulTime:
+                description: LastSuccessfulTime is when the most recent derived run
+                  succeeded.
+                format: date-time
+                type: string
+              lastTriggerTime:
+                description: |-
+                  LastTriggerTime is when a run was last derived (unified across trigger
+                  sources, so not named lastScheduleTime).
+                format: date-time
+                type: string
+            type: object
+        required:
+        - spec
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

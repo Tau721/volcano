@@ -15,22 +15,25 @@ limitations under the License.
 */
 
 // Package api implements the fragmentation index and pure model/contracts for
-// the repack (defragmentation) engine. See docs/design/repack-design.md §6.4.
+// the repack (defragmentation) engine.
 //
 // Per accelerator resource R (e.g. nvidia.com/gpu, huawei.com/Ascend910):
 //
 //	FragmentationRate(R) = (occupied nodes - optimal occupied nodes) / providing nodes
 //	  providing nodes = nodes with Allocatable[R] > 0
 //	  occupied nodes = providing nodes with Used[R] > 0
-//	  optimal occupied nodes = theoretical minimum for R's demand (see OptimalNodes)
+//	  optimal occupied nodes = theoretical minimum for R's demand (see frag.OptimalNodes)
+//
+// The optimal-node-count math itself lives in the leaf module
+// volcano.sh/repack-controller/pkg/frag, shared with the RepackPolicy
+// controller's onFrag measurement so the two cannot drift.
 package api
 
 import (
-	"sort"
-
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
+	"volcano.sh/repack-controller/pkg/frag"
 	"volcano.sh/volcano/pkg/scheduler/api"
 )
 
@@ -40,9 +43,9 @@ type ResourceFragmentation struct {
 	ProvidingNodeCount       int64 // nodes providing this resource (in scope)
 	OccupiedNodeCount        int64 // nodes currently occupied by this resource
 	OptimalOccupiedNodeCount int64 // theoretical-optimal occupied nodes for the demand
-	// Exact is true when OptimalOccupiedNodeCount is computed exactly (powers-of-2 requests on a
-	// power-of-2, homogeneous node capacity, design §4.12.2a). When false,
-	// OptimalOccupiedNodeCount is a constraint-aware lower bound and FragmentationRate may over-estimate.
+	// Exact is true when OptimalOccupiedNodeCount is exact (power-of-two requests
+	// on a homogeneous power-of-two capacity). When false it is a volume lower
+	// bound and FragmentationRate may over-estimate.
 	Exact bool
 }
 
@@ -54,50 +57,14 @@ func (fragmentation ResourceFragmentation) FragmentationRate() float64 {
 	return float64(fragmentation.OccupiedNodeCount-fragmentation.OptimalOccupiedNodeCount) / float64(fragmentation.ProvidingNodeCount)
 }
 
-// OptimalNodes returns the minimum number of nodes (each of the given capacity)
-// needed to host all requests, plus whether the result is exact.
-//
-// Model (design §4.12.2a): a request g >= capacity is a multi-node task that
-// occupies ceil(g/capacity) whole nodes; requests < capacity are packed into
-// shared nodes. Under the product constraints C1/C2 (all requests and the node
-// capacity are powers of two) the divisible-chain property makes the volume
-// bound tight, so the closed form below is exactly the optimum.
-//
-// Validated against a brute-force optimal bin-packer: 5000 random powers-of-2
-// instances all matched (frag_validate.py / TestOptimalNodes_MatchesBruteForce).
-func OptimalNodes(resourceRequests []int64, nodeCapacity int64) (optimalNodeCount int64, exact bool) {
-	if nodeCapacity <= 0 {
-		return 0, false
-	}
-	var wholeNodeDemand, sharedNodeDemand int64
-	exact = isPowerOfTwo(nodeCapacity)
-	for _, requestedResource := range resourceRequests {
-		if requestedResource <= 0 {
-			continue
-		}
-		if !isPowerOfTwo(requestedResource) {
-			exact = false
-		}
-		if requestedResource >= nodeCapacity {
-			wholeNodeDemand += ceilDiv(requestedResource, nodeCapacity) // whole nodes for multi-node tasks
-		} else {
-			sharedNodeDemand += requestedResource // sub-node tasks share via volume packing
-		}
-	}
-	return wholeNodeDemand + ceilDiv(sharedNodeDemand, nodeCapacity), exact
-}
-
-// MeasureResourceFragmentation computes the fragmentation of a single accelerator resource
-// over the given nodes (already restricted to the run's scope by the caller).
-// Demand is taken from the tasks currently placed on the resource-providing
-// nodes. When node capacities for the resource are not homogeneous, the optimal
-// occupied-node count falls
-// back to a volume lower bound and Exact is false.
+// MeasureResourceFragmentation computes the fragmentation of an accelerator
+// resource over the given nodes. Callers pass a cluster-wide snapshot (the engine
+// passes the whole session) so it matches the RepackPolicy controller's onFrag
+// trigger. Demand comes from the tasks placed on resource-providing nodes; the
+// optimal count is exact on homogeneous capacities, else a volume lower bound.
 func MeasureResourceFragmentation(nodes []*api.NodeInfo, targetResource v1.ResourceName) ResourceFragmentation {
 	fragmentation := ResourceFragmentation{Resource: targetResource}
 
-	var nodeCapacity int64
-	homogeneous := true
 	nodeCapacities := make([]int64, 0, len(nodes))
 	resourceRequests := make([]int64, 0, 64)
 
@@ -111,11 +78,6 @@ func MeasureResourceFragmentation(nodes []*api.NodeInfo, targetResource v1.Resou
 		}
 		fragmentation.ProvidingNodeCount++
 		nodeCapacities = append(nodeCapacities, capacity)
-		if nodeCapacity == 0 {
-			nodeCapacity = capacity
-		} else if capacity != nodeCapacity {
-			homogeneous = false
-		}
 		resourceUsage := int64(0)
 		if node.Used != nil {
 			resourceUsage = Scalar(node.Used, targetResource)
@@ -135,36 +97,14 @@ func MeasureResourceFragmentation(nodes []*api.NodeInfo, targetResource v1.Resou
 		}
 	}
 
-	if fragmentation.ProvidingNodeCount == 0 || nodeCapacity == 0 {
+	if fragmentation.ProvidingNodeCount == 0 {
 		klog.V(5).InfoS("repack frag: no node provides this resource", "resource", targetResource)
 		return fragmentation
 	}
-	if homogeneous {
-		fragmentation.OptimalOccupiedNodeCount, fragmentation.Exact = OptimalNodes(resourceRequests, nodeCapacity)
-	} else {
-		// Heterogeneous pools cannot be evaluated with an arbitrary first-node
-		// capacity: that made the metric depend on map iteration order and could
-		// even produce an optimal count above the occupied count. Use the minimum
-		// number of largest real nodes whose
-		// aggregate capacity covers demand. This is a deterministic lower bound;
-		// exact bin packing remains intentionally out of the hot measurement path.
-		sort.Slice(nodeCapacities, func(i, j int) bool { return nodeCapacities[i] > nodeCapacities[j] })
-		var totalResourceDemand, coveredCapacity int64
-		for _, requestedResource := range resourceRequests {
-			totalResourceDemand += requestedResource
-		}
-		for _, capacity := range nodeCapacities {
-			if coveredCapacity >= totalResourceDemand {
-				break
-			}
-			coveredCapacity += capacity
-			fragmentation.OptimalOccupiedNodeCount++
-		}
-		fragmentation.Exact = false
-	}
+	fragmentation.OptimalOccupiedNodeCount, fragmentation.Exact = frag.ComputeOptimalNodeCount(resourceRequests, nodeCapacities)
 	// The current placement itself proves an optimum cannot require more than the
-	// current number of occupied nodes. Clamp defensive lower-bound approximations and stale cache
-	// combinations so FragmentationRate always remains in its documented [0,1] range.
+	// current number of occupied nodes. Clamp defensive lower-bound approximations
+	// so FragmentationRate always stays in its documented [0,1] range.
 	if fragmentation.OptimalOccupiedNodeCount > fragmentation.OccupiedNodeCount {
 		fragmentation.OptimalOccupiedNodeCount = fragmentation.OccupiedNodeCount
 	}
@@ -190,12 +130,3 @@ func Scalar(resource *api.Resource, resourceName v1.ResourceName) int64 {
 func Cards(resource *api.Resource, resourceName v1.ResourceName) int64 {
 	return Scalar(resource, resourceName) / 1000
 }
-
-func ceilDiv(numerator, denominator int64) int64 {
-	if denominator <= 0 {
-		return 0
-	}
-	return (numerator + denominator - 1) / denominator
-}
-
-func isPowerOfTwo(value int64) bool { return value > 0 && (value&(value-1)) == 0 }

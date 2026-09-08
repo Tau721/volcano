@@ -250,9 +250,15 @@ metadata:
 rules:
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns"]
-    verbs: ["get", "list", "watch", "update", "delete"] # delete = TTL GC
+    verbs: ["get", "list", "watch", "create", "update", "delete"] # create = RepackPolicy-derived runs; delete = TTL GC / RepackPolicy history recycling
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies/status"]
     verbs: ["get", "update", "patch"]
   - apiGroups: [""]
     resources: ["pods"]

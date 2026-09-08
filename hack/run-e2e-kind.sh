@@ -317,10 +317,13 @@ EOF
   # A short execute-cooldown keeps the Execute e2e cases independent: a gated run is
   # only delayed (not failed), so the 10m default would push later Execute cases past
   # their wait timeout. 30s is long enough to still observe the cooldown gate case.
+  # RepackPolicy's frag eval cycle is pinned to the same 30s so onFrag cases converge
+  # within the fixture timeout and stays >= the cooldown.
   helm-install-volcano "  controller_log_level: 5
   repack_enable: true
   repack_default_resource: volcano.sh/e2e-npu
   repack_execute_cooldown: 30s
+  repack_policy_frag_eval_cycle: 30s
   repack_log_level: 5"
   ;;
 *)

@@ -28,10 +28,13 @@ package repack
 
 import (
 	"context"
+	"time"
 
+	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
 
 	rc "volcano.sh/repack-controller/pkg"
+	repackpolicy "volcano.sh/repack-controller/pkg/policy"
 	"volcano.sh/volcano/pkg/controllers/framework"
 )
 
@@ -41,12 +44,23 @@ func init() {
 
 // repackController adapts the standalone repack-controller to framework.Controller.
 type repackController struct {
-	runCtrl   *rc.Controller
-	nominator *rc.Nominator
-	workers   int
+	runCtrl       *rc.Controller
+	nominator     *rc.Nominator
+	policyCtrl    *repackpolicy.Controller
+	workers       int
+	fragEvalCycle time.Duration
 }
 
 func (c *repackController) Name() string { return "repack-controller" }
+
+// AddFlags implements framework.FlagProvider so controller-manager can parse
+// --repack-policy-frag-eval-cycle before Initialize. A zero value (AddFlags not
+// called, e.g. wiring tests) falls back to policy.DefaultFragEvalCycle inside
+// policy.New.
+func (c *repackController) AddFlags(fs *pflag.FlagSet) {
+	fs.DurationVar(&c.fragEvalCycle, "repack-policy-frag-eval-cycle", repackpolicy.DefaultFragEvalCycle,
+		"interval between onFragAbovePercent trigger evaluations; keep it >= --repack-execute-cooldown")
+}
 
 // Initialize wires the lifecycle controller and the nomination reconciler onto
 // the shared informer factories (no factory Start here — that happens in Run).
@@ -66,6 +80,11 @@ func (c *repackController) Initialize(opt *framework.ControllerOption) error {
 	repackInformer := opt.VCSharedInformerFactory.Repack().V1alpha1().RepackRuns()
 	c.nominator = rc.NewNominator(opt.KubeClient, opt.VolcanoClient, podInformer, repackInformer)
 	c.nominator.SetEventRecorder(rc.NewEventRecorder(opt.KubeClient, "vc-controller-manager"))
+
+	c.policyCtrl = repackpolicy.New(opt.VolcanoClient, opt.SharedInformerFactory, opt.VCSharedInformerFactory, repackpolicy.Options{
+		Workers:       c.workers,
+		FragEvalCycle: c.fragEvalCycle,
+	})
 	return nil
 }
 
@@ -88,6 +107,11 @@ func (c *repackController) Run(stopCh <-chan struct{}) {
 	go func() {
 		if err := c.nominator.Run(ctx); err != nil {
 			klog.ErrorS(err, "Repack nominator stopped")
+		}
+	}()
+	go func() {
+		if err := c.policyCtrl.Run(ctx); err != nil {
+			klog.ErrorS(err, "RepackPolicy controller stopped")
 		}
 	}()
 	klog.InfoS("Repack controller is running ......")
