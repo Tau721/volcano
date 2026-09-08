@@ -211,6 +211,9 @@ spec:
               {{- else }}
             - --controllers=*,-sharding-controller,-repack-controller
               {{- end }}
+              {{- if and .Values.custom.repack_enable .Values.custom.repack_policy_frag_eval_cycle }}
+            - --repack-policy-frag-eval-cycle={{.Values.custom.repack_policy_frag_eval_cycle}}
+              {{- end }}
             - -v={{.Values.custom.controller_log_level}}
             - 2>&1
           imagePullPolicy: {{ .Values.basic.image_pull_policy }}

@@ -1,5 +1,6 @@
-# OPTIONAL: run the RepackRun controller + nomination reconciler as a STANDALONE
-# Deployment instead of the built-in shim inside volcano-controller-manager.
+# OPTIONAL: run the RepackRun / RepackPolicy controllers + the nomination
+# reconciler as a STANDALONE Deployment instead of the built-in shim inside
+# volcano-controller-manager.
 #
 # IMPORTANT: if you deploy this, you MUST disable the built-in copy, otherwise two
 # instances reconcile the same RepackRuns and fight. Disable it by passing
@@ -19,10 +20,19 @@ metadata:
 rules:
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns"]
-    verbs: ["get", "list", "watch", "update", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"] # create = RepackPolicy-derived runs; delete = TTL GC / RepackPolicy history recycling
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"] # onFragAbovePercent fragmentation measurement
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch"] # remove the placement gate after nomination
@@ -80,4 +90,5 @@ spec:
             - --leader-elect=true
             - --leader-elect-namespace=volcano-system
             - --repack-execute-cooldown=10m
+            - --repack-policy-frag-eval-cycle=10m # >= repack-execute-cooldown
             - -v=3

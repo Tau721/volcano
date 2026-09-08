@@ -1,7 +1,8 @@
-# Additive RBAC for the RepackRun controller + nomination reconciler when run as
-# the DEFAULT built-in inside volcano-controller-manager (pkg/controllers/repack
-# shim). It grants the controller-manager's ServiceAccount the repack-specific
-# verbs on top of its existing role. Apply alongside repack-engine.yaml.
+# Additive RBAC for the RepackRun / RepackPolicy controllers + the nomination
+# reconciler when run as the DEFAULT built-in inside volcano-controller-manager
+# (pkg/controllers/repack shim). It grants the controller-manager's ServiceAccount
+# the repack-specific verbs on top of its existing role. Apply alongside
+# repack-engine.yaml.
 #
 # (For the STANDALONE controller deployment instead, see
 # repack-controller-standalone.yaml, which carries its own SA + role.)
@@ -12,10 +13,19 @@ metadata:
 rules:
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns"]
-    verbs: ["get", "list", "watch", "update", "delete"] # delete = TTL GC
+    verbs: ["get", "list", "watch", "create", "update", "delete"] # create = RepackPolicy-derived runs; delete = TTL GC
   - apiGroups: ["repack.volcano.sh"]
     resources: ["repackruns/status"]
     verbs: ["get", "update", "patch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["list", "watch"] # onFragAbovePercent fragmentation measurement
   - apiGroups: [""]
     resources: ["pods"]
     verbs: ["get", "list", "watch", "patch"] # remove the placement gate after nomination

@@ -14,23 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package api
+package policy
 
 import (
-	"testing"
+	"time"
 
-	"volcano.sh/repack-controller/pkg/frag"
+	"github.com/robfig/cron/v3"
 )
 
-// OptimalNodes is the fragmentation packing bound — the hot inner call of every
-// MeasureResourceFragmentation. Bench a large mixed request set.
-func BenchmarkOptimalNodes(b *testing.B) {
-	reqs := make([]int64, 0, 2000)
-	for i := 0; i < 2000; i++ {
-		reqs = append(reqs, int64(1<<(i%4))) // 1,2,4,8 cards
+// nextCronFire returns the next activation of a standard 5-field cron schedule
+// strictly after the given instant.
+func nextCronFire(expr string, after time.Time) (time.Time, error) {
+	schedule, err := cron.ParseStandard(expr)
+	if err != nil {
+		return time.Time{}, err
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		frag.OptimalNodes(reqs, 8)
-	}
+	return schedule.Next(after), nil
 }

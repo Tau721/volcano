@@ -132,6 +132,7 @@ tail -n +2 ${VOLCANO_CRD_DIR}/bases/topology.volcano.sh_hypernodes.yaml > ${HELM
 tail -n +2 ${VOLCANO_CRD_DIR}/bases/shard.volcano.sh_nodeshards.yaml > ${HELM_VOLCANO_CRD_DIR}/bases/shard.volcano.sh_nodeshards.yaml
 tail -n +2 ${VOLCANO_CRD_DIR}/bases/config.volcano.sh_colocationconfigurations.yaml > ${HELM_VOLCANO_CRD_DIR}/bases/config.volcano.sh_colocationconfigurations.yaml
 tail -n +2 ${VOLCANO_CRD_DIR}/bases/repack.volcano.sh_repackruns.yaml > ${HELM_VOLCANO_CRD_DIR}/bases/repack.volcano.sh_repackruns.yaml
+tail -n +2 ${VOLCANO_CRD_DIR}/bases/repack.volcano.sh_repackpolicies.yaml > ${HELM_VOLCANO_CRD_DIR}/bases/repack.volcano.sh_repackpolicies.yaml
 
 # sync jobflow bases
 tail -n +2 ${JOBFLOW_CRD_DIR}/bases/flow.volcano.sh_jobflows.yaml > ${HELM_JOBFLOW_CRD_DIR}/bases/flow.volcano.sh_jobflows.yaml

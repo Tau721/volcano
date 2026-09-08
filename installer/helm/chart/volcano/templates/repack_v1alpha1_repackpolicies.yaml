@@ -1,3 +1,3 @@
-# RepackPolicy CRD is deferred to a later iteration; the first stage ships only
-# RepackRun. This file is intentionally emptied — delete it with `git rm` and
-# regenerate via `make manifests` (the build sandbox cannot remove files).
+{{- if .Values.custom.repack_enable }}
+{{- tpl ($.Files.Get (printf "crd/%s/repack.volcano.sh_repackpolicies.yaml" (include "crd_version" .))) . }}
+{{- end }}
