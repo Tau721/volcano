@@ -137,7 +137,7 @@ func (e *Engine) reconcile(ctx context.Context, name string) error {
 		// Execute behind AnotherRunActive. markExecuteDone is owner-checked, so
 		// DryRun runs (never holding the slot) and foreign names are untouched.
 		if e.markExecuteDone(name) {
-			e.requeueGatedRuns()
+			e.requeueGatedRuns(name)
 		}
 		return nil
 	}
@@ -152,7 +152,7 @@ func (e *Engine) reconcile(ctx context.Context, name string) error {
 		}
 		if work.Spec.Mode == repackv1alpha1.RepackModeExecute {
 			if e.markExecuteDone(work.Name) {
-				e.requeueGatedRuns()
+				e.requeueGatedRuns(work.Name)
 			}
 		}
 		result := engineframework.RunActions(e.config.Actions, &engineframework.ActionContext{
@@ -181,7 +181,7 @@ func (e *Engine) reconcile(ctx context.Context, name string) error {
 	// window between that status write and the in-memory release.
 	if work.Spec.Mode == repackv1alpha1.RepackModeExecute && stage == enginestatus.StageCleanup {
 		if e.markExecuteDone(work.Name) {
-			e.requeueGatedRuns()
+			e.requeueGatedRuns(work.Name)
 		}
 	}
 	active, lastFinish := false, time.Time{}
@@ -223,7 +223,7 @@ func (e *Engine) reconcile(ctx context.Context, name string) error {
 	defer func() {
 		if releaseExecuteSlot && !actionCtx.ExecuteSlotHeld() {
 			if e.markExecuteDone(work.Name) {
-				e.requeueGatedRuns()
+				e.requeueGatedRuns(work.Name)
 			}
 		}
 	}()

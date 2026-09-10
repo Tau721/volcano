@@ -121,7 +121,7 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 	// Placement is terminal even if API cleanup needs a retry. Do not hold the
 	// global Execute slot while only removing our own metadata and gates.
 	if e.markExecuteDone(run.Name) {
-		e.requeueGatedRuns()
+		e.requeueGatedRuns(run.Name)
 	}
 	// The terminal result is durable before cleanup. Returning an error makes the
 	// workqueue retry the idempotent cleanup without ever repeating eviction.

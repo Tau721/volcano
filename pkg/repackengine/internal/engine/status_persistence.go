@@ -51,7 +51,7 @@ func (e *Engine) fail(ctx context.Context, run *repackv1alpha1.RepackRun, genera
 	// terminal status. Return lease cleanup failures so the terminal-only
 	// reconcile path can retry without replaying an eviction.
 	if e.markExecuteDone(run.Name) {
-		e.requeueGatedRuns()
+		e.requeueGatedRuns(run.Name)
 	}
 	if err := e.cleanupPlacement(ctx, run); err != nil {
 		return fmt.Errorf("cleanup placement after failure: %w", err)

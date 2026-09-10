@@ -148,7 +148,7 @@ func NewEngine(config *rest.Config, engineConfig Config) (*Engine, error) {
 			// terminal/StageCleanup status write). Release it here so later
 			// Execute runs are not blocked by a deleted owner.
 			if e.markExecuteDone(run.Name) {
-				e.requeueGatedRuns()
+				e.requeueGatedRuns(run.Name)
 			}
 		},
 	})

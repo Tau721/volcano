@@ -93,10 +93,12 @@ func (e *Engine) persistedExecuteState(currentRunName string) (executeActive boo
 
 // requeueGatedRuns re-enqueues every non-terminal Execute run so any run that was
 // gated on the K=1 slot (reason AnotherRunActive) is re-evaluated now that the
-// slot is free. Called when an Execute releases the slot; the just-finished run is
-// terminal by then and is skipped. DryRun runs are never gated, so they are not
+// slot is free. released is the run whose release triggered this call: it must be
+// skipped, because its terminal status has not necessarily reached this cache yet,
+// so re-enqueuing it would re-gate it on the cooldown stamp its own release just
+// set and demote it back to Pending. DryRun runs are never gated, so they are not
 // re-enqueued here.
-func (e *Engine) requeueGatedRuns() {
+func (e *Engine) requeueGatedRuns(released string) {
 	runs, err := e.repackRunLister.List(labels.Everything())
 	if err != nil {
 		klog.ErrorS(err, "repack: list for gated-run requeue")
@@ -104,6 +106,9 @@ func (e *Engine) requeueGatedRuns() {
 	}
 	woken := 0
 	for _, run := range runs {
+		if run.Name == released {
+			continue
+		}
 		if run.Spec.Mode == repackv1alpha1.RepackModeExecute && !state.IsTerminal(run.Status.Phase) {
 			e.workQueue.Add(run.Name)
 			woken++

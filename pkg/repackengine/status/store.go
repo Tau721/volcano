@@ -23,9 +23,11 @@ import (
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
+	state "volcano.sh/repack-controller/pkg/state"
 
 	placementexecutor "volcano.sh/volcano/pkg/repackengine/executor/placement"
 )
@@ -39,12 +41,21 @@ func NewStore(client vcclientset.Interface) *Store {
 }
 
 // Write persists desired status against the freshest RepackRun and preserves
-// concurrent placement progress written from another informer observation.
+// concurrent placement progress written from another informer observation. A
+// terminal phase is final: a writer holding a stale pre-terminal observation must
+// not re-open the Run.
 func (s *Store) Write(ctx context.Context, name string, desired *repackv1alpha1.RepackRunStatus) error {
 	return retry.RetryOnConflict(retry.DefaultBackoff, func() error {
 		latest, err := s.client.RepackV1alpha1().RepackRuns().Get(ctx, name, metav1.GetOptions{})
 		if err != nil {
 			return err
+		}
+		if state.IsTerminal(latest.Status.Phase) && !state.IsTerminal(desired.Phase) {
+			// The write is stale, not failed: an error would consume the reconcile retry
+			// budget and can mark a finished Run Failed.
+			klog.V(4).InfoS("repack: dropped stale non-terminal status write",
+				"run", name, "stored", latest.Status.Phase, "desired", desired.Phase)
+			return nil
 		}
 		merged := desired.DeepCopy()
 		MergeRelocationProgress(merged.Relocations, latest.Status.Relocations)

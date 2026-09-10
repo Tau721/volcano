@@ -17,6 +17,7 @@ limitations under the License.
 package engine
 
 import (
+	"context"
 	"reflect"
 	"testing"
 	"time"
@@ -26,50 +27,106 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
+	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
 )
 
-// When an Execute releases the K=1 slot, requeueGatedRuns must re-enqueue every
-// non-terminal Execute run (which may have been gated with reason AnotherRunActive
-// and thus never re-queued), and must skip terminal runs and DryRun runs.
-func TestRequeueGatedRuns(t *testing.T) {
-	mk := func(name string, mode repackv1alpha1.RepackMode, phase repackv1alpha1.RepackPhase) *repackv1alpha1.RepackRun {
-		return &repackv1alpha1.RepackRun{
-			ObjectMeta: metav1.ObjectMeta{Name: name},
-			Spec:       repackv1alpha1.RepackRunSpec{Mode: mode},
-			Status:     repackv1alpha1.RepackRunStatus{Phase: phase},
-		}
+func mkRepackRun(name string, mode repackv1alpha1.RepackMode, phase repackv1alpha1.RepackPhase) *repackv1alpha1.RepackRun {
+	return &repackv1alpha1.RepackRun{
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       repackv1alpha1.RepackRunSpec{Mode: mode},
+		Status:     repackv1alpha1.RepackRunStatus{Phase: phase},
 	}
+}
 
+func newRequeueTestEngine(objs ...*repackv1alpha1.RepackRun) *Engine {
 	indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
-	objs := []*repackv1alpha1.RepackRun{
-		mk("exec-blocked", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPending), // gated → requeue
-		mk("exec-running", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackRunning), // non-terminal → requeue
-		mk("exec-done", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded),  // terminal → skip
-		mk("exec-failed", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackFailed),   // terminal → skip
-		mk("dry-pending", repackv1alpha1.RepackModeDryRun, repackv1alpha1.RepackPending),   // DryRun → skip
-	}
 	for _, o := range objs {
 		if err := indexer.Add(o); err != nil {
-			t.Fatalf("index add: %v", err)
+			panic(err)
 		}
 	}
-
-	e := &Engine{
+	return &Engine{
 		repackRunLister: repacklisters.NewRepackRunLister(indexer),
 		workQueue:       workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 	}
-	e.requeueGatedRuns()
+}
 
+func drainedKeys(e *Engine) map[string]bool {
 	got := map[string]bool{}
 	for e.workQueue.Len() > 0 {
 		item, _ := e.workQueue.Get()
 		got[item] = true
 		e.workQueue.Done(item)
 	}
+	return got
+}
+
+// When an Execute releases the K=1 slot, requeueGatedRuns must re-enqueue every
+// non-terminal Execute run (which may have been gated with reason AnotherRunActive
+// and thus never re-queued), and must skip terminal runs and DryRun runs.
+func TestRequeueGatedRuns(t *testing.T) {
+	e := newRequeueTestEngine(
+		mkRepackRun("exec-blocked", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPending), // gated → requeue
+		mkRepackRun("exec-running", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackRunning), // non-terminal → requeue
+		mkRepackRun("exec-done", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded),  // terminal → skip
+		mkRepackRun("exec-failed", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackFailed),   // terminal → skip
+		mkRepackRun("dry-pending", repackv1alpha1.RepackModeDryRun, repackv1alpha1.RepackPending),   // DryRun → skip
+	)
+	e.requeueGatedRuns("")
+
 	want := map[string]bool{"exec-blocked": true, "exec-running": true}
-	if !reflect.DeepEqual(got, want) {
+	if got := drainedKeys(e); !reflect.DeepEqual(got, want) {
 		t.Errorf("requeued = %v, want %v", got, want)
+	}
+}
+
+// The releasing run is skipped even though its own terminal status may not have
+// reached this cache yet: re-enqueuing it would re-gate it on the cooldown stamp
+// that release just set and demote the terminal status back to Pending, so a
+// zero-move Execute run would never stay terminal.
+func TestRequeueGatedRunsSkipsReleasingRun(t *testing.T) {
+	e := newRequeueTestEngine(
+		mkRepackRun("exec-released", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackRunning), // stale cache copy
+		mkRepackRun("exec-blocked", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPending),
+	)
+	e.requeueGatedRuns("exec-released")
+
+	want := map[string]bool{"exec-blocked": true}
+	if got := drainedKeys(e); !reflect.DeepEqual(got, want) {
+		t.Errorf("requeued = %v, want %v", got, want)
+	}
+}
+
+// The e2e symptom this pins: a zero-move Execute run terminalizes inside its own
+// reconcile, and its release requeues it before the terminal status has reached
+// the informer cache. The next reconcile then reads the stale pre-terminal copy,
+// re-gates it on the cooldown stamp that release just set, and demotes it back to
+// Pending — so the run never rests in a terminal phase. The store's
+// terminal-is-final rule must absorb that stale write.
+func TestReconcileDoesNotReopenTerminallySucceededRun(t *testing.T) {
+	now := time.Date(2026, 9, 9, 7, 0, 18, 0, time.UTC)
+	live := mkRepackRun("noop-execute", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded)
+	volcanoClient := vcfake.NewSimpleClientset(live)
+
+	// Informer cache lag: still the pre-terminal copy the release was read from.
+	stale := live.DeepCopy()
+	stale.Status.Phase = repackv1alpha1.RepackPending
+	e := newRequeueTestEngine(stale)
+	e.volcanoClient = volcanoClient
+	e.now = func() time.Time { return now }
+	e.config.Cooldown = 30 * time.Second
+	e.lastExecuteFinishTime = now.Add(-time.Millisecond) // stamped by the release
+
+	if err := e.reconcile(context.Background(), live.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	got, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), live.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != repackv1alpha1.RepackSucceeded {
+		t.Errorf("phase = %q, want the run to stay terminal", got.Status.Phase)
 	}
 }
 
