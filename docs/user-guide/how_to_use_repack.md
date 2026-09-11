@@ -250,7 +250,7 @@ VCJob controller 会把 Job 标签复制到其 PodGroup，Kthena 会把 ModelSer
 - 申请目标资源的 Pod 必须由 Volcano 调度、关联可识别的 PodGroup，并属于 `scope.podGroups` 允许驱逐的工作负载；
 - 任一目标资源 Pod 不可迁移，或者任一待迁移 Pod 没有可行接收节点，该候选即被淘汰。
 
-模拟过程会累计已经规划的迁移，避免多个局部可行方案组合后超过接收节点容量。它验证的是当前快照下是否存在完整迁移路径，不保证未来集群状态。模拟选出的接收节点不会触发资源预留；Execute 会重新规划，并通过 `nominatedNodeName` 提供候选节点建议，最终绑定结果仍由 Scheduler 根据实时状态决定。
+模拟过程会累计已经规划的迁移，避免多个局部可行方案组合后超过接收节点容量。它验证的是当前快照下是否存在完整迁移路径，不保证未来集群状态。模拟选出的接收节点不会触发资源预留；Execute 按计划直接采用该节点，通过 `nominatedNodeName` 提供候选节点建议，最终绑定结果仍由 Scheduler 根据实时状态决定——计划目标不可用时 Scheduler 会改选其他节点。
 
 #### 验证示例
 
@@ -382,7 +382,7 @@ Execute 在集群内串行运行，并在一次执行完成后进入冷却时间
 
 规划阶段给出的接收节点基于当时的集群快照。进入 Execute 后，资源占用和调度队列仍可能变化，因此 Repack 不会将计划节点作为强制绑定结果。
 
-原 Pod 被驱逐后，工作负载控制器创建新的 Pod。Volcano Controller Manager 内置的 Repack controller 根据持久化的 relocation 记录识别重建后的 Pod，在确认候选节点仍然可行后，将节点名写入 `pod.status.nominatedNodeName`。Volcano Scheduler 优先评估该节点，同时继续应用完整的调度规则。
+原 Pod 被驱逐后，工作负载控制器创建新的 Pod。Volcano Controller Manager 内置的 Repack controller 根据持久化的 relocation 记录识别重建后的 Pod，将 Execute 写定的计划节点写入 `pod.status.nominatedNodeName`。Volcano Scheduler 优先评估该节点，同时继续应用完整的调度规则。
 
 - 建议节点仍可用时，重建后的 Pod 优先调度到该节点，提高计划完成概率；
 - 建议节点不可用时，Scheduler 可以选择其他可行节点，避免过期计划阻塞工作负载恢复；
@@ -400,7 +400,7 @@ kubectl get repackrun <execute-run> \
   -o jsonpath='{range .status.relocations[*]}{.victimPodName}{"\tplanned="}{.plannedNodeName}{"\tselected="}{.placement.selectedNodeName}{"\tactual="}{.placement.actualNodeName}{"\tphase="}{.placement.phase}{"\n"}{end}'
 ```
 
-`plannedNodeName` 是规划阶段选择的节点，`selectedNodeName` 是重建 Pod 出现后基于实时快照选择并写入 `nominatedNodeName` 的节点，`actualNodeName` 是 Scheduler 最终绑定的节点。三者不同时不一定表示失败，最终应检查计划节点是否腾空以及结果指标是否通过验证。
+`plannedNodeName` 是规划阶段选择的节点，`selectedNodeName` 是重建 Pod 出现后按计划写入 `nominatedNodeName` 的节点（Execute 不复算可行性，正常情况下等于 `plannedNodeName`），`actualNodeName` 是 Scheduler 最终绑定的节点——计划目标不可用时 Scheduler 会回退到其他节点。三者不同时不一定表示失败，最终应检查计划节点是否腾空以及结果指标是否通过验证。
 
 ### 8. 从方案评估到结果验证形成闭环
 
@@ -867,7 +867,7 @@ kubectl describe node ascend-node-01
 三个节点字段分别表示：
 
 - `plannedNodeName`：Execute 规划阶段计算的目标节点，作为不可变计划记录；
-- `selectedNodeName`：重建 Pod 出现后，Repack 根据实时调度快照选择并写入 `nominatedNodeName` 的节点；
+- `selectedNodeName`：重建 Pod 出现后，Repack 按计划写入 `nominatedNodeName` 的节点，等于 `plannedNodeName`；
 - `actualNodeName`：Volcano Scheduler 最终绑定的节点；Volcano Controller Manager 内置的 Repack controller 观察重建 Pod 的 `spec.nodeName` 后写入该状态字段。
 
 `nominatedNodeName` 不会强制绑定或预留资源，因此 `actualNodeName` 可能与前两个字段不同。若调度到其他节点后仍达到腾空目标，Run 可以以 `ExecutionCompletedWithAlternativePlacement` 成功结束。
@@ -1182,7 +1182,7 @@ status:
         # WaitingForReplacement、WaitingForNodeSelection、Nominated、
         # Placed 或 TimedOut。
         phase: Placed
-        # 执行阶段基于实时快照选择并写入 nominatedNodeName 的节点。
+        # 执行阶段直接采用计划目标并写入 nominatedNodeName 的节点。
         selectedNodeName: ascend-node-02
         # Repack 识别到的重建 Pod。
         replacementPodName: ascend-batch-training-worker-0
@@ -1484,11 +1484,11 @@ kubectl get events -A --sort-by=.lastTimestamp
 | 字段/Phase | 含义 |
 | --- | --- |
 | `phase=WaitingForReplacement` | 正在等待工作负载控制器创建可识别的重建 Pod |
-| `phase=WaitingForNodeSelection` | 已识别重建 Pod，正在根据实时快照选择可行接收节点 |
+| `phase=WaitingForNodeSelection` | 已识别重建 Pod，等待写入计划选定的接收节点 |
 | `phase=Nominated` | 已写入建议节点 `nominatedNodeName`，等待 Scheduler 绑定 |
 | `phase=Placed` | 重建 Pod 已绑定；比较 `selectedNodeName` 和 `actualNodeName` 可判断是否调度到其他节点 |
 | `phase=TimedOut` | 重建 Pod 未在期限内完成绑定 |
-| `selectedNodeName` | Repack 在实时快照中选定并写入 `nominatedNodeName` 的节点 |
+| `selectedNodeName` | Repack 按计划选定并写入 `nominatedNodeName` 的节点，等于 `plannedNodeName`；Execute 不复算可行性 |
 | `replacementPodName` / `replacementPodUID` | Repack 识别的重建 Pod 名称和 UID |
 | `actualNodeName` | Scheduler 最终绑定的节点；可与 `selectedNodeName` 不同 |
 
