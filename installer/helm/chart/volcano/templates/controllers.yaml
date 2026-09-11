@@ -103,6 +103,26 @@ rules:
   - apiGroups: ["config.volcano.sh"]
     resources: ["colocationconfigurations"]
     verbs: ["get", "list", "watch"]
+  # The repack controllers (pkg/controllers/repack, registered as
+  # "repack-controller") run inside this pod under this ServiceAccount, so they
+  # need the repack verbs here. Not gated on custom.repack_enable: RBAC on an
+  # absent CRD is inert, and gating it only moved the requirement to a second
+  # role that had to be applied by hand on every install.
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackruns"]
+    verbs: ["get", "list", "watch", "create", "update", "delete"] # create = RepackPolicy-derived runs; delete = TTL GC / history recycling
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackruns/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["repack.volcano.sh"]
+    resources: ["repackpolicies/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["pods/status"]
+    verbs: ["patch"] # nomination reconciler writes pod.status.nominatedNodeName
 ---
 kind: ClusterRoleBinding
 apiVersion: rbac.authorization.k8s.io/v1

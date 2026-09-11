@@ -10,8 +10,7 @@ Repack ships in two pieces:
 
 - **RepackRun controller + nomination reconciler** — manages the `RepackRun`
   lifecycle (admission, the Execute K=1 gate + cooldown, phase/conditions, TTL GC)
-  and steers replacement pods. Runs **by default inside volcano-controller-manager**;
-  can also run standalone.
+  and steers replacement pods. Runs **inside volcano-controller-manager**.
 - **volcano-repack-engine** — a standalone Deployment that reuses the scheduler
   cache + the same `scheduler-conf`, plans the defrag, and (Execute) evicts.
 
@@ -24,32 +23,21 @@ make manifests   # → config/crd/.../repack.volcano.sh_repackruns.yaml
 kubectl apply -f config/crd/<...>/repack.volcano.sh_repackruns.yaml
 ```
 
-## 2. Choose a controller deployment mode
+## 2. Install the controller
 
-### Default — built-in (recommended)
-
-The controller is compiled into volcano-controller-manager and enabled by the
-default `--controllers=*`. Just grant the extra RBAC:
-
-```bash
-kubectl apply -f installer/repack/repack-controller-rbac.yaml
-```
-
-Do **not** deploy `repack-controller-standalone.yaml` in this mode.
-
-### Standalone (optional)
-
-Run the controller as its own Deployment and **disable the built-in copy** so the
-two don't both reconcile the same objects:
+The controller is compiled into volcano-controller-manager and registered as
+`repack-controller`. Its repack verbs are part of the controller-manager's own
+ClusterRole, so there is nothing extra to apply. It is **disabled by default** —
+the default list is `--controllers=*,-sharding-controller,-repack-controller` —
+so enable it explicitly:
 
 ```bash
-# tell volcano-controller-manager to skip the built-in repack controller:
-#   --controllers=*,-repack-controller
-kubectl apply -f installer/repack/repack-controller-standalone.yaml
+# `--controllers` is an all-or-nothing override: `+repack-controller` on its own
+# would switch off every other default controller, so keep the `*` term.
+#   --controllers=*,-sharding-controller,+repack-controller
 ```
 
-Do **not** apply `repack-controller-rbac.yaml` in this mode (the standalone file
-carries its own ServiceAccount + role).
+The helm chart sets that flag for you when `repack_enable: true`.
 
 ## 3. Install the engine
 
@@ -93,9 +81,7 @@ does not depend on `binpack`.
 ## Notes
 
 - Namespace is `volcano-system` throughout; adjust if your install differs.
-- Images: `make vc-repack-engine-image` and `make vc-repack-controller-image`
-  (Dockerfiles under `installer/dockerfile/repack-engine` /
-  `installer/dockerfile/repack-controller`; binaries via `make vc-repack-engine`
-  / `make vc-repack-controller`). The standalone controller builds from its own
-  module under `staging/src/volcano.sh/repack-controller`.
+- Images: `make vc-repack-engine-image` (Dockerfile under
+  `installer/dockerfile/repack-engine`; binary via `make vc-repack-engine`). The
+  controller needs no image of its own — it ships inside volcano-controller-manager.
 - Helm chart integration (templating these under `installer/helm/...`): TODO.
