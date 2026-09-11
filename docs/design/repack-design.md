@@ -300,18 +300,22 @@ Engine 的 `reconcile` 是控制器技术入口，负责对象读取、K=1 gate 
 
 ### 7.2 Session 扩展点
 
-| 回调 | 聚合方式 | 用途 |
-|---|---|---|
-| `MovableFn` | AND | 任一 Plugin 可否决 Pod 移动 |
-| `DomainFn` | Union | 贡献 Node、未来 HyperNode 等 FreeableUnit |
-| `CandidateFilterFn` | 规范化顺序短路 | 评分前硬过滤预算等条件 |
-| `PlanScoreFn` | 逐维归一化加权 | 候选软排序 |
-| `VictimOrderFn` | 字典序比较器链 | 调度模拟中的 Pod 顺序 |
-| `ReceiverPoolFn` | 链式交集裁剪 | 构造 receiver universe |
-| `ReceiverPreferenceFn` | 分阶段字典序 | 接收节点偏好排序 |
-| `ConstraintFn` | AND | 完整计划收益和最终硬约束 |
+| 回调 | 聚合方式 | 用途 | 配置顺序敏感 |
+|---|---|---|---|
+| `MovableFn` | AND | 任一 Plugin 可否决 Pod 移动 | 否 |
+| `DomainFn` | Union | 贡献 Node、未来 HyperNode 等 FreeableUnit | 否 |
+| `CandidateFilterFn` | 首个否决短路 | 评分前硬过滤预算等条件 | reason 是，结果否 |
+| `PlanScoreFn` | 逐维归一化加权 | 候选软排序 | 否（仅诊断项顺序） |
+| `VictimOrderFn` | 字典序比较器链 | 调度模拟中的 Pod 顺序 | 是 |
+| `ReceiverPoolFn` | 链式交集裁剪 | 构造 receiver universe | 否 |
+| `ReceiverPreferenceFn` | 分阶段字典序 | 接收节点偏好排序 | 同 phase 内是 |
+| `ConstraintFn` | AND | 完整计划收益和最终硬约束 | reason 是，结果否 |
 
-Plugin 配置顺序不表达策略优先级。Framework 复制配置并按插件名规范化后打开 Session，确保 YAML 重排不改变结果。
+Plugin 配置顺序即优先级。`OpenSession` 按配置顺序逐个打开 Plugin，先注册的回调在链式维度上优先；AND / Union / 加权求和 / 交集这四个维度与顺序无关。链式维度的"首个非零比较器获胜"因此是显式语义：想让某条策略压过另一条，就把它写在前面。代价是重排配置会静默改变规划结果，且命令行 `--repack-plugins` 的顺序优先于文件。
+
+注意 `ReceiverPreferenceFn` 的顺序敏感仅限**同一 phase 内**：phase 先参与排序，跨 phase 的相对次序由 phase 常量固定，与配置顺序无关。当前各 phase 至多一个注册者，因此 receiver 偏好实际不受配置顺序影响。
+
+`ConstraintFn` 另有一层：内建约束（`minNodesFreed`、碎片率改善）在 Plugin 循环之前注册，因此 `rejectionReason` 永远优先取内建约束的原因，与配置顺序无关。
 
 Plugin 回调可以保持简洁，但策略语义必须由对应 Plugin 拥有。`api` 只提供不可变候选视图和迁移 Pod 数、目标资源量、受影响 PodGroup 等客观摘要，供多个 Plugin 共享且避免重复扫描；如何解释这些事实属于 Plugin，例如“突破 `minAvailable` 后按整个 PodGroup 资源量计算损失”只由 `gangdisruption` 定义。Planner 只维护搜索状态和不可关闭的正确性边界，不承载 Scope、Gang 或装箱偏好。
 
@@ -325,9 +329,10 @@ Plugin 回调可以保持简洁，但策略语义必须由对应 Plugin 拥有�
 | `nodeconsolidation` | 提供部分占用 Node Unit | 当前无 Domain，Action 配置校验失败 |
 | `workloaddisruption` | 工作负载数、迁移资源、Pod 数评分 | 关闭通用中断偏好 |
 | `gangdisruption` | Gang breach、受损资源和未来 receiver Gang 成本 | 关闭 Gang 偏好 |
-| `binpack` | 大 Pod 优先、稳定节点优先和 best-fit | 关闭装箱质量策略 |
+| `victimorder` | victim 模拟顺序：候选节点数升序，同数按目标资源降序 | 失去候选数与 FFD 两个键，顺序退回框架的 UID 兜底 |
+| `binpack` | 稳定节点优先和 best-fit | 关闭 receiver 侧装箱质量策略 |
 
-空/满节点裁剪、接收总容量预检和完整 Scheduler 校验是 Planner 不可关闭的正确性边界。
+空/满节点裁剪、接收总容量预检、victim 顺序的 UID 兜底全序和完整 Scheduler 校验是 Planner 不可关闭的正确性边界。
 
 `pdbconstraint` 通过可选的 `PodDisruptionBudgetReader` 读取 Scheduler SharedInformerFactory 维护的 PDB，不创建第二套 informer。Snapshot 构造时缓存已有 informer 的 lister，Plugin 在 Session 打开时只读取一次。仅当 `ObservedGeneration == Generation`、`ExpectedPods > 0`、`DesiredHealthy >= ExpectedPods` 且 Controller 未报告 `DisruptionAllowed=False/SyncFailed` 时，才将 PDB 识别为确定性零中断。`DisruptionsAllowed == 0` 不是规划过滤条件；这类动态额度不足继续由 Eviction retry 处理。
 
@@ -353,10 +358,19 @@ plugins:
     arguments:
       gangBreachesWeight: 8
       damagedResourceWeight: 6
+  - name: victimorder
   - name: binpack
 ```
 
 权重必须为非负整数，`0` 关闭对应评分项。未知字段、未知参数、小数和负数在启动阶段失败。命令行显式指定的 actions/plugins 优先于配置文件。
+
+`victimorder` 的四个布尔参数默认均为 `true`：`nodeAffinity`、`taints`、`cordon` 选择计入候选数的静态节点侧因素，`resourceRequests` 开关目标资源降序键。三个节点侧因素全关时只剩资源键；`resourceRequests` 关闭时资源键弃权，平局让给后续插件与框架 UID 兜底。候选数定义为「Session 内除 victim 自身所在节点外，允许该 Pod 调度的节点数」，复用调度器同源的 `nodeaffinity.GetRequiredNodeAffinity(...).Match(...)` 与 `corev1.FindMatchingUntoleratedTaint`，因此与真实 Filter 结果一致，且不产生任何 predicate 求值开销（不检查剩余资源，故是真实候选数的下界）。Pod 之间亲和/反亲和、拓扑分布、hostPorts 不在范围内。节点全集含空节点与满节点（它们被 Node Unit 的裁剪排除在两侧之外），这一项对所有 victim 是均匀噪声，但确实使「下界」这一说法在本插件内部不再严格成立；把 `drain.eligibleReceiverNodes` 提升为 receiver 全集是后续工作。
+
+方向性是不对称的，这是本插件可安全启用的原因：候选数低估只会让某个 Pod 被排得更靠前（次优，无损）；高估则可能让一个本可行的 unit 被判为不可行，并被 `stuckUnits` 在整个 pass 内缓存为永久卡住。因此宁可少算。
+
+victim 顺序的两个键——候选数升序与目标资源降序——同属这一个比较器，因此不涉及任何插件间优先级，配置顺序重排不会改变模拟顺序。候选数键只在两侧都已知时给出意见，否则让位给目标资源键。
+
+框架侧另有一条不可关闭的保证：victim 由遍历 map 收集而来（`VictimsOf` 遍历 `NodeInfo.Tasks`），若链上所有比较器都弃权，`sort.SliceStable` 会保留那次 map 迭代恰好给出的顺序，使同样的集群状态产生不可复现的计划。因此 `OrderVictims` 在链尾追加一个 task UID 兜底键，任何插件组合下 victim 顺序都是全序。这也意味着移除 `victimorder` 不会让顺序变得随机，只是失去策略键。
 
 ## 8. Lazy Drain Planner 详细设计
 
@@ -444,11 +458,12 @@ Receiver 首先满足基础边界：
 - 未被前序提交标记为 drained 或不可再接收；
 - 通过 ReceiverPool Plugin 的链式裁剪。
 
-ReceiverPreference 使用固定的三阶段字典序，配置顺序不影响阶段：
+ReceiverPreference 使用固定的四阶段字典序，阶段次序由 `ReceiverPreferencePhase` 常量固定，与配置顺序无关；同一阶段内的多个注册者才按配置顺序排列：
 
 1. **Stability**：优先填充确定会继续占用的节点，避免破坏未来可腾空候选；
-2. **Disruption**：优先使用未来腾空会造成更高 Gang 成本的节点，把低成本节点留给后续整理；
-3. **Packing**：按 best-fit 选择迁入后余量更小的节点。
+2. **Topology**：保持 HyperNode block 的放置意图，只能输给 Stability（后者偏好牺牲性的、不可再腾空的 receiver），不会输给 Disruption 或 Packing；
+3. **Disruption**：优先使用未来腾空会造成更高 Gang 成本的节点，把低成本节点留给后续整理；
+4. **Packing**：按 best-fit 选择迁入后余量更小的节点。
 
 Preference 对每个节点、每个 Plugin 只计算一次，之后使用缓存值稳定排序，避免比较器产生 `O(R log R)` 次昂贵聚合。
 
@@ -692,8 +707,8 @@ Repack 的 RBAC 遵循最小权限：Engine 只获取规划所需资源、更新
 ### 14.1 单元与契约测试
 
 - API：碎片率、计划聚合、Gang 受损模型和字段转换；
-- Framework：Plugin 顺序无关、AND/Union/短路、Capability、整数权重和评分范围；
-- Plugin：Scope、确定性零中断 PDB、预算、Node Domain、中断评分、Gang、binpack；
+- Framework：配置顺序即优先级、AND/Union/短路、Capability、整数权重和评分范围；
+- Plugin：Scope、确定性零中断 PDB、预算、Node Domain、中断评分、Gang、静态候选数、binpack；
 - Planner：节点预分类、容量预检、候选顺序、完整模拟、增量状态和规模 benchmark；
 - Engine：gate、status、Eviction journal、规划与驱逐的 context cancellation、worker 优雅退出和终态收益；
 - Controller：replacement 匹配、PodGroup 代际、gate、nomination、Run 级执行截止时间和重启恢复。

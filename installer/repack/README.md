@@ -63,9 +63,15 @@ The configuration is parsed strictly: unknown or misspelled top-level fields,
 plugin fields, and plugin arguments stop the engine instead of silently using
 defaults.
 
-The plugin list is order-independent. `workloadscope`, `pdbconstraint`,
+The plugin list is ordered, and that order is the plugin priority: a plugin
+listed earlier wins over a later one on the dimensions that are consumed as a
+chain (victim order, the receiver preferences within a single phase, and the
+reason reported for the first failing candidate filter or plan constraint). The
+AND-, union-, weighted-sum- and intersection-consuming dimensions are unaffected.
+`workloadscope`, `pdbconstraint`,
 `repackbudget`, `nodeconsolidation`, `networktopologyaware`,
-`workloaddisruption`, `gangdisruption`, and `binpack` are optional; omitting one
+`workloaddisruption`, `gangdisruption`, `victimorder`, and `binpack` are
+optional; omitting one
 only disables its policy. `pdbconstraint` excludes accelerator Pods protected by
 a fresh, deterministic zero-disruption PDB during planning; temporary allowance
 exhaustion is still handled by the Eviction API and the existing retry loop.
@@ -77,6 +83,28 @@ at least one plugin that provides the `domain` capability
 accelerator nodes and fully occupied accelerator nodes are always excluded from
 both sides of node-level relocation before scoring; this correctness boundary
 does not depend on `binpack`.
+
+`victimorder` owns the order in which a drained node's victims are simulated. It
+places the Pod admitting the fewest other nodes first: a Pod pinned by
+`nodeSelector` or required `nodeAffinity` (including `NotIn`/`DoesNotExist`
+terms) — or blocked by node taints or cordon — is simulated while receiver
+capacity is still intact, and never silently starves its own unit. Ties on that
+count fall back to the larger target-resource request, the item-ordering half of
+first-fit decreasing. Its four boolean arguments each default to `true`:
+`nodeAffinity`, `taints`, and `cordon` select which static node-side factors are
+counted, and `resourceRequests` enables the size tie-break. Setting all three node
+factors to `false` drops the count key; setting `resourceRequests` to `false` makes
+equal counts abstain, leaving them to the framework's task-UID tie-break. Only
+static Pod-to-node constraints are considered — inter-Pod affinity, topology
+spread, and hostPorts are not, so the count is a lower bound on the true one.
+Under-counting a Pod's candidate set only simulates it earlier than strictly
+necessary; over-counting could mark a feasible unit permanently infeasible.
+
+`victimorder` is the only plugin that orders victims, so no ordering between
+plugins is involved. Removing it does not make the order arbitrary — the
+framework closes every victim sort with a deterministic tie-break on task UID —
+but it does drop first-fit decreasing along with the receiver-count key, since
+both belong to this plugin.
 
 ## Notes
 
