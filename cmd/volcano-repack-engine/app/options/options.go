@@ -54,8 +54,8 @@ type ServerOption struct {
 	RepackConf   string
 	ResyncPeriod time.Duration
 
-	// Actions override the ordered action pipeline. Plugins select an
-	// order-independent capability set.
+	// Actions override the ordered action pipeline. Plugins select the
+	// capability set, in priority order.
 	// MinNodesFreed is the benefit gate. DefaultResource is the target when a
 	// RepackRun's spec.goals is empty.
 	Actions          []string
@@ -99,7 +99,7 @@ func (s *ServerOption) AddFlags(fs *pflag.FlagSet) {
 
 	fs.StringSliceVar(&s.Actions, "repack-actions", nil, "Ordered action pipeline override (comma-separated; default: repack)")
 	fs.StringSliceVar(&s.Plugins, "repack-plugins", nil,
-		"Repack capability plugin set; input order does not affect behavior (default: workloadscope,pdbconstraint,repackbudget,nodeconsolidation,networktopologyaware,workloaddisruption,gangdisruption,binpack)")
+		"Repack capability plugin set, in priority order (default: workloadscope,pdbconstraint,repackbudget,nodeconsolidation,networktopologyaware,workloaddisruption,gangdisruption,victimorder,binpack)")
 	fs.IntVar(&s.MinNodesFreed, "repack-min-nodes-freed", 0, "Benefit gate: minimum whole nodes a plan must free (0 = engine default 1)")
 	fs.StringVar(&s.DefaultResource, "repack-default-resource", "", "Target resource when a RepackRun's spec.goals is empty (e.g. nvidia.com/gpu)")
 	fs.DurationVar(&s.ExecutionTimeout, "repack-execution-timeout", defaultExecutionTimeout, "Maximum time from the first eviction batch until eviction, replacement placement, and result verification complete")

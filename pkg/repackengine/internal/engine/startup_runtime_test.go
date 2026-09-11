@@ -58,7 +58,7 @@ func TestNewEngineAppliesDefaults(t *testing.T) {
 	if len(e.config.Plugins) == 0 {
 		t.Error("default Plugins should be non-empty")
 	}
-	wantPlugins := []string{"workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "binpack"}
+	wantPlugins := []string{"workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "victimorder", "binpack"}
 	if got := configuredPluginNames(e.config.Plugins); !reflect.DeepEqual(got, wantPlugins) {
 		t.Errorf("default Plugins=%v, want %v", got, wantPlugins)
 	}

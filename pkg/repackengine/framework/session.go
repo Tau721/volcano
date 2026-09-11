@@ -18,7 +18,6 @@ package framework
 
 import (
 	"context"
-	"sort"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/sets"
@@ -91,10 +90,9 @@ type Session struct {
 }
 
 // OpenSession builds a Session and runs each configured plugin's OnSessionOpen
-// in canonical name order. Plugin configuration is a set: reordering the YAML
-// list cannot change callback composition or planning behavior. Unknown plugin
-// names are ignored; the engine validates them before opening a production
-// session.
+// in the order given; that order is the priority for chain-consumed callbacks.
+// Unknown plugin names are ignored; the engine validates them before opening a
+// production session.
 func OpenSession(configuration SessionConfig, pluginOptions []PluginOption) *Session {
 	if configuration.Context == nil {
 		configuration.Context = context.Background()
@@ -105,11 +103,7 @@ func OpenSession(configuration SessionConfig, pluginOptions []PluginOption) *Ses
 		pinnedTasks:   configuration.PinnedTasks,
 	}
 	ssn.registerBuiltinConstraints()
-	canonicalOptions := append([]PluginOption(nil), pluginOptions...)
-	sort.SliceStable(canonicalOptions, func(i, j int) bool {
-		return canonicalOptions[i].Name < canonicalOptions[j].Name
-	})
-	for _, option := range canonicalOptions {
+	for _, option := range pluginOptions {
 		p, ok := GetPlugin(option.Name, option.Arguments)
 		if !ok {
 			continue

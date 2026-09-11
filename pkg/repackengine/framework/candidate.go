@@ -79,8 +79,9 @@ func (s *Session) AddVictimOrderFn(name string, fn VictimOrderFn) {
 	}
 }
 
-// OrderVictims applies configured lexicographic comparators and preserves the
-// original order when every plugin abstains.
+// OrderVictims applies configured lexicographic comparators, closing the chain
+// with a task-UID tie-break: victims come from a map, so a pair every plugin
+// abstains on would otherwise keep a random iteration order and not replay.
 func (s *Session) OrderVictims(victims []*schedapi.TaskInfo) []*schedapi.TaskInfo {
 	ordered := append([]*schedapi.TaskInfo(nil), victims...)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -89,7 +90,7 @@ func (s *Session) OrderVictims(victims []*schedapi.TaskInfo) []*schedapi.TaskInf
 				return comparison < 0
 			}
 		}
-		return false
+		return ordered[i].UID < ordered[j].UID
 	})
 	return ordered
 }

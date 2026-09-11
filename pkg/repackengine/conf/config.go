@@ -89,7 +89,7 @@ func ParseActionNames(actions string) []string {
 }
 
 func DefaultPluginOptions() []framework.PluginOption {
-	return framework.PluginOptions("workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "binpack")
+	return framework.PluginOptions("workloadscope", "pdbconstraint", "repackbudget", "nodeconsolidation", "networktopologyaware", "workloaddisruption", "gangdisruption", "victimorder", "binpack")
 }
 
 func PluginOptions(names []string) []framework.PluginOption {

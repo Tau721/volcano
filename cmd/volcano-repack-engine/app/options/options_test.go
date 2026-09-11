@@ -67,7 +67,7 @@ func TestRepackPluginsHelpListsTheDefaultSet(t *testing.T) {
 	flags := pflag.NewFlagSet("test", pflag.ContinueOnError)
 	option.AddFlags(flags)
 	usage := flags.Lookup("repack-plugins").Usage
-	if !strings.Contains(usage, "workloadscope,pdbconstraint,repackbudget,nodeconsolidation,networktopologyaware,workloaddisruption,gangdisruption,binpack") {
+	if !strings.Contains(usage, "workloadscope,pdbconstraint,repackbudget,nodeconsolidation,networktopologyaware,workloaddisruption,gangdisruption,victimorder,binpack") {
 		t.Fatalf("repack-plugins usage=%q, want complete default plugin set", usage)
 	}
 }

@@ -56,16 +56,7 @@ func binpackNode(name string, used int64) *schedapi.NodeInfo {
 	}
 }
 
-func binpackTask(name string, requested int64) *schedapi.TaskInfo {
-	return &schedapi.TaskInfo{
-		Name: name,
-		InitResreq: &schedapi.Resource{
-			ScalarResources: map[v1.ResourceName]float64{testGPU: float64(requested)},
-		},
-	}
-}
-
-func TestBinpackPluginOrdersVictimsAndComposesReceiverPhases(t *testing.T) {
+func TestBinpackPluginComposesReceiverPhases(t *testing.T) {
 	ssn := framework.OpenSession(framework.SessionConfig{
 		Snapshot: binpackSnapshot{}, Resource: testGPU,
 	}, framework.PluginOptions(Name))
@@ -74,14 +65,6 @@ func TestBinpackPluginOrdersVictimsAndComposesReceiverPhases(t *testing.T) {
 	pool := ssn.ReceiverPool([]*schedapi.NodeInfo{binpackNode("empty", 0), binpackNode("used", 2)})
 	if len(pool) != 2 {
 		t.Fatalf("receiver pool size=%d, want binpack not to own base receiver filtering", len(pool))
-	}
-
-	victims := ssn.OrderVictims([]*schedapi.TaskInfo{
-		binpackTask("small", 1), binpackTask("large", 4), binpackTask("medium", 2),
-	})
-	if victims[0].Name != "large" || victims[1].Name != "medium" || victims[2].Name != "small" {
-		t.Fatalf("victim order=[%s %s %s], want [large medium small]",
-			victims[0].Name, victims[1].Name, victims[2].Name)
 	}
 
 	receivers := []*framework.ReceiverCandidate{

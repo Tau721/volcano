@@ -70,6 +70,20 @@ func (a Arguments) NonNegativeInt(key string, defaultValue int64) (int64, error)
 	return parsed, nil
 }
 
+// Bool returns a boolean argument or the default when omitted. Non-boolean
+// values are rejected rather than coerced, so a YAML typo cannot flip a feature.
+func (a Arguments) Bool(key string, defaultValue bool) (bool, error) {
+	value, ok := a[key]
+	if !ok {
+		return defaultValue, nil
+	}
+	parsed, ok := value.(bool)
+	if !ok {
+		return false, fmt.Errorf("argument %q must be a boolean, got %T", key, value)
+	}
+	return parsed, nil
+}
+
 // ValidateKeys rejects misspelled or unsupported arguments deterministically.
 func (a Arguments) ValidateKeys(allowed ...string) error {
 	allowedSet := make(map[string]bool, len(allowed))
@@ -89,16 +103,16 @@ func (a Arguments) ValidateKeys(allowed ...string) error {
 	return fmt.Errorf("unsupported plugin arguments: %v", unknown)
 }
 
-// PluginOption selects one plugin and supplies its arguments. Plugin options
-// are order-independent; OpenSession canonicalizes them by name before plugins
-// register callbacks.
+// PluginOption selects one plugin and supplies its arguments. Order is
+// significant: an earlier plugin ranks higher in chain-consumed callbacks.
 type PluginOption struct {
 	Name      string    `yaml:"name"`
 	Arguments Arguments `yaml:"arguments,omitempty"`
 }
 
-// PluginOptions builds argument-free options, primarily for command-line
-// overrides and tests. Rich YAML configuration can populate Arguments directly.
+// PluginOptions builds argument-free options in order, primarily for
+// command-line overrides and tests. Rich YAML configuration populates Arguments
+// directly.
 func PluginOptions(names ...string) []PluginOption {
 	options := make([]PluginOption, 0, len(names))
 	for _, name := range names {

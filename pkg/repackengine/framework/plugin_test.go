@@ -56,8 +56,8 @@ func TestOpenSessionPassesPluginArguments(t *testing.T) {
 	}
 }
 
-func TestOpenSessionCanonicalizesPluginOrder(t *testing.T) {
-	const first, second = "test-order-a", "test-order-z"
+func TestOpenSessionPreservesConfiguredPluginOrder(t *testing.T) {
+	const first, second = "test-order-z", "test-order-a"
 	for _, name := range []string{first, second} {
 		pluginName := name
 		RegisterPlugin(pluginName, PluginRegistration{
@@ -66,7 +66,7 @@ func TestOpenSessionCanonicalizesPluginOrder(t *testing.T) {
 		t.Cleanup(func() { delete(pluginRegistry, pluginName) })
 	}
 
-	configured := []PluginOption{{Name: second}, {Name: first}}
+	configured := []PluginOption{{Name: first}, {Name: second}}
 	ssn := OpenSession(SessionConfig{}, configured)
 	defer CloseSession(ssn)
 
@@ -75,9 +75,9 @@ func TestOpenSessionCanonicalizesPluginOrder(t *testing.T) {
 		got = append(got, plugin.Name())
 	}
 	if want := []string{first, second}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("opened plugins=%v, want canonical order %v", got, want)
+		t.Fatalf("opened plugins=%v, want configured order %v", got, want)
 	}
-	if configured[0].Name != second || configured[1].Name != first {
+	if configured[0].Name != first || configured[1].Name != second {
 		t.Fatalf("OpenSession mutated caller configuration: %+v", configured)
 	}
 }
@@ -105,5 +105,26 @@ func TestNonNegativeInt(t *testing.T) {
 	}
 	if err := (Arguments{"movedPodWeight": 1}).ValidateKeys("movedPodsWeight"); err == nil {
 		t.Fatal("unknown/misspelled argument should be rejected")
+	}
+}
+
+func TestBool(t *testing.T) {
+	arguments := Arguments{"on": true, "off": false}
+	for key, want := range map[string]bool{"on": true, "off": false} {
+		if got, err := arguments.Bool(key, !want); err != nil || got != want {
+			t.Errorf("%s=%v err=%v, want %v", key, got, err, want)
+		}
+	}
+	if got, err := arguments.Bool("omitted", true); err != nil || !got {
+		t.Fatalf("omitted=%v err=%v, want default true", got, err)
+	}
+	for name, value := range map[string]interface{}{
+		"string": "true",
+		"int":    1,
+		"nil":    nil,
+	} {
+		if _, err := (Arguments{"enabled": value}).Bool("enabled", false); err == nil {
+			t.Errorf("%s value %v should be rejected", name, value)
+		}
 	}
 }
