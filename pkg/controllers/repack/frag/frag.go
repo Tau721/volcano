@@ -15,10 +15,9 @@ limitations under the License.
 */
 
 // Package frag is the pure fragmentation model shared by the repack engine and
-// the RepackPolicy controller. It lives in this leaf module (which must not
-// import volcano.sh/volcano) so both consumers — the engine's
-// MeasureResourceFragmentation and the controller's cluster-wide onFrag
-// measurement — call one copy and cannot drift.
+// the RepackPolicy controller. It depends only on the standard library so both
+// consumers — the engine's MeasureResourceFragmentation and the controller's
+// cluster-wide onFrag measurement — call one copy and cannot drift.
 package frag
 
 import "sort"

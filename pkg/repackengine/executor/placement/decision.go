@@ -24,7 +24,7 @@ import (
 	"time"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
 	engineapi "volcano.sh/volcano/pkg/repackengine/api"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"

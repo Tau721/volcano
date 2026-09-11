@@ -22,7 +22,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 )
 

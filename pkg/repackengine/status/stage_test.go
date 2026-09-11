@@ -22,7 +22,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 )
 
 func TestResolveStageUsesOneDurableWorkflowClassification(t *testing.T) {

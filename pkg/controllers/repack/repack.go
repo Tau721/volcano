@@ -14,16 +14,6 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package repack registers the RepackRun lifecycle controller into the volcano
-// controller-manager. The actual reconcile logic lives in the independent,
-// framework-light module volcano.sh/repack-controller (depends only on the CRD
-// types / generated client); this file is a thin framework.Controller adapter
-// that builds it from the shared ControllerOption and runs it alongside the
-// other controllers. Keeping the logic in a leaf module preserves "buildable on
-// its own", while this shim gives the default "runs inside volcano-controller-
-// manager" behaviour when Repack is explicitly enabled (registered like
-// job/podgroup/queue). It is disabled by default because its CRD and RBAC are
-// optional installation components.
 package repack
 
 import (
@@ -33,32 +23,35 @@ import (
 	"github.com/spf13/pflag"
 	"k8s.io/klog/v2"
 
-	rc "volcano.sh/repack-controller/pkg"
-	repackpolicy "volcano.sh/repack-controller/pkg/policy"
 	"volcano.sh/volcano/pkg/controllers/framework"
+	"volcano.sh/volcano/pkg/controllers/repack/policy"
 )
 
 func init() {
-	framework.RegisterController(&repackController{})
+	framework.RegisterController(&frameworkController{})
 }
 
-// repackController adapts the standalone repack-controller to framework.Controller.
-type repackController struct {
-	runCtrl       *rc.Controller
-	nominator     *rc.Nominator
-	policyCtrl    *repackpolicy.Controller
+// frameworkController runs this package's controllers inside
+// volcano-controller-manager: it builds them from the shared ControllerOption and
+// launches them in the background, registered like job/podgroup/queue as
+// "repack-controller". It is disabled by default because the Repack CRD and RBAC
+// are optional installation components.
+type frameworkController struct {
+	runCtrl       *Controller
+	nominator     *Nominator
+	policyCtrl    *policy.Controller
 	workers       int
 	fragEvalCycle time.Duration
 }
 
-func (c *repackController) Name() string { return "repack-controller" }
+func (c *frameworkController) Name() string { return "repack-controller" }
 
 // AddFlags implements framework.FlagProvider so controller-manager can parse
 // --repack-policy-frag-eval-cycle before Initialize. A zero value (AddFlags not
 // called, e.g. wiring tests) falls back to policy.DefaultFragEvalCycle inside
 // policy.New.
-func (c *repackController) AddFlags(fs *pflag.FlagSet) {
-	fs.DurationVar(&c.fragEvalCycle, "repack-policy-frag-eval-cycle", repackpolicy.DefaultFragEvalCycle,
+func (c *frameworkController) AddFlags(fs *pflag.FlagSet) {
+	fs.DurationVar(&c.fragEvalCycle, "repack-policy-frag-eval-cycle", policy.DefaultFragEvalCycle,
 		"interval between onFragAbovePercent trigger evaluations; keep it >= --repack-execute-cooldown")
 }
 
@@ -69,30 +62,30 @@ func (c *repackController) AddFlags(fs *pflag.FlagSet) {
 // Execute run that is still the engine's cooldown anchor). Left unset here, it
 // defaults to state.DefaultExecuteCooldown, which matches the engine's flag
 // default; override the engine flag and this stays safe as long as it is >= it.
-func (c *repackController) Initialize(opt *framework.ControllerOption) error {
+func (c *frameworkController) Initialize(opt *framework.ControllerOption) error {
 	c.workers = int(opt.WorkerNum)
 
-	c.runCtrl = rc.New(opt.VolcanoClient, opt.VCSharedInformerFactory, rc.Options{
+	c.runCtrl = New(opt.VolcanoClient, opt.VCSharedInformerFactory, Options{
 		Workers: c.workers,
 	})
 
 	podInformer := opt.SharedInformerFactory.Core().V1().Pods()
 	repackInformer := opt.VCSharedInformerFactory.Repack().V1alpha1().RepackRuns()
-	c.nominator = rc.NewNominator(opt.KubeClient, opt.VolcanoClient, podInformer, repackInformer)
-	c.nominator.SetEventRecorder(rc.NewEventRecorder(opt.KubeClient, "vc-controller-manager"))
+	c.nominator = NewNominator(opt.KubeClient, opt.VolcanoClient, podInformer, repackInformer)
+	c.nominator.SetEventRecorder(NewEventRecorder(opt.KubeClient, "vc-controller-manager"))
 
-	c.policyCtrl = repackpolicy.New(opt.VolcanoClient, opt.SharedInformerFactory, opt.VCSharedInformerFactory, repackpolicy.Options{
+	c.policyCtrl = policy.New(opt.VolcanoClient, opt.SharedInformerFactory, opt.VCSharedInformerFactory, policy.Options{
 		Workers:       c.workers,
 		FragEvalCycle: c.fragEvalCycle,
 	})
 	return nil
 }
 
-// Run launches both loops in the background, cancelling on stopCh. It returns
-// immediately (controller-manager keeps the process alive), matching the other
-// controllers. The shared factories are started centrally and again (idempotently)
-// by the wrapped controllers' own Run.
-func (c *repackController) Run(stopCh <-chan struct{}) {
+// Run launches all three loops in the background, cancelling on stopCh. It
+// returns immediately (controller-manager keeps the process alive), matching the
+// other controllers. The shared factories are started centrally and again
+// (idempotently) by the wrapped controllers' own Run.
+func (c *frameworkController) Run(stopCh <-chan struct{}) {
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		<-stopCh

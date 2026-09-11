@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package repackcontroller
+package repack
 
 import (
 	"context"
@@ -45,7 +45,7 @@ import (
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
 	repackinformers "volcano.sh/apis/pkg/client/informers/externalversions/repack/v1alpha1"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
-	"volcano.sh/repack-controller/pkg/placement"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
 )
 
 const (

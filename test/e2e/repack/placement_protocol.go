@@ -33,8 +33,8 @@ import (
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
-	"volcano.sh/repack-controller/pkg/placement"
-	"volcano.sh/repack-controller/pkg/state"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
+	"volcano.sh/volcano/pkg/controllers/repack/state"
 
 	e2eutil "volcano.sh/volcano/test/e2e/util"
 )

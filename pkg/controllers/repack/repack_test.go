@@ -27,14 +27,14 @@ import (
 	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
 
-	repackpolicy "volcano.sh/repack-controller/pkg/policy"
 	"volcano.sh/volcano/pkg/controllers/framework"
+	repackpolicy "volcano.sh/volcano/pkg/controllers/repack/policy"
 )
 
 // AddFlags registers --repack-policy-frag-eval-cycle with the 10m default.
 func TestAddFlagsRegistersFragEvalCycle(t *testing.T) {
 	fs := pflag.NewFlagSet("test", pflag.ContinueOnError)
-	c := &repackController{}
+	c := &frameworkController{}
 	c.AddFlags(fs)
 
 	flag := fs.Lookup("repack-policy-frag-eval-cycle")
@@ -58,7 +58,7 @@ func TestInitializeBuildsPolicyController(t *testing.T) {
 	coreFactory := kubeinformers.NewSharedInformerFactory(kubeClient, 0)
 	vcFactory := vcinformer.NewSharedInformerFactory(vcClient, 0)
 
-	c := &repackController{}
+	c := &frameworkController{}
 	err := c.Initialize(&framework.ControllerOption{
 		KubeClient:              kubeClient,
 		VolcanoClient:           vcClient,

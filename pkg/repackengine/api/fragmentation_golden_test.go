@@ -31,7 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"volcano.sh/repack-controller/pkg/policy"
+	"volcano.sh/volcano/pkg/controllers/repack/policy"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 )
 

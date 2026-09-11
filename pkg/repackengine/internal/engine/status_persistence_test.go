@@ -34,7 +34,7 @@ import (
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
 	engineapi "volcano.sh/volcano/pkg/repackengine/api"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"

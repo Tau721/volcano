@@ -25,7 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 	placementexecutor "volcano.sh/volcano/pkg/repackengine/executor/placement"
 )
 

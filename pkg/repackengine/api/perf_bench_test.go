@@ -19,7 +19,7 @@ package api
 import (
 	"testing"
 
-	"volcano.sh/repack-controller/pkg/frag"
+	"volcano.sh/volcano/pkg/controllers/repack/frag"
 )
 
 // OptimalNodes is the fragmentation packing bound — the hot inner call of every

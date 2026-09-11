@@ -98,10 +98,6 @@ vc-webhook-manager: init
 vc-repack-engine: init
 	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-repack-engine ./cmd/volcano-repack-engine
 
-# Standalone RepackRun controller — built from its own module under staging.
-vc-repack-controller: init
-	cd staging/src/volcano.sh/repack-controller && CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o $(abspath ${BIN_DIR})/vc-repack-controller ./cmd/repack-controller
-
 vc-agent: init
 	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/vc-agent ./cmd/agent
 	CC=${CC} CGO_ENABLED=0 go build -ldflags ${LD_FLAGS} -o ${BIN_DIR}/network-qos ./cmd/network-qos
@@ -159,9 +155,6 @@ vc-agent-image:
 
 vc-repack-engine-image:
 	$(call build_component_image,repack-engine)
-
-vc-repack-controller-image:
-	$(call build_component_image,repack-controller)
 
 # Images required by repack E2E (scheduler stack + repack-engine only).
 repack-e2e-images: vc-scheduler-image vc-controller-manager-image vc-webhook-manager-image vc-repack-engine-image
