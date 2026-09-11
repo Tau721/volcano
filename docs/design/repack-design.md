@@ -53,7 +53,7 @@ flowchart LR
 - **Volcano Scheduler**：对重建 Pod 执行真实调度和绑定；
 - **工作负载控制器**：在 Pod 被驱逐后负责重建业务 Pod，Repack 不直接创建业务实例。
 
-Engine 和 controller 只通过 Kubernetes 对象协作，不建立私有 RPC。controller 也可作为独立模块构建，但标准部署不得同时启动内置和独立实例。
+Engine 和 controller 只通过 Kubernetes 对象协作，不建立私有 RPC。
 
 ### 3.2 分层架构
 
@@ -752,7 +752,9 @@ pkg/repackengine/
     events.go                              # Kubernetes Event 记录与 broadcaster 生命周期
 staging/src/volcano.sh/apis/pkg/apis/repack/v1alpha1/
                                             # RepackRun API
-staging/src/volcano.sh/repack-controller/   # TTL、replacement placement
+pkg/controllers/repack/                     # TTL、replacement placement、nomination、RepackPolicy
+pkg/controllers/repack/{state,placement,frag}/
+                                            # 控制器与 engine 共用的状态机、替换协议与碎片模型
 pkg/scheduler/                              # 复用的 cache/framework/filter
 test/e2e/repack/                            # 全量 E2E
 ```
