@@ -587,9 +587,9 @@ func (n *Nominator) reconcile(ctx context.Context, key string) error {
 		"selectedNode", nomination.Placement.SelectedNodeName, "matchMethod", matchMethod,
 		"schedulingRequirementsHash", nomination.SchedulingRequirementsHash)
 	if nomination.Placement.SelectedNodeName == "" {
-		// The admission webhook has stopped the scheduler. Hand the placement
-		// decision to the engine, which owns the scheduler session and can choose
-		// a current receiver without duplicating predicate logic here.
+		// The admission webhook has stopped the scheduler. Wait for the engine
+		// to write the planned receiver as SelectedNodeName; the next reconcile
+		// nominates it and the scheduler validates the target when it binds.
 		return n.markPlacementGated(ctx, run.Name, pod, candidateSchedulingRequirementsHash)
 	}
 

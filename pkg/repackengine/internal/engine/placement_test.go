@@ -39,31 +39,6 @@ import (
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 )
 
-func TestPlacementReceiversExcludeFreedNodesAndRequireImmediateIdleCapacity(t *testing.T) {
-	resource := v1.ResourceName("example.com/accelerator")
-	resourceOf := func(quantity int64) *schedapi.Resource {
-		return &schedapi.Resource{ScalarResources: map[v1.ResourceName]float64{resource: float64(quantity)}}
-	}
-	node := func(name string, capacity int64) *schedapi.NodeInfo {
-		return &schedapi.NodeInfo{Name: name, Allocatable: resourceOf(capacity), Used: resourceOf(0), Idle: resourceOf(capacity)}
-	}
-	nodes := []*schedapi.NodeInfo{
-		node("planned", 2),
-		node("freeing", 8),
-		node("too-small", 1),
-		node("alternative", 4),
-	}
-	task := &schedapi.TaskInfo{InitResreq: resourceOf(2)}
-
-	receivers := placementexecutor.Receivers(nodes, []string{"freeing"}, "planned", task)
-	if len(receivers) != 2 {
-		t.Fatalf("receiver count = %d, want 2", len(receivers))
-	}
-	if receivers[0].Name != "planned" || receivers[1].Name != "alternative" {
-		t.Errorf("receiver order = [%s, %s], want [planned, alternative]", receivers[0].Name, receivers[1].Name)
-	}
-}
-
 func TestPlacementCandidatesRequireConcreteGatedReplacement(t *testing.T) {
 	run := &repackv1alpha1.RepackRun{}
 	run.Status.Relocations = []repackv1alpha1.PodRelocationStatus{

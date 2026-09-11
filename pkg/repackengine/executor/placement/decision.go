@@ -26,7 +26,6 @@ import (
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
-	engineapi "volcano.sh/volcano/pkg/repackengine/api"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 )
 
@@ -48,44 +47,6 @@ func Candidates(run *repackv1alpha1.RepackRun) []*repackv1alpha1.PodRelocationSt
 		return IdentityForRelocation(result[left]).Less(IdentityForRelocation(result[right]))
 	})
 	return result
-}
-
-func Receivers(nodes []*schedapi.NodeInfo, freedNodes []string, plannedNode string, task *schedapi.TaskInfo) []*schedapi.NodeInfo {
-	if task == nil {
-		return nil
-	}
-	freed := make(map[string]struct{}, len(freedNodes))
-	for _, node := range freedNodes {
-		freed[node] = struct{}{}
-	}
-	byName := make(map[string]*schedapi.NodeInfo, len(nodes))
-	for _, node := range nodes {
-		if node != nil {
-			byName[node.Name] = node
-		}
-	}
-	receivers := make([]*schedapi.NodeInfo, 0, len(nodes))
-	appendIfImmediatelyIdle := func(node *schedapi.NodeInfo) {
-		if node == nil {
-			return
-		}
-		if _, excluded := freed[node.Name]; excluded || !task.InitResreq.LessEqual(engineapi.NodeFreeCapacity(node), schedapi.Zero) {
-			return
-		}
-		receivers = append(receivers, node)
-	}
-	appendIfImmediatelyIdle(byName[plannedNode])
-	names := make([]string, 0, len(byName))
-	for name := range byName {
-		if name != plannedNode {
-			names = append(names, name)
-		}
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		appendIfImmediatelyIdle(byName[name])
-	}
-	return receivers
 }
 
 func Complete(run *repackv1alpha1.RepackRun) bool {

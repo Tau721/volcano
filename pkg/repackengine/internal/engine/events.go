@@ -57,7 +57,6 @@ const (
 	eventReasonReconcilingPlacements   = "ReconcilingPlacements"
 	eventReasonPlacementSelected       = "PlacementSelected"
 	eventReasonPlacementLeaseRepaired  = "PlacementLeaseRepaired"
-	eventReasonWaitingForNodeSelection = "WaitingForNodeSelection"
 )
 
 func (e *Engine) recordRunEvent(run *repackv1alpha1.RepackRun, eventType, reason, message string) {

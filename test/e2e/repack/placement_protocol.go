@@ -925,19 +925,19 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		}, repackTimeout, repackPoll).Should(BeTrue(), "terminal cleanup must release the held scale-out Pod")
 	})
 
-	// The Engine sees no immediately idle receiver: the planned receiver and the
-	// only fallback receiver are both occupied, while the source node is excluded
-	// by the accepted plan. The deadline must release the gate and fail the Run
-	// instead of stranding the workload indefinitely.
-	It("keeps the gate while capacity is unavailable, then expires and releases it at the deadline", func() {
+	// Execute places by plan even when the planned receiver is unusable: the
+	// planned receiver and the only other idle node are both occupied, so the
+	// Engine nominates the occupied planned receiver verbatim and the scheduler
+	// overrides it, binding the replacement back onto the source node the plan
+	// meant to free. The Run must still fail on the unrealized plan, and the
+	// deadline must release the gate and the lease instead of stranding the
+	// workload.
+	It("nominates an occupied planned receiver, lets the scheduler override it, and fails on the unrealized plan", func() {
 		restoreEngine := pauseRepackEngine(ctx)
 		defer restoreEngine()
 
 		occupy(ctx, "placement-planned-receiver-blocker", nodes[1], npuPerNode)
 		occupy(ctx, "placement-fallback-receiver-blocker", nodes[2], npuPerNode)
-		// Allow an Engine restart to finish informer cache synchronization before the
-		// deadline. The assertion below is specifically about the observable
-		// WaitingForNodeSelection state, not merely the terminal expiration.
 		run, pgName, replacement := prepareGatedPlacement(ctx, "placement-expire", nodes[1], []string{nodes[0]}, time.Minute)
 		defer deleteRun(ctx, run.Name)
 		Expect(hasSchedulingGate(replacement, repackv1alpha1.PlacementGateName)).To(BeTrue())
@@ -947,16 +947,22 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		}, repackTimeout, repackPoll).Should(Equal(repackv1alpha1.PodPlacementWaitingForNodeSelection))
 
 		restoreEngine()
-		Eventually(func() repackv1alpha1.PodPlacementPhase {
-			return getRun(ctx, run.Name).Status.Relocations[0].Placement.Phase
-		}, repackTimeout, repackPoll).Should(Equal(repackv1alpha1.PodPlacementWaitingForNodeSelection), "gate must remain while no immediately idle receiver exists")
+		Eventually(func() string {
+			return getRun(ctx, run.Name).Status.Relocations[0].Placement.SelectedNodeName
+		}, repackTimeout, repackPoll).Should(Equal(nodes[1]),
+			"the Engine nominates the planned receiver without checking whether it is idle")
 		got := waitTerminal(ctx, run.Name)
 		Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackFailed))
-		Expect(completeReason(got)).To(Equal("ExecutionTimedOut"))
-		Expect(got.Status.Relocations[0].Placement.Phase).To(Equal(repackv1alpha1.PodPlacementTimedOut))
+		Expect(completeReason(got)).To(Equal("ExecutionTimedOut"),
+			"the replacement landed elsewhere, so the planned source node was never freed")
+		Expect(got.Status.Relocations[0].Placement.Phase).To(Equal(repackv1alpha1.PodPlacementPlaced))
+		Expect(got.Status.Relocations[0].Placement.ActualNodeName).To(Equal(nodes[0]),
+			"the scheduler overrides an unusable nomination and reuses the source node")
+		Expect(got.Status.Relocations[0].Placement.ActualNodeName).NotTo(Equal(got.Status.Relocations[0].Placement.SelectedNodeName))
 		Expect(got.Status.Result).NotTo(BeNil())
 		Expect(got.Status.Result.MetricsVerified).To(BeFalse())
-		Expect(got.Status.Result.FreedNodes).To(BeEmpty())
+		Expect(got.Status.Result.FreedNodes).NotTo(ContainElement(nodes[0]),
+			"the source node hosting the overridden replacement is not a freed node")
 
 		Eventually(func() bool {
 			pod, err := ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Get(context.TODO(), replacement.Name, metav1.GetOptions{})
