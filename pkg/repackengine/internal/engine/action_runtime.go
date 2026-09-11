@@ -29,7 +29,7 @@ import (
 	batchv1alpha1 "volcano.sh/apis/pkg/apis/batch/v1alpha1"
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	vcclientset "volcano.sh/apis/pkg/client/clientset/versioned"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
 	"volcano.sh/volcano/pkg/repackengine/adapter"
 	engineapi "volcano.sh/volcano/pkg/repackengine/api"

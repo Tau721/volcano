@@ -14,15 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package controller is the RepackRun lifecycle controller. It is deliberately
-// framework-light: plain client-go informers + workqueue, depending only on the
-// CRD types/generated client (volcano.sh/apis) and the pure decision logic in
-// ./state. It owns admission, phase/conditions projection, active-deadline and
-// TTL GC. Execute serialization (one-at-a-time + cooldown) lives in the engine
-// — the worker that actually evicts — not here. It does NOT open a scheduler
-// Session or move pods; planning/eviction is the volcano-repack-engine's job.
-// The two communicate only through the RepackRun object.
-package repackcontroller
+// Package repack owns the RepackRun lifecycle controller, the replacement Pod
+// nominator and the RepackPolicy controller, plus the state machine, placement
+// protocol and fragmentation model they share with the repack engine. It is
+// deliberately framework-light: plain client-go informers + workqueue, depending
+// only on the CRD types/generated client (volcano.sh/apis) and the pure decision
+// logic in ./state. It owns admission, phase/conditions projection,
+// active-deadline and TTL GC. Execute serialization (one-at-a-time + cooldown)
+// lives in the engine — the worker that actually evicts — not here. It does NOT
+// open a scheduler Session or move pods; planning/eviction is the
+// volcano-repack-engine's job. The two communicate only through the RepackRun
+// object.
+package repack
 
 import (
 	"context"
@@ -41,7 +44,7 @@ import (
 	vcinformers "volcano.sh/apis/pkg/client/informers/externalversions"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
 
-	"volcano.sh/repack-controller/pkg/state"
+	"volcano.sh/volcano/pkg/controllers/repack/state"
 )
 
 // Options are operator-level knobs not carried on individual RepackRuns.

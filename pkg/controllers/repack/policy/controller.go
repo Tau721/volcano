@@ -37,7 +37,7 @@ import (
 	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
 
-	repackstate "volcano.sh/repack-controller/pkg/state"
+	repackstate "volcano.sh/volcano/pkg/controllers/repack/state"
 )
 
 // Trigger source literals, recorded in the derived run's RepackTriggerLabel and

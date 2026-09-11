@@ -54,7 +54,6 @@ require (
 	sigs.k8s.io/yaml v1.6.0
 	stathat.com/c/consistent v1.0.0
 	volcano.sh/apis v0.0.0
-	volcano.sh/repack-controller v0.0.0
 )
 
 require (
@@ -146,7 +145,7 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/distribution/reference v0.6.0 // indirect
 	github.com/emicklei/go-restful/v3 v3.12.2 // indirect
-	github.com/evanphx/json-patch/v5 v5.9.11 // indirect
+	github.com/evanphx/json-patch/v5 v5.9.11
 	github.com/felixge/httpsnoop v1.0.4 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/logr v1.4.3 // indirect
@@ -202,7 +201,7 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	k8s.io/apiextensions-apiserver v0.35.0 // indirect
+	k8s.io/apiextensions-apiserver v0.35.0
 	k8s.io/cloud-provider v0.0.0 // indirect
 	k8s.io/controller-manager v0.35.3
 	k8s.io/kube-openapi v0.0.0-20250910181357-589584f1c912 // indirect
@@ -252,5 +251,4 @@ replace (
 	// Use local staging directory for APIs development
 	// This allows API changes to be made and reviewed in the same PR as implementation changes
 	volcano.sh/apis => ./staging/src/volcano.sh/apis
-	volcano.sh/repack-controller => ./staging/src/volcano.sh/repack-controller
 )

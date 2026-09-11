@@ -19,7 +19,7 @@ package framework
 import (
 	"k8s.io/klog/v2"
 
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 	"volcano.sh/volcano/pkg/repackengine/api"
 )
 

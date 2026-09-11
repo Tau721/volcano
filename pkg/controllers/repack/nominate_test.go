@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package repackcontroller
+package repack
 
 import (
 	"context"
@@ -41,7 +41,7 @@ import (
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
-	"volcano.sh/repack-controller/pkg/placement"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
 )
 
 func nominatorWith(runs ...*repackv1alpha1.RepackRun) *Nominator {

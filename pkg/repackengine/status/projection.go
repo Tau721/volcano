@@ -28,8 +28,8 @@ import (
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	"volcano.sh/repack-controller/pkg/placement"
-	state "volcano.sh/repack-controller/pkg/state"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
 	engineapi "volcano.sh/volcano/pkg/repackengine/api"
 	placementexecutor "volcano.sh/volcano/pkg/repackengine/executor/placement"

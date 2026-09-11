@@ -24,8 +24,8 @@ limitations under the License.
 //	  occupied nodes = providing nodes with Used[R] > 0
 //	  optimal occupied nodes = theoretical minimum for R's demand (see frag.OptimalNodes)
 //
-// The optimal-node-count math itself lives in the leaf module
-// volcano.sh/repack-controller/pkg/frag, shared with the RepackPolicy
+// The optimal-node-count math itself lives in
+// volcano.sh/volcano/pkg/controllers/repack/frag, shared with the RepackPolicy
 // controller's onFrag measurement so the two cannot drift.
 package api
 
@@ -33,7 +33,7 @@ import (
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
-	"volcano.sh/repack-controller/pkg/frag"
+	"volcano.sh/volcano/pkg/controllers/repack/frag"
 	"volcano.sh/volcano/pkg/scheduler/api"
 )
 

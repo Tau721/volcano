@@ -30,7 +30,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	repackstate "volcano.sh/repack-controller/pkg/state"
+	repackstate "volcano.sh/volcano/pkg/controllers/repack/state"
 )
 
 // runNameFormat renders derived run names {policy}-{now-UTC-seconds}: second-unique

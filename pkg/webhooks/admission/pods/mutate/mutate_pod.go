@@ -33,7 +33,7 @@ import (
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	schedulingv1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
-	"volcano.sh/repack-controller/pkg/placement"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
 	"volcano.sh/volcano/pkg/features"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	wkconfig "volcano.sh/volcano/pkg/webhooks/config"

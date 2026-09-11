@@ -30,7 +30,7 @@ import (
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	"volcano.sh/repack-controller/pkg/placement"
+	"volcano.sh/volcano/pkg/controllers/repack/placement"
 
 	enginestatus "volcano.sh/volcano/pkg/repackengine/status"
 )

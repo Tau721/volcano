@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 
-	"volcano.sh/repack-controller/pkg/frag"
+	"volcano.sh/volcano/pkg/controllers/repack/frag"
 )
 
 // FragResult is one fragmentation measurement of a resource.

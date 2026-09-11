@@ -28,7 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 
 	engineconf "volcano.sh/volcano/pkg/repackengine/conf"
 	"volcano.sh/volcano/pkg/repackengine/metrics"
