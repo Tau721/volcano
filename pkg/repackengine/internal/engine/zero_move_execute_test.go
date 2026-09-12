@@ -28,8 +28,8 @@ import (
 	repackv1alpha1 "volcano.sh/apis/pkg/apis/repack/v1alpha1"
 	vcfake "volcano.sh/apis/pkg/client/clientset/versioned/fake"
 	repacklisters "volcano.sh/apis/pkg/client/listers/repack/v1alpha1"
-	state "volcano.sh/repack-controller/pkg/state"
 
+	state "volcano.sh/volcano/pkg/controllers/repack/state"
 	engineframework "volcano.sh/volcano/pkg/repackengine/framework"
 )
 
