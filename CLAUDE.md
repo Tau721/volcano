@@ -7,7 +7,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Build
 - `make all` — build all binaries (vc-scheduler, vc-agent-scheduler, vc-controller-manager, vc-webhook-manager, vc-agent, vc-repack-engine, vcctl, plus CLI subcommands)
 - `make vc-scheduler` / `make vc-controller-manager` / etc. — build a single binary
-- `make vc-repack-controller` — build the standalone repack controller from `staging/src/volcano.sh/repack-controller/`
 - `make images` — build Docker images for all core components
 - `make repack-e2e-images` — build Docker images needed for repack e2e tests
 - `make repack-e2e-images-from-bin` — fast local image build from pre-compiled binaries (skips docker buildx golang stages)
@@ -40,7 +39,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Vendored dependencies live in `vendor/` (includes both upstream deps and local staging modules)
 - **Staging pattern** (like k8s.io upstream): local modules under `staging/src/volcano.sh/` are linked via `replace` directives in `go.mod`:
   - `staging/src/volcano.sh/apis/` — ALL CRD API types (batch, scheduling, bus, nodeinfo, topology, flow, repack, config, shard, training) plus generated clients, informers, listers, and apply configurations
-  - `staging/src/volcano.sh/repack-controller/` — standalone repack controller with its own `go.mod`
 
 ### Binaries (`cmd/`)
 | Directory | Binary | Purpose |
@@ -52,8 +50,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 | `cmd/volcano-repack-engine/` | vc-repack-engine | Hypernode pod defragmentation engine |
 | `cmd/agent/` | vc-agent + network-qos | Per-node agent and CNI network QoS plugin |
 | `cmd/cli/` | vcctl + subcommands | CLI for job/queue operations (vcancel, vresume, vsuspend, vjobs, vqueues, vsub) |
-
-Also: `vc-repack-controller` built from `staging/src/volcano.sh/repack-controller/cmd/repack-controller/`.
 
 ### Scheduler Framework (`pkg/scheduler/`)
 The scheduler uses a **session-based action+plugin framework** modeled after kube-scheduler's scheduling framework:
@@ -72,7 +68,7 @@ A separate framework for GPU/NPU cluster defragmentation, mirroring the schedule
 - **Actions** (`pkg/repackengine/actions/repack/`) — main repack action orchestrator
 - **Plugins** (`pkg/repackengine/plugins/repackbudget/`) — budget enforcement plugins
 - **Adapter** (`pkg/repackengine/adapter/`) — bridges to the scheduler cache, gang-aware interfaces, node freeability evaluation
-- The standalone **repack-controller** in staging handles nomination, placement recovery, gang-aware draining, and PodGroup lease management
+- The **repack-controller** in `pkg/controllers/repack/` handles nomination, placement recovery, gang-aware draining, and PodGroup lease management. It runs inside vc-controller-manager, registered as `repack-controller` and disabled by default
 
 ### Controllers (`pkg/controllers/`)
 Controllers for CRD reconciliation: `job`, `queue`, `podgroup`, `cronjob`, `jobflow`, `jobtemplate`, `hypernode`, `repack`, `sharding`, `garbagecollector`
