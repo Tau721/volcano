@@ -57,7 +57,7 @@
   <rect x="246" y="42" width="470" height="404" rx="8" class="ctrl"/>
   <rect x="246" y="42" width="470" height="52" rx="8" class="blu"/>
   <text x="481" y="62" text-anchor="middle" font-size="13.5" font-weight="700" fill="#fff">volcano repack-controller</text>
-  <text x="481" y="80" text-anchor="middle" font-size="9" fill="#e7f0ff">跑在 volcano-controller-manager（framework shim），或独立 vc-repack-controller</text>
+  <text x="481" y="80" text-anchor="middle" font-size="9" fill="#e7f0ff">跑在 volcano-controller-manager 内（pkg/controllers/repack）</text>
 
   <rect x="262" y="104" width="438" height="30" rx="6" class="card"/>
   <text x="481" y="119" text-anchor="middle" font-size="9.5" class="t"><tspan class="m">informer</tspan>: RepackRun · Pod · RepackPolicy(P1)  →  workqueue（<tspan class="m">--workers</tspan>）</text>
@@ -123,7 +123,7 @@
   <text x="28" y="482" font-size="10.5" font-weight="700" class="t">边界</text>
   <text x="80" y="482" font-size="9.5" class="s">不做准入（CEL @ apiserver）｜ 不做规划/驱逐（vc-repack-engine）｜ 不写 spec（CEL 冻结）</text>
   <text x="28" y="506" font-size="10.5" font-weight="700" class="t">部署</text>
-  <text x="80" y="506" font-size="9.5" class="s">默认合入 volcano-controller-manager（framework shim；<tspan class="m">--controllers=*,-repack-controller</tspan> 可禁用）／ 或独立 <tspan class="m">vc-repack-controller</tspan> 二进制</text>
+  <text x="80" y="506" font-size="9.5" class="s">合入 volcano-controller-manager（framework shim；默认禁用，<tspan class="m">--controllers=*,-sharding-controller,+repack-controller</tspan> 启用）</text>
   <text x="28" y="530" font-size="10.5" font-weight="700" class="t">配置</text>
   <text x="80" y="530" font-size="9.5" class="s"><tspan class="m">--workers</tspan>（并发）· <tspan class="m">--repack-policy-eval-interval</tspan>（P1 反应式触发评估周期，性质同引擎 <tspan class="m">--repack-execute-cooldown</tspan>）</text>
 </svg>
