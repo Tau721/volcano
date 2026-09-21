@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	policylisters "k8s.io/client-go/listers/policy/v1"
+	"k8s.io/klog/v2"
 	fwk "k8s.io/kube-scheduler/framework"
 
 	"volcano.sh/volcano/pkg/features"
@@ -165,17 +166,28 @@ func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*a
 	}
 	sourceTasksToRemove = append(sourceTasksToRemove, victims...)
 
+	klog.V(5).InfoS("repack relocation: planning a relocation batch", "victims", taskNames(victims),
+		"receivers", nodeNames(receivers), "committedMoves", len(committed), "hyperNodeTopology", s.hasHyperNodeTopology())
+
 	relocationMoves := make([]*api.Move, 0, len(victims))
 
 	// ==true gang units first, committed to plan state before the next is tried;
 	// the serial commit narrows a Required-affinity-linked peer to the settled
 	// domain, keeping co-migrating members co-located. Others follow greedily.
 	units := s.groupVictimsByGang(victims)
+	scope := newTrialScope(victims)
 	for _, unit := range units {
 		if !unit.requiresHyperNodeAllocate(s) {
+			if unit.job != nil && unit.job.RequiresHyperNodeAllocate() {
+				klog.V(4).InfoS("repack relocation: constrained gang kept on the greedy path — HyperNode topology not ready",
+					"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
+			} else {
+				klog.V(5).InfoS("repack relocation: gang unit on the greedy path",
+					"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
+			}
 			continue
 		}
-		moves, fit := s.domainTrialRelocation(ctx, unit, sourceTasksToRemove, receivers, tasksPlacedByNode)
+		moves, fit := s.domainTrialRelocation(ctx, scope, unit, sourceTasksToRemove, receivers, tasksPlacedByNode)
 		if !fit {
 			s.planState().Restore(baseline)
 			return nil, false

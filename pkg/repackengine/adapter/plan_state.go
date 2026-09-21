@@ -66,10 +66,13 @@ type PlanStateCarrier interface {
 	// via the scheduler's SyncJobAllocatedHyperNode. To=="" or To==From moves are
 	// ignored. The caller re-Saves to advance the rollback baseline.
 	ApplyCommit(moves []*api.Move)
-	// ClearGangAnchor temporarily clears a gang's AllocatedHyperNode for the
-	// no-anchor evaluation of a fully-vacated unit (subJobID == "" = job anchor).
-	// The caller must bracket it with Save/Restore.
-	ClearGangAnchor(jobID schedapi.JobID, subJobID schedapi.SubJobID)
+	// SetGangAnchor overwrites a gang's AllocatedHyperNode for the anchor override
+	// of a vacated unit (subJobID == "" = job anchor; "" clears it). The caller
+	// must bracket it with Save/Restore.
+	SetGangAnchor(jobID schedapi.JobID, subJobID schedapi.SubJobID, value string)
+	// DisplacedTasks returns the job's tasks whose job-side binding this pass has
+	// already rewritten — the pods the plan has placed.
+	DisplacedTasks(jobID schedapi.JobID) sets.Set[schedapi.TaskID]
 	// JobAllocatedHyperNode returns the current plan-state job anchor.
 	JobAllocatedHyperNode(jobID schedapi.JobID) string
 	// SubJobAllocatedHyperNode returns the current plan-state subJob anchor.
@@ -215,18 +218,30 @@ func (p *SessionPlanState) restoreTask(taskID schedapi.TaskID, e planStateTask) 
 	}
 }
 
-// ClearGangAnchor temporarily clears a gang's AllocatedHyperNode for no-anchor
-// evaluation. subJobID == "" clears the job anchor. Bracket with Save/Restore.
-func (p *SessionPlanState) ClearGangAnchor(jobID schedapi.JobID, subJobID schedapi.SubJobID) {
+// SetGangAnchor overwrites a gang's AllocatedHyperNode for a trial's anchor
+// override; subJobID == "" sets the job anchor, and "" clears it. Bracket with
+// Save/Restore.
+func (p *SessionPlanState) SetGangAnchor(jobID schedapi.JobID, subJobID schedapi.SubJobID, value string) {
 	job := p.ssn.Jobs[jobID]
 	if job == nil {
 		return
 	}
 	if subJobID == "" {
-		job.AllocatedHyperNode = ""
+		job.AllocatedHyperNode = value
 	} else if subJob := job.SubJobs[subJobID]; subJob != nil {
-		subJob.AllocatedHyperNode = ""
+		subJob.AllocatedHyperNode = value
 	}
+}
+
+// DisplacedTasks returns the job's tasks rewritten by this pass's commits.
+func (p *SessionPlanState) DisplacedTasks(jobID schedapi.JobID) sets.Set[schedapi.TaskID] {
+	displaced := sets.New[schedapi.TaskID]()
+	for taskID, entry := range p.rewritten {
+		if entry.jobID == jobID {
+			displaced.Insert(taskID)
+		}
+	}
+	return displaced
 }
 
 // JobAllocatedHyperNode returns the current plan-state job anchor.

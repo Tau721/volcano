@@ -444,6 +444,111 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 		})
 	})
 
+	Context("E22: a fully drained job may leave its stale anchor (US-02)", func() {
+		It("moves the drained pod to the sibling domain when its own domain has no receiver", func() {
+			// Job-level AND subGroup-level hard tier-1 topology over a single role
+			// (the reported cluster: one Job per HyperNode, groupPolicy + rolePolicy
+			// both at the HyperNode layer). Eviction empties the whole job, so both
+			// entries lose their anchor; keeping the pre-eviction anchor would pin the
+			// trial to rt-s0, whose only node is the drained source, and the run would
+			// report no feasible plan. Only rt-s1's n2 can receive it.
+			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e22", ptr.To(1),
+				repackSubGroupTask{name: "task-a", cards: 4, reps: 1, tier: ptr.To(1)}), nodes[0])
+			occupy(ctx, "e22-full1", nodes[1], 8) // rt-s0 full -> no in-domain receiver
+			occupy(ctx, "e22-s2", nodes[2], 2)    // rt-s1 sole receiver
+			occupy(ctx, "e22-full3", nodes[3], 8) // rt-s1 full
+
+			run, err := newRun("e22", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(HaveKey(nodes[0]), "taskA's source must be drained")
+
+			waitRunningPodCount(ctx, job, 1)
+			pod := runningPodsOfJob(ctx, job)[0]
+			Expect(nodeOfPod(pod)).To(Equal(nodes[2]),
+				"the sole receiver n2 must be the replacement's target")
+			Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
+				"the fully-drained job must be free to leave the emptied rt-s0")
+		})
+	})
+
+	Context("E23: a job with several roles leaves its stale anchor when fully drained (US-02)", func() {
+		It("moves both role gangs into the sibling domain when their own domain has no receiver", func() {
+			// Job-level AND role-level hard tier-1 topology over two roles, both placed
+			// on n0 (rt-s0). The drain empties the whole job, so the Job entry must
+			// follow the whole call instead of one role: keeping the pre-eviction anchor
+			// rt-s0 — whose only spare node is the drained source — leaves the run
+			// without a plan (the reported multi-SubJob bug). rt-s1 is the only
+			// receiving domain, and both roles have to land in it together.
+			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e23", ptr.To(1),
+				repackSubGroupTask{name: "task-a", cards: 2, reps: 1, tier: ptr.To(1)},
+				repackSubGroupTask{name: "task-b", cards: 2, reps: 1, tier: ptr.To(1)}), nodes[0])
+			occupy(ctx, "e23-full1", nodes[1], 8) // rt-s0 full -> no in-domain receiver
+			occupy(ctx, "e23-s2", nodes[2], 6)    // rt-s1 receiver for one role
+			occupy(ctx, "e23-s3", nodes[3], 6)    // rt-s1 receiver for the other
+
+			run, err := newRun("e23", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(HaveKey(nodes[0]), "both roles' source must be drained")
+
+			waitRunningPodCount(ctx, job, 2)
+			expectSameTierDomain(ctx, job, 1)
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
+					"the fully-drained job must be free to leave the emptied rt-s0")
+			}
+		})
+	})
+
+	Context("E24: a fully drained multi-role job is not split across sibling domains (US-02)", func() {
+		It("plans nothing when no single tier-1 domain can hold both roles", func() {
+			// E23's geometry with one spare slot left in the source domain, so rt-s0
+			// and rt-s1 can each take one role but neither can hold both: the only
+			// drain on offer would split a hard tier-1 job across them. Nothing may be
+			// planned. (The engine happens to refuse this even without the follower
+			// anchor rewrite, so this spec guards the outcome, not that mechanism.)
+			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e24", ptr.To(1),
+				repackSubGroupTask{name: "task-a", cards: 2, reps: 1, tier: ptr.To(1)},
+				repackSubGroupTask{name: "task-b", cards: 2, reps: 1, tier: ptr.To(1)}), nodes[0])
+			occupy(ctx, "e24-s1", nodes[1], 6)    // rt-s0: one slot, room for one role
+			occupy(ctx, "e24-s2", nodes[2], 6)    // rt-s1: one slot, room for one role
+			occupy(ctx, "e24-full3", nodes[3], 8) // rt-s1 has no second slot
+			before := runningPodCount(ctx)
+
+			run, err := newRun("e24", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("InsufficientImprovement"))
+			Expect(got.Status.Plan).NotTo(BeNil())
+			Expect(got.Status.Plan.Summary.FragBeforePercent).To(BeNumerically(">", 0),
+				"fragmentation must be real so the co-location check is exercised")
+			Expect(len(got.Status.Plan.FreedNodes)).To(Equal(0), "no node may be freed: no domain holds both roles")
+			Expect(len(got.Status.Plan.Moves)).To(Equal(0), "the roles may not be split over rt-s0 and rt-s1")
+			Expect(runningPodCount(ctx)).To(Equal(before), "no pod may be evicted")
+
+			waitRunningPodCount(ctx, job, 2)
+			expectSameTierDomain(ctx, job, 1)
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s0"),
+					"a refused plan must leave both roles in their source domain")
+			}
+		})
+	})
+
 	Context("E13: both-moving self-harm is rejected at planning (US-02)", func() {
 		It("never moves the mutually anti-affine PodGroups into one domain", func() {
 			// Mutually anti-affine A (rt-s0) and B (rt-s1), both drain targets; A's

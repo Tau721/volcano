@@ -234,20 +234,20 @@ func TestSessionPlanState_ApplyCommitBothMoving(t *testing.T) {
 	}
 }
 
-// ClearGangAnchor temporarily clears a job/subJob AllocatedHyperNode for
-// no-anchor gradient evaluation; Save/Restore restores it.
-func TestSessionPlanState_ClearGangAnchor(t *testing.T) {
+// SetGangAnchor overwrites a job/subJob AllocatedHyperNode for gradient
+// evaluation; Save/Restore restores it.
+func TestSessionPlanState_SetGangAnchor(t *testing.T) {
 	_, ji, sjA, _ := planTestBothMovingSession(t)
 	ps := NewSessionPlanState(nilSessionJobs(ji))
 
 	snap := ps.Save()
-	ps.ClearGangAnchor(ji.UID, "")
+	ps.SetGangAnchor(ji.UID, "", "")
 	if got := ps.JobAllocatedHyperNode(ji.UID); got != "" {
 		t.Errorf("cleared job anchor=%q, want empty", got)
 	}
-	ps.ClearGangAnchor(ji.UID, sjA.UID)
-	if got := ps.SubJobAllocatedHyperNode(ji.UID, sjA.UID); got != "" {
-		t.Errorf("cleared subJob A anchor=%q, want empty", got)
+	ps.SetGangAnchor(ji.UID, sjA.UID, "hD")
+	if got := ps.SubJobAllocatedHyperNode(ji.UID, sjA.UID); got != "hD" {
+		t.Errorf("overridden subJob A anchor=%q, want hD", got)
 	}
 	// the sibling subJob anchor is untouched.
 	if got := ps.SubJobAllocatedHyperNode(ji.UID, "ns/job/grp/valB"); got != "hB" {

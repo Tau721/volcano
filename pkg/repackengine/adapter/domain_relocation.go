@@ -18,14 +18,35 @@ package adapter
 
 import (
 	"context"
+	"fmt"
+	"sort"
+	"strings"
 
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/klog/v2"
 
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedframework "volcano.sh/volcano/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/repackengine/api"
 )
+
+// trialScope is the call-wide evacuation intent: the pods every unit of one
+// FeasibleRelocation call is about to evict. A gang's own victims cannot tell
+// whether the job as a whole is being drained — its sibling gangs can.
+type trialScope struct {
+	victims sets.Set[schedapi.TaskID]
+}
+
+func newTrialScope(victims []*schedapi.TaskInfo) *trialScope {
+	ids := sets.New[schedapi.TaskID]()
+	for _, victim := range victims {
+		if victim != nil {
+			ids.Insert(victim.UID)
+		}
+	}
+	return &trialScope{victims: ids}
+}
 
 // gangUnit is one constraint-bearing gang: a Job (no SubGroupPolicy) or one
 // SubJob, placed together within a single allowed HyperNode domain. It is the
@@ -42,6 +63,14 @@ type gangUnit struct {
 // legacy greedy behavior.
 func (u *gangUnit) requiresHyperNodeAllocate(s *SessionSnapshot) bool {
 	return u.job != nil && u.job.RequiresHyperNodeAllocate() && s.hasHyperNodeTopology()
+}
+
+// jobID returns the unit's Job ID, or "" when the session has no such Job.
+func (u *gangUnit) jobID() schedapi.JobID {
+	if u.job == nil {
+		return ""
+	}
+	return u.job.UID
 }
 
 func (u *gangUnit) subJobID() schedapi.SubJobID {
@@ -151,13 +180,16 @@ func underAnyRoot(hyperNodes schedapi.HyperNodeInfoMap, name string, roots sets.
 // every domain fails the unit is infeasible (nil, false).
 func (s *SessionSnapshot) domainTrialRelocation(
 	ctx context.Context,
+	scope *trialScope,
 	unit *gangUnit,
 	sourceTasksToRemove []*schedapi.TaskInfo,
 	receivers []*schedapi.NodeInfo,
 	tasksPlacedByNode map[string][]*schedapi.TaskInfo,
 ) ([]*api.Move, bool) {
-	allowed, ok := s.allowedDomainsForTrial(unit)
+	allowed, ok := s.allowedDomainsForTrial(scope, unit)
 	if !ok {
+		klog.V(4).InfoS("repack relocation: unit INFEASIBLE — no allowed HyperNode domain",
+			"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
 		return nil, false
 	}
 	for _, layer := range allowed {
@@ -166,31 +198,121 @@ func (s *SessionSnapshot) domainTrialRelocation(
 				return nil, false
 			}
 			if moves, fit := s.trialFitDomain(ctx, unit.victims, domain, sourceTasksToRemove, receivers, tasksPlacedByNode); fit {
+				klog.V(4).InfoS("repack relocation: unit placed inside one domain",
+					"job", unit.jobID(), "subJob", unit.subJobID(), "domain", domain.Name, "tier", domain.Tier(),
+					"placements", moveSummary(moves))
 				return moves, true
 			}
 		}
 	}
+	klog.V(4).InfoS("repack relocation: unit INFEASIBLE — every allowed domain failed the trial",
+		"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims),
+		"domainsTried", domainsByTier(allowed))
 	return nil, false
 }
 
-// allowedDomainsForTrial clears the gang anchor when this unit fully vacates
-// the gang, so the whole-cluster branch applies as the real scheduler would
-// after eviction. Save/Restore keeps the clear leak-free even on a panic.
-func (s *SessionSnapshot) allowedDomainsForTrial(unit *gangUnit) ([][]*schedapi.HyperNodeInfo, bool) {
-	if s.gangFullyVacated(unit) {
+// allowedDomainsForTrial evaluates the unit's domains on the anchors the plan
+// intends once this pass's evacuations are done: a stale anchor pins the trial to
+// the drained subtree — the source only, never a receiver.
+func (s *SessionSnapshot) allowedDomainsForTrial(scope *trialScope, unit *gangUnit) ([][]*schedapi.HyperNodeInfo, bool) {
+	gangVacated := s.gangFullyVacated(unit)
+	jobVacated := false
+	if gangVacated {
 		anchor := s.plan.Save()
 		defer s.plan.Restore(anchor)
-		s.plan.ClearGangAnchor(unit.job.UID, unit.subJobID())
-		return s.allowedDomains(unit)
+		if unit.subJob != nil {
+			s.plan.SetGangAnchor(unit.job.UID, unit.subJobID(), "")
+		}
+		if s.jobFullyVacated(scope, unit) {
+			jobVacated = true
+			s.plan.SetGangAnchor(unit.job.UID, "", s.jobAnchorAfterEvacuation(scope, unit))
+		}
 	}
-	return s.allowedDomains(unit)
+	allowed, ok := s.allowedDomains(unit)
+	// Read before the deferred restore: these are the values the gradient saw.
+	klog.V(4).InfoS("repack relocation: unit allowed domains", "job", unit.jobID(), "subJob", unit.subJobID(),
+		"victims", taskNames(unit.victims), "gangFullyVacated", gangVacated, "jobFullyVacated", jobVacated,
+		"jobAnchor", s.planState().JobAllocatedHyperNode(unit.job.UID),
+		"subJobAnchor", s.planState().SubJobAllocatedHyperNode(unit.job.UID, unit.subJobID()),
+		"allowedCount", len(allowed), "allowed", domainsByTier(allowed), "usable", ok)
+	return allowed, ok
 }
 
-// gangFullyVacated reports whether every plan-state allocated task of the gang is
-// a victim of this unit (no residual pod anchors it). Set membership, not count
-// equality: on the Execute-side reconcile a victim is the live Pending replacement
-// pod, so counts could match while a residual allocated pod still anchors the gang.
+// gangFullyVacated reports whether every plan-state allocated task of the unit's
+// gang is a victim of this unit (no residual pod anchors it).
 func (s *SessionSnapshot) gangFullyVacated(unit *gangUnit) bool {
+	index := unit.job.TaskStatusIndex
+	if unit.subJob != nil {
+		index = unit.subJob.TaskStatusIndex
+	}
+	return unitFullyVacated(unit, index)
+}
+
+// jobFullyVacated reports whether this pass evacuates the whole job, not just one
+// of its gangs: the Job-entry gradient stays anchored to the job until its last
+// pod leaves.
+func (s *SessionSnapshot) jobFullyVacated(scope *trialScope, unit *gangUnit) bool {
+	if unit.job == nil {
+		return false
+	}
+	allocated := 0
+	for status, tasks := range unit.job.TaskStatusIndex {
+		if !schedapi.AllocatedStatus(status) {
+			continue
+		}
+		for taskID := range tasks {
+			allocated++
+			if !scope.victims.Has(taskID) {
+				return false
+			}
+		}
+	}
+	return allocated > 0
+}
+
+// jobAnchorAfterEvacuation returns the Job-entry anchor the plan intends once this
+// pass's evictions are done: the LCA over the gangs that still hold a pod — the
+// gangs the plan has already placed included. Empty when the job keeps no pod, so
+// a fully drained job is bound by nothing.
+func (s *SessionSnapshot) jobAnchorAfterEvacuation(scope *trialScope, unit *gangUnit) string {
+	if unit.job == nil {
+		return ""
+	}
+	displaced := s.plan.DisplacedTasks(unit.job.UID)
+	anchor := ""
+	for _, subJob := range unit.job.SubJobs {
+		if !subJobKeepsPods(subJob, scope.victims, displaced) {
+			continue
+		}
+		anchor = s.ssn.HyperNodes.GetLCAHyperNode(anchor, subJob.AllocatedHyperNode)
+	}
+	return anchor
+}
+
+// subJobKeepsPods reports whether the subJob still holds a pod the plan keeps: an
+// allocated task this pass does not evict, or one it has already placed.
+func subJobKeepsPods(subJob *schedapi.SubJobInfo, victims, displaced sets.Set[schedapi.TaskID]) bool {
+	if subJob == nil {
+		return false
+	}
+	for status, tasks := range subJob.TaskStatusIndex {
+		if !schedapi.AllocatedStatus(status) {
+			continue
+		}
+		for taskID := range tasks {
+			if !victims.Has(taskID) || displaced.Has(taskID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// unitFullyVacated compares victim set membership against statusIndex's allocated
+// tasks: set membership, not count equality — on the Execute-side reconcile a
+// victim is the live Pending replacement pod, so counts could match while a
+// residual allocated pod still anchors the gang.
+func unitFullyVacated(unit *gangUnit, statusIndex map[schedapi.TaskStatus]schedapi.TasksMap) bool {
 	if len(unit.victims) == 0 {
 		return false
 	}
@@ -200,11 +322,7 @@ func (s *SessionSnapshot) gangFullyVacated(unit *gangUnit) bool {
 			victimIDs.Insert(v.UID)
 		}
 	}
-	index := unit.job.TaskStatusIndex
-	if unit.subJob != nil {
-		index = unit.subJob.TaskStatusIndex
-	}
-	for status, tasks := range index {
+	for status, tasks := range statusIndex {
 		if !schedapi.AllocatedStatus(status) {
 			continue
 		}
@@ -236,6 +354,8 @@ func (s *SessionSnapshot) trialFitDomain(
 		}
 	}
 	if len(domainReceivers) == 0 {
+		klog.V(5).InfoS("repack relocation: domain has no receiver", "domain", domain.Name, "tier", domain.Tier(),
+			"receiversOutsideDomain", nodeNames(receivers))
 		return nil, false
 	}
 	saved := clonePlaced(tasksPlacedByNode)
@@ -253,6 +373,9 @@ func (s *SessionSnapshot) trialFitDomain(
 		}
 		target := s.firstFeasibleReceiver(ctx, simulatedVictim, baseState, domainReceivers, tasksPlacedByNode)
 		if target == "" {
+			klog.V(5).InfoS("repack relocation: victim has no feasible receiver in domain",
+				"domain", domain.Name, "tier", domain.Tier(), "victim", simulatedVictim.Name,
+				"from", simulatedVictim.NodeName, "domainReceivers", nodeNames(domainReceivers))
 			restorePlaced(tasksPlacedByNode, saved)
 			return nil, false
 		}
@@ -308,4 +431,60 @@ func restorePlaced(m, saved map[string][]*schedapi.TaskInfo) {
 	for k, v := range saved {
 		m[k] = v
 	}
+}
+
+func taskNames(tasks []*schedapi.TaskInfo) []string {
+	names := make([]string, 0, len(tasks))
+	for _, task := range tasks {
+		if task != nil {
+			names = append(names, task.Name)
+		}
+	}
+	return names
+}
+
+func nodeNames(nodes []*schedapi.NodeInfo) []string {
+	names := make([]string, 0, len(nodes))
+	for _, node := range nodes {
+		if node != nil {
+			names = append(names, node.Name)
+		}
+	}
+	return names
+}
+
+// domainsByTier renders a gradient forest for logs, e.g. "tier-1: rt-s0, rt-s1; tier-2: rt-s2".
+func domainsByTier(layers [][]*schedapi.HyperNodeInfo) string {
+	parts := make([]string, 0, len(layers))
+	for _, layer := range layers {
+		names := make([]string, 0, len(layer))
+		tier := 0
+		for _, hyperNode := range layer {
+			if hyperNode == nil {
+				continue
+			}
+			tier = hyperNode.Tier()
+			names = append(names, hyperNode.Name)
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			parts = append(parts, fmt.Sprintf("tier-%d: %s", tier, strings.Join(names, ", ")))
+		}
+	}
+	if len(parts) == 0 {
+		return "none"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// moveSummary renders planned placements for logs, e.g. "pod-a: from n0 to n1".
+// An arrow would be escaped to > by klog's text output.
+func moveSummary(moves []*api.Move) []string {
+	pairs := make([]string, 0, len(moves))
+	for _, move := range moves {
+		if move != nil && move.Task != nil {
+			pairs = append(pairs, fmt.Sprintf("%s: from %s to %s", move.Task.Name, move.From, move.To))
+		}
+	}
+	return pairs
 }

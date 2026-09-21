@@ -142,7 +142,7 @@ func drainGreedy(
 		metrics.ObservePlanner(string(ssn.Mode()), s.candidatesEvaluated, s.feasibilitySimulations, s.prunedByReason)
 		klog.V(4).InfoS("repack drain: planning performance summary", "run", runName(ssn),
 			"candidateEvaluations", s.candidatesEvaluated, "feasibilitySimulations", s.feasibilitySimulations,
-			"prunedByReason", s.prunedByReason, "duration", time.Since(planningStartTime))
+			"prunedByReason", s.prunedByReason, "moves", len(s.moves), "duration", time.Since(planningStartTime))
 	}()
 	for step := 1; ; step++ {
 		if ssn.Context().Err() != nil {
