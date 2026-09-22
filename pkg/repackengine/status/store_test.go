@@ -66,7 +66,11 @@ func TestWriteKeepsTerminalPhaseFinal(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "running-run"},
 		Status:     repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackRunning},
 	}
-	client := vcfake.NewSimpleClientset(terminal, running)
+	partial := &repackv1alpha1.RepackRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-run"},
+		Status:     repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackPartiallySucceeded},
+	}
+	client := vcfake.NewSimpleClientset(terminal, running, partial)
 	store := NewStore(client)
 
 	if err := store.Write(context.Background(), terminal.Name, &repackv1alpha1.RepackRunStatus{
@@ -76,6 +80,11 @@ func TestWriteKeepsTerminalPhaseFinal(t *testing.T) {
 	}
 	if err := store.Write(context.Background(), running.Name, &repackv1alpha1.RepackRunStatus{
 		Phase: repackv1alpha1.RepackPending, Message: "deferred by execute gate",
+	}); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := store.Write(context.Background(), partial.Name, &repackv1alpha1.RepackRunStatus{
+		Phase: repackv1alpha1.RepackRunning, Message: "stale placement reconciliation",
 	}); err != nil {
 		t.Fatalf("Write() error = %v", err)
 	}
@@ -93,5 +102,12 @@ func TestWriteKeepsTerminalPhaseFinal(t *testing.T) {
 	}
 	if got.Status.Phase != repackv1alpha1.RepackPending {
 		t.Errorf("phase = %q, want the non-terminal write to land", got.Status.Phase)
+	}
+	got, err = client.RepackV1alpha1().RepackRuns().Get(context.Background(), partial.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status.Phase != repackv1alpha1.RepackPartiallySucceeded || got.Status.Message != "" {
+		t.Errorf("partial status = %+v, want the terminal status untouched", got.Status)
 	}
 }

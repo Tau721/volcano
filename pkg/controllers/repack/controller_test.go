@@ -75,6 +75,22 @@ func TestControllerReconcileDeletesExpiredRun(t *testing.T) {
 	}
 }
 
+func TestControllerReconcileDeletesExpiredPartiallySucceededRun(t *testing.T) {
+	now := time.Unix(10_000, 0)
+	run := terminalRun("expired-partial", repackv1alpha1.RepackModeDryRun, now.Add(-2*time.Minute), 1)
+	run.Status.Phase = repackv1alpha1.RepackPartiallySucceeded
+	controller, volcanoClient := controllerForRun(run, now, 0)
+	defer controller.workQueue.ShutDown()
+
+	if err := controller.reconcile(context.Background(), run.Name); err != nil {
+		t.Fatalf("reconcile() error = %v", err)
+	}
+	_, err := volcanoClient.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("expired partially succeeded run should be deleted, get error = %v", err)
+	}
+}
+
 func TestControllerReconcileRetainsExecuteRunForCooldown(t *testing.T) {
 	now := time.Unix(10_000, 0)
 	run := terminalRun("cooldown", repackv1alpha1.RepackModeExecute, now.Add(-time.Minute), 1)

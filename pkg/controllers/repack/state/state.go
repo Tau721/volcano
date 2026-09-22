@@ -75,30 +75,43 @@ const (
 	ReasonReconcileFailed            = "ReconcileFailed"
 )
 
-// DerivePhase projects conditions onto the coarse phase (§4.6.1). Precedence:
-// Failed > Complete(=Succeeded) > Progressing(=Running) > Pending.
+// DerivePhase projects conditions onto the coarse phase (§4.6.1). A completed
+// execution whose planned benefit was not realized is projected as
+// PartiallySucceeded. Precedence: Failed > Complete > Progressing > Pending.
 func DerivePhase(conds []metav1.Condition) repackv1alpha1.RepackPhase {
-	switch {
-	case meta.IsStatusConditionTrue(conds, CondFailed):
+	if meta.IsStatusConditionTrue(conds, CondFailed) {
 		return repackv1alpha1.RepackFailed
-	case meta.IsStatusConditionTrue(conds, CondComplete):
-		return repackv1alpha1.RepackSucceeded
-	case meta.IsStatusConditionTrue(conds, CondProgressing):
-		return repackv1alpha1.RepackRunning
-	default:
-		return repackv1alpha1.RepackPending
 	}
+	if complete := meta.FindStatusCondition(conds, CondComplete); complete != nil && complete.Status == metav1.ConditionTrue {
+		if complete.Reason == ReasonBenefitNotRealized {
+			return repackv1alpha1.RepackPartiallySucceeded
+		}
+		return repackv1alpha1.RepackSucceeded
+	}
+	if meta.IsStatusConditionTrue(conds, CondProgressing) {
+		return repackv1alpha1.RepackRunning
+	}
+	return repackv1alpha1.RepackPending
 }
 
 // IsTerminal reports whether a phase is a final state.
 func IsTerminal(p repackv1alpha1.RepackPhase) bool {
 	switch p {
 	case repackv1alpha1.RepackSucceeded,
+		repackv1alpha1.RepackPartiallySucceeded,
 		repackv1alpha1.RepackFailed:
 		return true
 	default:
 		return false
 	}
+}
+
+// IsSuccessful reports whether a phase counts toward successful policy history
+// and lastSuccessfulTime. A partially succeeded run completed without an
+// execution error, so policy accounting treats it as successful.
+func IsSuccessful(p repackv1alpha1.RepackPhase) bool {
+	return p == repackv1alpha1.RepackSucceeded ||
+		p == repackv1alpha1.RepackPartiallySucceeded
 }
 
 // SetCondition upserts a condition and returns whether it changed. Convenience
@@ -163,6 +176,13 @@ func MarkSucceeded(run *repackv1alpha1.RepackRun, reason, message string) bool {
 	previousPhase := run.Status.Phase
 	run.Status.Phase = DerivePhase(run.Status.Conditions)
 	return changed || previousPhase != run.Status.Phase
+}
+
+// MarkPartiallySucceeded records a terminal execution that completed without
+// an execution error but did not verify every planned node free. The Complete
+// reason distinguishes it from a fully successful completion.
+func MarkPartiallySucceeded(run *repackv1alpha1.RepackRun, message string) bool {
+	return MarkSucceeded(run, ReasonBenefitNotRealized, message)
 }
 
 // MarkFailed records a failed terminal result and clears any stale successful

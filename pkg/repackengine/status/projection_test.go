@@ -435,6 +435,9 @@ func TestTerminalOutcome(t *testing.T) {
 	if got := enginestatus.TerminalOutcome(mk(state.CondComplete, state.ReasonExecutionCompleted)); got != state.ReasonExecutionCompleted {
 		t.Errorf("complete outcome=%q, want Executed", got)
 	}
+	if got := enginestatus.TerminalOutcome(mk(state.CondComplete, state.ReasonBenefitNotRealized)); got != state.ReasonBenefitNotRealized {
+		t.Errorf("partial outcome=%q, want BenefitNotRealized", got)
+	}
 	if got := enginestatus.TerminalOutcome(mk(state.CondFailed, "ExecuteFailed")); got != "ExecuteFailed" {
 		t.Errorf("failed outcome=%q, want ExecuteFailed", got)
 	}

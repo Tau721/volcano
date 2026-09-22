@@ -126,14 +126,16 @@ func PlacementMessage(run *repackv1alpha1.RepackRun, targetResource v1.ResourceN
 			"Repack failed verification for %s: replacement bindings were reported, but the scheduler cache did not expose one coherent terminal snapshot before the deadline. Planned nodes [%s] cannot be confirmed free; inspect scheduler cache and Pod informer synchronization.",
 			resource, plannedNodes) + podGroupReplacementStatusSuffix(run)
 	case state.ReasonBenefitNotRealized:
+		realizedPlannedNodes := len(decision.Nodes.Planned) - len(decision.Nodes.Missing)
 		return fmt.Sprintf(
-			"Repack did not realize the planned benefit for %s: planned to free %d %s [%s], but verified %d %s free [%s]; nodes still occupied or unavailable: [%s]. All %d replacement %s were scheduled (%d %s); inspect target-resource usage on the missing nodes.",
-			resource, len(decision.Nodes.Planned), pluralNoun(len(decision.Nodes.Planned), "node", "nodes"), plannedNodes,
-			len(decision.Nodes.Actual), pluralNoun(len(decision.Nodes.Actual), "node", "nodes"), actualNodes,
+			"Repack partially succeeded for %s: execution completed without an error and verified %d of %d planned %s free [%s]; nodes still occupied or unavailable: [%s]. All %d replacement %s were scheduled (%d %s); cluster fragmentation changed from %d%% to %d%%.",
+			resource, realizedPlannedNodes, len(decision.Nodes.Planned),
+			pluralNoun(len(decision.Nodes.Planned), "node", "nodes"), actualNodes,
 			FormatNodeNames(decision.Nodes.Missing),
 			selectedNodePlacements+alternativeNodePlacements,
 			pluralNoun(selectedNodePlacements+alternativeNodePlacements, "Pod", "Pods"),
-			alternativeNodePlacements, pluralNoun(alternativeNodePlacements, "alternative placement", "alternative placements")) +
+			alternativeNodePlacements, pluralNoun(alternativeNodePlacements, "alternative placement", "alternative placements"),
+			plan.FragBefore, result.FragAfter) +
 			podGroupReplacementStatusSuffix(run)
 	default:
 		return fmt.Sprintf(
@@ -314,8 +316,6 @@ func failureStage(reason string) string {
 		return "Pod eviction"
 	case state.ReasonExecutionTimedOut:
 		return "execution deadline"
-	case state.ReasonBenefitNotRealized:
-		return "benefit verification"
 	case state.ReasonPlacementTimedOut:
 		return "replacement placement"
 	case state.ReasonResultVerificationFailed:

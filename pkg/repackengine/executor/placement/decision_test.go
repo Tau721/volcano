@@ -56,7 +56,7 @@ func TestEvaluateTerminalRequiresVerifiedBenefit(t *testing.T) {
 		Result: &repackv1alpha1.RepackResult{FreedNodes: []string{"n1"}, MetricsVerified: false},
 	}}
 	decision := EvaluateTerminal(run, false)
-	if decision.Succeeded || decision.Reason != state.ReasonResultVerificationFailed {
+	if decision.Outcome != TerminalFailed || decision.Reason != state.ReasonResultVerificationFailed {
 		t.Fatalf("decision=%+v, want result verification failure", decision)
 	}
 }

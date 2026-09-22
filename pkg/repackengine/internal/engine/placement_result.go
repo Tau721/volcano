@@ -74,9 +74,9 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 			// terminating victim (or another stale source-node task) briefly.
 			// Do not turn that convergence window into a permanent failed Run.
 			//
-			// A genuinely occupied planned node is still a failed outcome: it
-			// remains unequal through the placement deadline and is evaluated
-			// below as BenefitNotRealized.
+			// A genuinely occupied planned node remains unequal through the
+			// placement deadline and is then reported as PartiallySucceeded: the
+			// execution completed, but its planned benefit was not fully realized.
 			if verificationPending {
 				klog.V(4).InfoS("repack: waiting for planned node-freeing observation to converge",
 					"run", run.Name,
@@ -96,7 +96,7 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 	resultMetrics := enginestatus.Result(run)
 	selectedNodePlacementCount, alternativeNodePlacementCount, timedOutPlacementCount := enginestatus.PlacementOutcomeCounts(run)
 	klog.V(3).InfoS("repack: replacement placement terminal result evaluated",
-		"run", run.Name, "succeeded", decision.Succeeded, "reason", decision.Reason,
+		"run", run.Name, "outcome", decision.Outcome, "reason", decision.Reason,
 		"resultSnapshotUnavailable", resultSnapshotUnavailable,
 		"selectedNodePlacementCount", selectedNodePlacementCount,
 		"alternativeNodePlacementCount", alternativeNodePlacementCount,
@@ -110,9 +110,12 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 		"actualFreedNodes", decision.Nodes.Actual, "missingFreedNodes", decision.Nodes.Missing,
 		"unexpectedFreedNodes", decision.Nodes.Unexpected, "setsEqual", decision.Nodes.Equal,
 		"result", result)
-	if decision.Succeeded {
+	switch decision.Outcome {
+	case placementexecutor.TerminalSucceeded:
 		state.MarkSucceeded(run, decision.Reason, message)
-	} else {
+	case placementexecutor.TerminalPartiallySucceeded:
+		state.MarkPartiallySucceeded(run, message)
+	default:
 		state.MarkFailed(run, decision.Reason, message)
 	}
 	if err := e.updateStatusTerminal(ctx, run); err != nil {

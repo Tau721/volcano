@@ -90,8 +90,9 @@ type RepackPolicySpec struct {
 	// +kubebuilder:default=false
 	Suspend *bool `json:"suspend,omitempty"`
 
-	// SuccessfulRunsHistoryLimit keeps the most recent successful derived runs
-	// (flat, CronJob successfulJobsHistoryLimit-style). Default 3.
+	// SuccessfulRunsHistoryLimit keeps the most recent Succeeded and
+	// PartiallySucceeded derived runs as one combined successful history (flat,
+	// CronJob successfulJobsHistoryLimit-style). Default 3.
 	// +optional
 	// +kubebuilder:default=3
 	// +kubebuilder:validation:Minimum=0
@@ -151,13 +152,14 @@ type RepackPolicyStatus struct {
 	// +optional
 	LastTriggerTime *metav1.Time `json:"lastTriggerTime,omitempty"`
 
-	// LastSuccessfulTime is when the most recent derived run succeeded.
+	// LastSuccessfulTime is when the most recent Succeeded or PartiallySucceeded
+	// derived run completed.
 	// +optional
 	LastSuccessfulTime *metav1.Time `json:"lastSuccessfulTime,omitempty"`
 
-	// LastRunStatus is the most recent terminal (Succeeded/Failed) derived run's
-	// context + full status snapshot (see LastRunStatus). Written once when the
-	// run turns terminal, then overwritten by the next terminal run.
+	// LastRunStatus is the most recent terminal (Succeeded/PartiallySucceeded/Failed)
+	// derived run's context + full status snapshot (see LastRunStatus). Written
+	// once when the run turns terminal, then overwritten by the next terminal run.
 	// +optional
 	LastRunStatus *LastRunStatus `json:"lastRunStatus,omitempty"`
 

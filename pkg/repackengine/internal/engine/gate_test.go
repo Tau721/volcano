@@ -67,11 +67,12 @@ func drainedKeys(e *Engine) map[string]bool {
 // and thus never re-queued), and must skip terminal runs and DryRun runs.
 func TestRequeueGatedRuns(t *testing.T) {
 	e := newRequeueTestEngine(
-		mkRepackRun("exec-blocked", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPending), // gated → requeue
-		mkRepackRun("exec-running", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackRunning), // non-terminal → requeue
-		mkRepackRun("exec-done", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded),  // terminal → skip
-		mkRepackRun("exec-failed", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackFailed),   // terminal → skip
-		mkRepackRun("dry-pending", repackv1alpha1.RepackModeDryRun, repackv1alpha1.RepackPending),   // DryRun → skip
+		mkRepackRun("exec-blocked", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPending),            // gated → requeue
+		mkRepackRun("exec-running", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackRunning),            // non-terminal → requeue
+		mkRepackRun("exec-done", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded),             // terminal → skip
+		mkRepackRun("exec-partial", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPartiallySucceeded), // terminal → skip
+		mkRepackRun("exec-failed", repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackFailed),              // terminal → skip
+		mkRepackRun("dry-pending", repackv1alpha1.RepackModeDryRun, repackv1alpha1.RepackPending),              // DryRun → skip
 	)
 	e.requeueGatedRuns("")
 

@@ -449,8 +449,9 @@ func TestPlannedNodeFreeingCanConvergeUntilPlacementDeadline(t *testing.T) {
 		t.Fatal("a persistently occupied planned node must become terminal at the deadline")
 	}
 	decision := placementexecutor.EvaluateTerminal(run, false)
-	if decision.Succeeded || decision.Reason != state.ReasonBenefitNotRealized {
-		t.Fatalf("decision=%+v, want failed %s", decision, state.ReasonBenefitNotRealized)
+	if decision.Outcome != placementexecutor.TerminalPartiallySucceeded ||
+		decision.Reason != state.ReasonBenefitNotRealized {
+		t.Fatalf("decision=%+v, want partially succeeded %s", decision, state.ReasonBenefitNotRealized)
 	}
 }
 
@@ -530,8 +531,9 @@ func TestUpdateActualExecuteResultDoesNotClaimOccupiedPlannedNode(t *testing.T) 
 		t.Fatalf("result=%+v, want no freed node while planned node remains occupied", run.Status.Result)
 	}
 	decision := placementexecutor.EvaluateTerminal(run, false)
-	if decision.Succeeded || decision.Reason != state.ReasonBenefitNotRealized {
-		t.Fatalf("decision=%+v, want failed %s", decision, state.ReasonBenefitNotRealized)
+	if decision.Outcome != placementexecutor.TerminalPartiallySucceeded ||
+		decision.Reason != state.ReasonBenefitNotRealized {
+		t.Fatalf("decision=%+v, want partially succeeded %s", decision, state.ReasonBenefitNotRealized)
 	}
 	if got, want := decision.Nodes.Missing, []string{"planned"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("missing=%v, want %v", got, want)
@@ -547,7 +549,7 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 		metricsVerified           bool
 		resultSnapshotUnavailable bool
 		alternativeNode           bool
-		wantSucceeded             bool
+		wantOutcome               placementexecutor.TerminalOutcome
 		wantReason                string
 		wantMissing               []string
 		wantUnexpected            []string
@@ -558,7 +560,7 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				repackv1alpha1.PodPlacementPlaced,
 			},
 			plannedNodes: []string{"node-b", "node-a"}, actualNodes: []string{"node-a", "node-b"},
-			metricsVerified: true, wantSucceeded: true, wantReason: state.ReasonExecutionCompleted,
+			metricsVerified: true, wantOutcome: placementexecutor.TerminalSucceeded, wantReason: state.ReasonExecutionCompleted,
 		},
 		{
 			name: "alternative node is diagnostic when benefit is realized",
@@ -567,7 +569,16 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 			},
 			plannedNodes: []string{"node-a"}, actualNodes: []string{"node-a"},
 			metricsVerified: true, alternativeNode: true,
-			wantSucceeded: true, wantReason: state.ReasonExecutionCompletedWithAlternativePlacement,
+			wantOutcome: placementexecutor.TerminalSucceeded, wantReason: state.ReasonExecutionCompletedWithAlternativePlacement,
+		},
+		{
+			name: "additional free nodes do not downgrade a realized plan",
+			placementPhases: []repackv1alpha1.PodPlacementPhase{
+				repackv1alpha1.PodPlacementPlaced,
+			},
+			plannedNodes: []string{"node-a"}, actualNodes: []string{"node-a", "node-b"},
+			metricsVerified: true, wantOutcome: placementexecutor.TerminalSucceeded,
+			wantReason: state.ReasonExecutionCompleted, wantUnexpected: []string{"node-b"},
 		},
 		{
 			name: "same count but different node set",
@@ -575,7 +586,8 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				repackv1alpha1.PodPlacementPlaced,
 			},
 			plannedNodes: []string{"node-a"}, actualNodes: []string{"node-b"},
-			metricsVerified: true, wantReason: state.ReasonBenefitNotRealized,
+			metricsVerified: true, wantOutcome: placementexecutor.TerminalPartiallySucceeded,
+			wantReason:  state.ReasonBenefitNotRealized,
 			wantMissing: []string{"node-a"}, wantUnexpected: []string{"node-b"},
 		},
 		{
@@ -584,8 +596,19 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				repackv1alpha1.PodPlacementPlaced,
 			},
 			plannedNodes: []string{"node-a", "node-b"}, actualNodes: []string{"node-a"},
-			metricsVerified: true, wantReason: state.ReasonBenefitNotRealized,
+			metricsVerified: true, wantOutcome: placementexecutor.TerminalPartiallySucceeded,
+			wantReason:  state.ReasonBenefitNotRealized,
 			wantMissing: []string{"node-b"},
+		},
+		{
+			name: "zero actually freed nodes is partial success when execution was verified",
+			placementPhases: []repackv1alpha1.PodPlacementPhase{
+				repackv1alpha1.PodPlacementPlaced,
+			},
+			plannedNodes: []string{"node-a", "node-b"}, actualNodes: nil,
+			metricsVerified: true, wantOutcome: placementexecutor.TerminalPartiallySucceeded,
+			wantReason:  state.ReasonBenefitNotRealized,
+			wantMissing: []string{"node-a", "node-b"},
 		},
 		{
 			name: "replacement placement timed out",
@@ -593,7 +616,8 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				repackv1alpha1.PodPlacementTimedOut,
 			},
 			plannedNodes: []string{"node-a"}, actualNodes: nil,
-			wantReason: state.ReasonPlacementTimedOut, wantMissing: []string{"node-a"},
+			wantOutcome: placementexecutor.TerminalFailed,
+			wantReason:  state.ReasonPlacementTimedOut, wantMissing: []string{"node-a"},
 		},
 		{
 			name: "terminal scheduler metrics unverified",
@@ -601,7 +625,8 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				repackv1alpha1.PodPlacementPlaced,
 			},
 			plannedNodes: []string{"node-a"}, actualNodes: nil,
-			resultSnapshotUnavailable: true, wantReason: state.ReasonResultVerificationFailed,
+			resultSnapshotUnavailable: true, wantOutcome: placementexecutor.TerminalFailed,
+			wantReason:  state.ReasonResultVerificationFailed,
 			wantMissing: []string{"node-a"},
 		},
 	}
@@ -625,8 +650,8 @@ func TestEvaluatePlacementTerminal(t *testing.T) {
 				Relocations: relocations,
 			}}
 			got := placementexecutor.EvaluateTerminal(run, test.resultSnapshotUnavailable)
-			if got.Succeeded != test.wantSucceeded || got.Reason != test.wantReason {
-				t.Fatalf("decision=%+v, want succeeded=%t reason=%s", got, test.wantSucceeded, test.wantReason)
+			if got.Outcome != test.wantOutcome || got.Reason != test.wantReason {
+				t.Fatalf("decision=%+v, want outcome=%s reason=%s", got, test.wantOutcome, test.wantReason)
 			}
 			if !reflect.DeepEqual(got.Nodes.Missing, test.wantMissing) {
 				t.Errorf("missing=%v, want %v", got.Nodes.Missing, test.wantMissing)
@@ -657,7 +682,8 @@ func TestPlacementStatusMessageExplainsMissingPlannedNodes(t *testing.T) {
 		},
 	}}
 	decision := placementexecutor.TerminalDecision{
-		Reason: state.ReasonBenefitNotRealized,
+		Outcome: placementexecutor.TerminalPartiallySucceeded,
+		Reason:  state.ReasonBenefitNotRealized,
 		Nodes: placementexecutor.FreedNodeComparison{
 			Planned: []string{"node-a", "node-b"},
 			Actual:  []string{"node-a"},
@@ -667,12 +693,11 @@ func TestPlacementStatusMessageExplainsMissingPlannedNodes(t *testing.T) {
 
 	message := enginestatus.PlacementMessage(run, resource, decision)
 	for _, want := range []string{
-		"did not realize the planned benefit",
-		"node-a, node-b",
+		"partially succeeded",
+		"verified 1 of 2 planned nodes free",
 		"node-b",
 		"2 replacement Pods were scheduled",
 		"1 alternative placement",
-		"inspect target-resource usage",
 		"ns/old -> ns/new",
 	} {
 		if !strings.Contains(message, want) {

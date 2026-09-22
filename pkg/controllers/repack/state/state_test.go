@@ -48,8 +48,11 @@ func TestDerivePhase(t *testing.T) {
 		{"complete -> Succeeded",
 			[]metav1.Condition{cond(CondProgressing, ff), cond(CondComplete, tt)},
 			repackv1alpha1.RepackSucceeded},
+		{"BenefitNotRealized completion -> PartiallySucceeded",
+			[]metav1.Condition{{Type: CondComplete, Status: tt, Reason: ReasonBenefitNotRealized}},
+			repackv1alpha1.RepackPartiallySucceeded},
 		{"failed beats complete",
-			[]metav1.Condition{cond(CondComplete, tt), cond(CondFailed, tt)},
+			[]metav1.Condition{{Type: CondComplete, Status: tt, Reason: ReasonBenefitNotRealized}, cond(CondFailed, tt)},
 			repackv1alpha1.RepackFailed},
 	}
 	for _, c := range cases {
@@ -61,7 +64,7 @@ func TestDerivePhase(t *testing.T) {
 
 func TestIsTerminal(t *testing.T) {
 	term := []repackv1alpha1.RepackPhase{
-		repackv1alpha1.RepackSucceeded, repackv1alpha1.RepackFailed,
+		repackv1alpha1.RepackSucceeded, repackv1alpha1.RepackPartiallySucceeded, repackv1alpha1.RepackFailed,
 	}
 	for _, p := range term {
 		if !IsTerminal(p) {
@@ -71,6 +74,26 @@ func TestIsTerminal(t *testing.T) {
 	for _, p := range []repackv1alpha1.RepackPhase{repackv1alpha1.RepackPending, repackv1alpha1.RepackRunning} {
 		if IsTerminal(p) {
 			t.Errorf("%v should NOT be terminal", p)
+		}
+	}
+}
+
+func TestIsSuccessfulIncludesPartialSuccess(t *testing.T) {
+	for _, phase := range []repackv1alpha1.RepackPhase{
+		repackv1alpha1.RepackSucceeded,
+		repackv1alpha1.RepackPartiallySucceeded,
+	} {
+		if !IsSuccessful(phase) {
+			t.Errorf("%v should count as successful", phase)
+		}
+	}
+	for _, phase := range []repackv1alpha1.RepackPhase{
+		repackv1alpha1.RepackPending,
+		repackv1alpha1.RepackRunning,
+		repackv1alpha1.RepackFailed,
+	} {
+		if IsSuccessful(phase) {
+			t.Errorf("%v should not count as successful", phase)
 		}
 	}
 }
@@ -125,6 +148,9 @@ func TestTTLExpired(t *testing.T) {
 	if !TTLExpired(mk(&ttl, repackv1alpha1.RepackSucceeded, &old), now) {
 		t.Error("terminal run 2h past a 1h TTL must be expired")
 	}
+	if !TTLExpired(mk(&ttl, repackv1alpha1.RepackPartiallySucceeded, &old), now) {
+		t.Error("partially succeeded run 2h past a 1h TTL must be expired")
+	}
 	if TTLExpired(mk(&ttl, repackv1alpha1.RepackSucceeded, &recent), now) {
 		t.Error("terminal run within TTL must NOT be expired")
 	}
@@ -160,6 +186,9 @@ func TestCooldownRetained(t *testing.T) {
 		t.Error("Execute within the cooldown window must be retained")
 	} else if d := CooldownRemaining(r, cooldown, now); d != 7*time.Minute {
 		t.Errorf("remaining=%v, want 7m", d)
+	}
+	if r := mk(repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackPartiallySucceeded, &fresh); !CooldownRetained(r, cooldown, now) {
+		t.Error("partially succeeded Execute within the cooldown window must be retained")
 	}
 	// Execute finished 30m ago: window passed, not retained.
 	if CooldownRetained(mk(repackv1alpha1.RepackModeExecute, repackv1alpha1.RepackSucceeded, &stale), cooldown, now) {
@@ -202,6 +231,16 @@ func TestLifecycleTransitionsKeepTerminalConditionsExclusive(t *testing.T) {
 		t.Fatalf("running state is inconsistent: phase=%s conditions=%v", run.Status.Phase, run.Status.Conditions)
 	}
 
+	if !MarkPartiallySucceeded(run, "Execution partially succeeded.") {
+		t.Fatal("MarkPartiallySucceeded should report the terminal transition")
+	}
+	if run.Status.Phase != repackv1alpha1.RepackPartiallySucceeded ||
+		!conditionIsTrue(run.Status.Conditions, CondComplete) ||
+		conditionReason(run.Status.Conditions, CondComplete) != ReasonBenefitNotRealized ||
+		conditionExists(run.Status.Conditions, CondFailed) {
+		t.Fatalf("partially successful state is inconsistent: phase=%s conditions=%v", run.Status.Phase, run.Status.Conditions)
+	}
+
 	if !MarkSucceeded(run, ReasonExecutionCompleted, "Execution completed.") {
 		t.Fatal("MarkSucceeded should report the terminal transition")
 	}
@@ -237,6 +276,15 @@ func conditionExists(conditions []metav1.Condition, conditionType string) bool {
 		}
 	}
 	return false
+}
+
+func conditionReason(conditions []metav1.Condition, conditionType string) string {
+	for i := range conditions {
+		if conditions[i].Type == conditionType {
+			return conditions[i].Reason
+		}
+	}
+	return ""
 }
 
 func conditionIsTrue(conditions []metav1.Condition, conditionType string) bool {
