@@ -59,7 +59,7 @@ func (c *Controller) reconcile(ctx context.Context, policyName string) error {
 	healthy := func(reason, message string) { setCondition(metav1.ConditionTrue, reason, message) }
 	unhealthy := func(reason, message string) { setCondition(metav1.ConditionFalse, reason, message) }
 	updateLastSuccessful := func(run *repackv1alpha1.RepackRun) {
-		if run.Status.Phase != repackv1alpha1.RepackSucceeded || run.Status.CompletionTime == nil {
+		if !repackstate.IsSuccessful(run.Status.Phase) || run.Status.CompletionTime == nil {
 			return
 		}
 		if status.LastSuccessfulTime == nil || run.Status.CompletionTime.After(status.LastSuccessfulTime.Time) {
@@ -375,12 +375,17 @@ func runLabels(policyName, trigger string, templateLabels map[string]string) map
 	return merged
 }
 
-// groupByPhase buckets terminal runs by phase (Succeeded/Failed).
+// groupByPhase buckets terminal runs into successful and failed history. Fully
+// and partially succeeded runs share the Succeeded key so one combined
+// successfulRunsHistoryLimit is applied to both phases.
 func groupByPhase(runs []*repackv1alpha1.RepackRun) map[repackv1alpha1.RepackPhase][]*repackv1alpha1.RepackRun {
 	group := map[repackv1alpha1.RepackPhase][]*repackv1alpha1.RepackRun{}
 	for _, run := range runs {
-		if repackstate.IsTerminal(run.Status.Phase) {
-			group[run.Status.Phase] = append(group[run.Status.Phase], run)
+		switch {
+		case repackstate.IsSuccessful(run.Status.Phase):
+			group[repackv1alpha1.RepackSucceeded] = append(group[repackv1alpha1.RepackSucceeded], run)
+		case run.Status.Phase == repackv1alpha1.RepackFailed:
+			group[repackv1alpha1.RepackFailed] = append(group[repackv1alpha1.RepackFailed], run)
 		}
 	}
 	return group

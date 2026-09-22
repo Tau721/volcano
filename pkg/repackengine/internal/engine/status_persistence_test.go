@@ -169,6 +169,43 @@ func TestUpdateStatusTerminalPersistsMessageAndCompletionTime(t *testing.T) {
 	}
 }
 
+func TestUpdateStatusTerminalRecordsPartialSuccessAsWarning(t *testing.T) {
+	run := &repackv1alpha1.RepackRun{
+		ObjectMeta: metav1.ObjectMeta{Name: "partial-terminal-status"},
+		Spec:       repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
+		Status: repackv1alpha1.RepackRunStatus{
+			Phase:   repackv1alpha1.RepackPartiallySucceeded,
+			Message: "planned benefit was not fully realized",
+			Conditions: []metav1.Condition{
+				{Type: state.CondComplete, Status: metav1.ConditionTrue, Reason: state.ReasonBenefitNotRealized},
+			},
+		},
+	}
+	client := vcfake.NewSimpleClientset(run.DeepCopy())
+	recorder := record.NewFakeRecorder(10)
+	engine := &Engine{volcanoClient: client, recorder: recorder}
+	if err := engine.updateStatusTerminal(context.Background(), run); err != nil {
+		t.Fatalf("updateStatusTerminal() error = %v", err)
+	}
+
+	updated, err := client.RepackV1alpha1().RepackRuns().Get(context.Background(), run.Name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status.CompletionTime == nil {
+		t.Fatal("partially succeeded run did not receive completionTime")
+	}
+	select {
+	case event := <-recorder.Events:
+		if !strings.HasPrefix(event, v1.EventTypeWarning+" ") ||
+			!strings.Contains(event, state.ReasonBenefitNotRealized) {
+			t.Fatalf("partial terminal event = %q, want Warning with partial-success reason", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("partial terminal RepackRun event was not recorded")
+	}
+}
+
 func TestUpdateStatusTerminalYieldsAfterBoundedFailures(t *testing.T) {
 	run := &repackv1alpha1.RepackRun{
 		ObjectMeta: metav1.ObjectMeta{Name: "terminal-status-retry"},

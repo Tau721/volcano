@@ -1095,7 +1095,7 @@ spec:
 
 ```yaml
 status:
-  # 简化生命周期：Pending、Running、Succeeded 或 Failed。
+  # 简化生命周期：Pending、Running、Succeeded、PartiallySucceeded 或 Failed。
   # Conditions 是权威状态，phase 由 Conditions 派生。
   phase: Succeeded
 
@@ -1216,7 +1216,8 @@ status:
 - `Pending`：`AnotherRunActive` 表示存在运行中的 Execute；`ExecuteCooldownActive` 表示仍处于冷却时间。
 - `Running`：`Planning`、`Evicting`、`ReconcilingPlacements` 分别表示规划、驱逐和重建 Pod 协调阶段。
 - DryRun `Succeeded`：`RepackRecommended` 表示存在可审核计划；`NoFragmentation` 或 `InsufficientImprovement` 表示正常完成但无需执行。
-- Execute `Succeeded`：`ExecutionCompleted` 表示计划完成；`ExecutionCompletedWithAlternativePlacement` 表示部分 Pod 调度到其他节点，但收益已验证。
+- Execute `Succeeded`：`ExecutionCompleted` 表示计划完成；`ExecutionCompletedWithAlternativePlacement` 表示部分 Pod 调度到其他节点，但所有计划腾空节点均已验证。
+- Execute `PartiallySucceeded`：执行过程没有错误，但至少一个计划节点在终态快照中仍未腾空；即使实际腾空节点数为 0 也属于该终态。
 - `Failed` 时优先阅读 `status.message`，再结合 Conditions、相关 Pod/PDB 事件和引擎日志定位问题。
 
 ## FAQ
@@ -1371,7 +1372,7 @@ kubectl get events -A --sort-by=.lastTimestamp
 
 | 字段 | 含义 | 排障/使用方式 |
 | --- | --- | --- |
-| `status.phase` | `Pending`、`Running`、`Succeeded` 或 `Failed` | 先看它判断生命周期，再看 Conditions 的 reason |
+| `status.phase` | `Pending`、`Running`、`Succeeded`、`PartiallySucceeded` 或 `Failed` | 先看它判断生命周期，再看 Conditions 的 reason |
 | `status.conditions` | Job 风格的详细状态集合 | 判断为什么等待、成功或失败；以此为准 |
 | `status.message` | 一句面向操作者的当前摘要 | 列表页、告警和人工排障的首选入口 |
 | `status.startTime` | 首次进入 `Running` 的时间 | 衡量规划/执行耗时 |
@@ -1387,6 +1388,7 @@ kubectl get events -A --sort-by=.lastTimestamp
 | `Pending` | `Progressing=False` | 已创建，等待引擎处理；Execute 可能在等待其他 Run 或冷却时间结束 |
 | `Running` | `Progressing=True` | 正在规划、驱逐或等待重建 Pod 完成调度 |
 | `Succeeded` | `Complete=True` | 正常完成或成功得出“不建议整理”的结论 |
+| `PartiallySucceeded` | `Complete=True`、`reason=BenefitNotRealized` | 执行无错误完成，但计划腾空收益未完全实现 |
 | `Failed` | `Failed=True` | 执行、Pod 调度协调或结果验证发生错误 |
 
 常见 `conditions[].reason`：
@@ -1403,6 +1405,7 @@ kubectl get events -A --sort-by=.lastTimestamp
 | 正常结论 | `InsufficientImprovement` | 存在碎片，但没有符合范围、可行性和收益阈值的计划 |
 | Execute 成功 | `ExecutionCompleted` | 所有重建 Pod 均调度到建议节点，且计划腾空节点已验证 |
 | Execute 成功 | `ExecutionCompletedWithAlternativePlacement` | 部分重建 Pod 调度到其他节点，但计划腾空收益已验证；检查 relocations 了解差异 |
+| Execute 部分成功 | `BenefitNotRealized` | 迁移和重建调度无错误完成，但计划腾空节点没有全部释放目标资源 |
 | Execute 失败 | `InvalidConfiguration` | 默认资源或运行参数无效 |
 | Execute 失败 | `ScopeResolutionFailed` | selector 或范围解析失败 |
 | Execute 失败 | `ExecutionPreparationFailed` | 驱逐前持久化计划或放置准备失败，尚未安全开始执行 |
@@ -1410,7 +1413,6 @@ kubectl get events -A --sort-by=.lastTimestamp
 | Execute 失败 | `ExecutionTimedOut` | 从第一批驱逐到 placement/收益验证的整体执行超过 `status.executionDeadline`；PDB 长期阻塞也会收敛到此结果 |
 | Execute 失败 | `PlacementTimedOut` | 状态中已有 placement 超时记录，无法形成完整结果 |
 | Execute 失败 | `ResultVerificationFailed` | 无法得到一致的终态调度快照以验证结果 |
-| Execute 失败 | `BenefitNotRealized` | 重建 Pod 已调度，但计划腾空节点没有全部释放目标资源 |
 | Execute 失败 | `ExecutionInterrupted` / `ReconcileFailed` | 引擎执行被中断或状态协调失败；结合引擎日志排查 |
 
 #### `status.plan`：计划值（DryRun 和 Execute 均有）

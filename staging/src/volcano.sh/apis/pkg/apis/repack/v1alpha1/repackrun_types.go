@@ -52,14 +52,15 @@ const (
 
 // RepackPhase is the coarse lifecycle phase. Conditions are authoritative;
 // phase is a derived projection for kubectl wait / list views.
-// +kubebuilder:validation:Enum=Pending;Running;Succeeded;Failed
+// +kubebuilder:validation:Enum=Pending;Running;Succeeded;PartiallySucceeded;Failed
 type RepackPhase string
 
 const (
-	RepackPending   RepackPhase = "Pending"
-	RepackRunning   RepackPhase = "Running"
-	RepackSucceeded RepackPhase = "Succeeded"
-	RepackFailed    RepackPhase = "Failed"
+	RepackPending            RepackPhase = "Pending"
+	RepackRunning            RepackPhase = "Running"
+	RepackSucceeded          RepackPhase = "Succeeded"
+	RepackPartiallySucceeded RepackPhase = "PartiallySucceeded"
+	RepackFailed             RepackPhase = "Failed"
 )
 
 // PodPlacementPhase reports the lifecycle of one replacement Pod placement.
@@ -299,18 +300,19 @@ type MaxPerRun struct {
 // RepackRunStatus reports lifecycle and business output. Conditions are
 // authoritative; phase is derived. "Worth repacking?" is folded into the
 // terminal Complete condition's reason (RepackRecommended /
-// ExecutionCompleted / NoFragmentation / InsufficientImprovement), not a
-// summary field.
+// ExecutionCompleted / BenefitNotRealized / NoFragmentation /
+// InsufficientImprovement), not a summary field.
 type RepackRunStatus struct {
 	// Phase is a derived projection of conditions.
 	// +optional
 	Phase RepackPhase `json:"phase,omitempty"`
 
 	// Conditions are the authoritative facts (Job-style:
-	// Progressing/Complete/Failed). Admission is CEL-only, so there is no
-	// Admitted condition. Progressing=False explains why a Pending run is
-	// waiting. The Complete condition's reason also encodes whether repacking
-	// was worthwhile.
+	// Progressing/Complete/Failed). Admission is CEL-only, so there is no Admitted
+	// condition. Progressing=False explains why a Pending run is waiting.
+	// Complete=True marks a finished non-failed run; BenefitNotRealized projects
+	// phase=PartiallySucceeded, while other Complete reasons project Succeeded.
+	// The Complete condition's reason also encodes whether repacking was worthwhile.
 	// +optional
 	// +patchMergeKey=type
 	// +patchStrategy=merge

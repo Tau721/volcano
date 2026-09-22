@@ -126,8 +126,7 @@ func placementPending(run *repackv1alpha1.RepackRun) bool {
 
 func cleanupRequired(run *repackv1alpha1.RepackRun) bool {
 	if run.Spec.Mode != repackv1alpha1.RepackModeExecute ||
-		(run.Status.Phase != repackv1alpha1.RepackSucceeded &&
-			run.Status.Phase != repackv1alpha1.RepackFailed) {
+		!state.IsTerminal(run.Status.Phase) {
 		return false
 	}
 	if run.Labels[repackv1alpha1.PlacementActiveLabel] == "true" {
@@ -144,8 +143,7 @@ func cleanupRequired(run *repackv1alpha1.RepackRun) bool {
 // so no additional persisted cleanup marker is required.
 func ExecutePreparationCleanupPending(run *repackv1alpha1.RepackRun) bool {
 	if run == nil || run.Spec.Mode != repackv1alpha1.RepackModeExecute ||
-		(run.Status.Phase != repackv1alpha1.RepackSucceeded &&
-			run.Status.Phase != repackv1alpha1.RepackFailed) ||
+		!state.IsTerminal(run.Status.Phase) ||
 		len(run.Status.Relocations) == 0 {
 		return false
 	}

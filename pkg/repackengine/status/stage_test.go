@@ -67,6 +67,12 @@ func TestResolveStageUsesOneDurableWorkflowClassification(t *testing.T) {
 			Status: repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackSucceeded,
 				Relocations: []repackv1alpha1.PodRelocationStatus{{}}},
 		}, want: StageCleanup},
+		{name: "partially succeeded terminal cleanup", run: &repackv1alpha1.RepackRun{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{repackv1alpha1.PlacementActiveLabel: "true"}},
+			Spec:       repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
+			Status: repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackPartiallySucceeded,
+				Relocations: []repackv1alpha1.PodRelocationStatus{{}}},
+		}, want: StageCleanup},
 		{name: "terminal preparation cleanup without active label", run: &repackv1alpha1.RepackRun{
 			Spec: repackv1alpha1.RepackRunSpec{Mode: repackv1alpha1.RepackModeExecute},
 			Status: repackv1alpha1.RepackRunStatus{Phase: repackv1alpha1.RepackFailed,

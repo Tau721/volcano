@@ -127,7 +127,8 @@ func (e *Engine) updateStatusTerminal(ctx context.Context, run *repackv1alpha1.R
 		"phase", run.Status.Phase, "outcome", outcome, "relocationCount", len(run.Status.Relocations))
 	if e.recorder != nil {
 		etype := v1.EventTypeNormal
-		if run.Status.Phase == repackv1alpha1.RepackFailed {
+		if run.Status.Phase == repackv1alpha1.RepackFailed ||
+			run.Status.Phase == repackv1alpha1.RepackPartiallySucceeded {
 			etype = v1.EventTypeWarning
 		}
 		message := run.Status.Message

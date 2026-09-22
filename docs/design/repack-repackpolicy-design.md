@@ -163,7 +163,7 @@ type RepackRunTemplateSpec struct {
 // 即可掌握最近一次整理的结果（碎片率前后对比），无需逐个查询 RepackRun。
 type RepackPolicyStatus struct {
     // InProgress 尚未终态的派生 Run（Pending 或 Running）。
-    // 一旦终态（Succeeded/Failed）即从此列表移除。
+    // 一旦终态（Succeeded/PartiallySucceeded/Failed）即从此列表移除。
     // +optional
     InProgress []v1.ObjectReference `json:"inProgress,omitempty"`
 
@@ -171,11 +171,12 @@ type RepackPolicyStatus struct {
     // +optional
     LastTriggerTime *metav1.Time `json:"lastTriggerTime,omitempty"`
 
-    // LastSuccessfulTime 最近一次派生 Run 成功完成的时间（Succeeded）。
+    // LastSuccessfulTime 最近一次派生 Run 无执行错误完成的时间
+    // （Succeeded 或 PartiallySucceeded）。
     // +optional
     LastSuccessfulTime *metav1.Time `json:"lastSuccessfulTime,omitempty"`
 
-    // LastRunStatus 最近一个到达终态（Succeeded/Failed）的派生 Run 的概要 + status 快照
+    // LastRunStatus 最近一个到达终态（Succeeded/PartiallySucceeded/Failed）的派生 Run 的概要 + status 快照
     // （LastRunStatus 类型：含 Run 名、mode、触发方式、目标资源 + 嵌入的完整 status）。
     // 在 Run 转入终态的同一次 reconcile 中写入（见 4.2.3 步骤 2）：对同一个 Run，其
     // 快照写入后不再更新；后续 Run 到达终态时，会用新 Run 的快照覆盖本字段（只保留最近一次）。
@@ -351,7 +352,7 @@ status:
    - workqueue `AddAfter` **不去重**：Policy 更新或多次 reconcile 会留下旧定时器，到期多触发一次无害 reconcile——重复创建由三层兜住：`lastTriggerTime` 记账拦正常重复、孤儿扫描/终态镜像兜崩溃窗口（4.2.3 步骤 6/2）、AlreadyExists 拦外部同名占用，与 CronJob controller 行为一致（Run 名取 now、不承载去重，见步骤 6）
    - `AddAfter` 随进程重启丢失：由启动时 Policy informer 回放 reconcile 统一重排，无需持久化
 3. **派生 Run 到达终态 / 删除**：Policy 控制器也**响应派生 Run 的变化**——`status.lastRunStatus`/`lastSuccessfulTime` 需在 Run 到达终态时及时回写、`inProgress[]` 需及时清理，故派生 Run **到达终态（或删除）会入队其 owner Policy** 的 reconcile（现代 CronJob controller 同样对 Job 事件入队以更新其 status）。派生 Run 都带 `repack.volcano.sh/repack-policy: {policyName}` 标签，RepackRun event handler 直接以标签值作 key 入队，无需查 ownerRef。为避免空转，只注册 **Update + Delete** 两种 handler，非终态变迁一律不唤醒：
-   - **Update**：仅当 Run 从非终态转入终态（→ Succeeded/Failed）时入队 owner Policy。`Pending→Running` 等非终态变迁不唤醒——policy 侧对此无需要做的事
+   - **Update**：仅当 Run 从非终态转入终态（→ Succeeded/PartiallySucceeded/Failed）时入队 owner Policy。`Pending→Running` 等非终态变迁不唤醒——policy 侧对此无需要做的事
    - **Delete**：始终入队 owner Policy——覆盖 TTL 到期、历史 GC、人工删除，以及删除前未及观测到终态的场景（配合步骤 2 的 NotFound 分支）
    - 无此源时，纯 cron Policy 要到下一次自持唤醒（下个 cron 槽）才感知到 Run 已结束，快照与并发门控会滞后一个调度周期。
 
@@ -380,7 +381,7 @@ rectangle "① 从 lister 取 Policy" as GET
 hexagon "NotFound?" as NF
 circle "结束" as RET
 
-rectangle "② 历史维护：\n· 收敛 inProgress[]：已终态 → 快照 lastRunStatus/\n  lastSuccessfulTime → 移出；NotFound → 移出不写\n· 超限回收：按 label 列派生 Run，超 limit 的\n  最旧 Succeeded/Failed DELETE" as S2
+rectangle "② 历史维护：\n· 收敛 inProgress[]：已终态 → 快照 lastRunStatus/\n  lastSuccessfulTime → 移出；NotFound → 移出不写\n· 超限回收：按 label 列派生 Run，超 limit 的\n  最旧成功类/Failed DELETE" as S2
 
 hexagon "③ Suspend == true?" as S3
 rectangle "condition Healthy / ReconcileSucceeded\nmessage=Suspended" as CONDS
@@ -449,8 +450,8 @@ NEXT --> RET
 
 1. 从 lister 获取 Policy（NotFound → 结束）
 2. **历史维护**：对派生 Run 做一次终态收敛与超限回收。两者都只处理已终态/超限对象、不依赖触发判定，且**新创建的 Run 是全局最新、永不超限**，回收无需排在创建之后；统一前置到门控判定前，让「上一个 Run 刚终态」与「历史已回收」在同一次 reconcile 内一并完成。分两步：
-   a. **收敛 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态——Run 已 Succeeded 则更新 `lastSuccessfulTime`（取最新值）；无论 Succeeded/Failed，凡已终态即把该 Run 的概要（`name`、`spec.mode`、`repack-trigger` 标签、`spec.goals[0].resource`）连同 `.status` 全量覆盖写入 `status.lastRunStatus`（终态后该 Run 的 status 不再变化、快照即最终值；`lastRunStatus` 只保留最近一次终态 Run，后续 Run 到终态会覆盖之），随后把 Run 从列表中移除。若某 Run 在 runLister 中已 NotFound（被手动删除、或被 TTL/GC 先于终态观测删除），说明未能观测到其终态，直接移出 `inProgress[]` 且不写快照——无终态 status 可镜像，避免列表悬挂。
-   b. **超限回收**：按 label `repack.volcano.sh/repack-policy={policyName}` 列出全部派生 Run，对 Succeeded/Failed 分别按 `creationTimestamp` 降序排列，超出 `successfulRunsHistoryLimit`/`failedRunsHistoryLimit` 的最旧者 DELETE
+   a. **收敛 inProgress[]**：扫描 `inProgress[]` 中每个 Run 的状态——Run 已 Succeeded 或 PartiallySucceeded 则更新 `lastSuccessfulTime`（取最新值）；凡 Succeeded/PartiallySucceeded/Failed 终态即把该 Run 的概要（`name`、`spec.mode`、`repack-trigger` 标签、`spec.goals[0].resource`）连同 `.status` 全量覆盖写入 `status.lastRunStatus`（终态后该 Run 的 status 不再变化、快照即最终值；`lastRunStatus` 只保留最近一次终态 Run，后续 Run 到终态会覆盖之），随后把 Run 从列表中移除。若某 Run 在 runLister 中已 NotFound（被手动删除、或被 TTL/GC 先于终态观测删除），说明未能观测到其终态，直接移出 `inProgress[]` 且不写快照——无终态 status 可镜像，避免列表悬挂。
+   b. **超限回收**：按 label `repack.volcano.sh/repack-policy={policyName}` 列出全部派生 Run；Succeeded 与 PartiallySucceeded 合并为成功历史，和 Failed 历史分别按 `creationTimestamp` 降序排列，超出 `successfulRunsHistoryLimit`/`failedRunsHistoryLimit` 的最旧者 DELETE
    先 a 后 b：终态 Run 先快照落盘、移出 `inProgress[]` 再整体回收——DELETE 目标是各类别最旧的超限者，而 `inProgress[]` 只装最新 Run，本不重叠，保持 a 在前仍保证任何终态 Run 都先留下快照。先收敛再做后续判断，保证并发门控看到的是最新状态
    **孤儿 Run 的终态镜像与记账（配套 now 命名，覆盖「宕机期已跑完」的恢复）**：b 的 label-list 顺带兜住「引擎在控制器宕机期间把孤儿 Run 跑完」的场景——该 Run 不在 `inProgress[]`、a 不会收敛它，now 命名又无法按名认领，若不处理会一直缺席 `lastRunStatus`，且其对应的 fire 在重启后会被步骤 4 再次判中、重复执行。故对 b 列表中 ownerRef UID == 本 Policy 的终态 Run，取 `Status.CompletionTime` **最大且晚于** `lastRunStatus` 当前记录（或 `lastRunStatus` 尚空）的那一个做镜像：写 `lastRunStatus` 快照（Succeeded 者同时更新 `lastSuccessfulTime`），并推进 `lastTriggerTime` = now（消耗那次未记账的触发）。**取最大值而非「逐条与可变快照比较」**——宕机期可能有多个孤儿先后终态，逐个比较、边镜像边更新快照会使结果依赖列表遍历顺序（若 b 实现改升序/分页即镜像错对象）；一次性取 CompletionTime 最大者与「只保留最近一次终态」语义一致、不依赖遍历顺序（CompletionTime 全局单调，重复 reconcile 幂等不重复写）；正常时序下终态 Run 已由 a 镜像、此处无新增，仅崩溃孤儿触发本分支
 3. 若 `spec.suspend == true`：更新 condition 为 `Healthy=True, reason=ReconcileSucceeded, message="Suspended"` 后**直接结束，不进入步骤 7 排程、不做任何 AddAfter**（整体停摆：无外部事件时完全静默——不评估碎片率、不创建 Run、不自醒）。**suspend 只冻结主动动作，不停被动响应**——步骤 2 的历史维护与派生 Run 终态收敛先于本步执行，suspend 期间若派生 Run 到终态/被删（事件驱动 reconcile），仍会照常收敛回写 status、超限回收。评估时钟**不推进**：suspend 不做碎片率评估，拨 `lastEvaluationTime` 会让「上次评估时刻」说谎。解除 suspend 是一次 spec 变更（`Generation` 递增）必触发 reconcile，在该次 reconcile 重建节拍、补一次完整评估，并按步骤 7 的补建规则（补建不逐一）至多补一个 suspend 期错过的 cron 槽——补建在**解除时刻以 now 执行**（派生 Run 名取 now，非精确回放原槽位时间戳；`max(lastTriggerTime, creationTimestamp)` 作锚点落后多久，就相当于「恢复后立即补跑一次当前编排」）。本设计不设 `startingDeadlineSeconds` 式陈旧度上限（错过超过 X 的槽不再补），恢复即补一次是其当前语义，已知边界
@@ -575,7 +576,7 @@ Policy 控制器需要以下 informer：
 
 **入队 / 事件过滤（4.2.2）**
 - Policy Add、spec Update（`Generation` 递增）入队；status-only Update（`Generation` 不变）不入队
-- 派生 Run 非终态→终态（→Succeeded/Failed）Update 入队 owner Policy（以 `repack-policy` 标签值作 key）；`Pending→Running` 等非终态变迁不入队；Run Delete 一律入队
+- 派生 Run 非终态→终态（→Succeeded/PartiallySucceeded/Failed）Update 入队 owner Policy（以 `repack-policy` 标签值作 key）；`Pending→Running` 等非终态变迁不入队；Run Delete 一律入队
 - Run informer 只注册 Update+Delete 两种 handler（断言 Add 不注册——防启动回放对存量 Run 空跑，见 4.2.2 末段）
 
 **reconcile 主干（4.2.3 步骤 1-7；fake clock 固定 now）**
@@ -596,9 +597,9 @@ Policy 控制器需要以下 informer：
 - 步骤 7 自持排程：活跃路径结尾必有 AddAfter；**纯 cron 也刷新 `lastEvaluationTime`**（评估时刻含两源），但其 nextWake = 严格未来的最近 cron 槽——周期候选仅当配置 onFrag 才武装、纯 cron 不空转（被门控阻塞跨过若干槽后，排程不落到 ≤ 当前时刻、零延迟自醒）；纯碎片率 nextWake = `lastEvaluationTime + evalCycle`；创建成功后按新 `lastTriggerTime` 重算下一 cron 槽
 
 **历史 GC / inProgress（4.2.5）**
-- 终态收敛：Succeeded → 移出 inProgress + `lastSuccessfulTime`（多终态取最新）+ `lastRunStatus` 快照（name/mode/trigger/resource + 内嵌 status）；Failed → 移出 + 快照、`lastSuccessfulTime` 不变；新终态覆盖旧快照（只留最近一次）
+- 终态收敛：Succeeded/PartiallySucceeded → 移出 inProgress + `lastSuccessfulTime`（多终态取最新）+ `lastRunStatus` 快照（name/mode/trigger/resource + 内嵌 status）；Failed → 移出 + 快照、`lastSuccessfulTime` 不变；新终态覆盖旧快照（只留最近一次）
 - Run 在 runLister 已 NotFound（未及观测终态被 TTL/人工删）→ 直接移出、**不写**快照
-- 超限回收：分 Succeeded/Failed 按 `creationTimestamp` 降序删最旧超限者；limit=0 该类别全部删；刚创建的 Run（全局最新）永不超限被误删
+- 超限回收：Succeeded 与 PartiallySucceeded 合并使用 `successfulRunsHistoryLimit`，Failed 使用 `failedRunsHistoryLimit`，各组按 `creationTimestamp` 降序删最旧超限者；limit=0 该类别全部删；刚创建的 Run（全局最新）永不超限被误删
 - 旧化身残留（同名 Policy 删除重建、ownerRef UID 不同但 label 相同）因 `creationTimestamp` 更早被先顶出，不波及新化身 Run——GC 不需查 UID（对照步骤 6 adopt）
 - 卡死非终态 Run 不被超时回收：inProgress 常驻、门控保持关闭，无 Policy 侧兜底（恢复归引擎/运维）
 

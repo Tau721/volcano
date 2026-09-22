@@ -35,6 +35,13 @@ func addSucceededRun(f *fixture, name string, created, completed time.Time) {
 	f.addRun(r)
 }
 
+func addPartiallySucceededRun(f *fixture, name string, created, completed time.Time) {
+	f.t.Helper()
+	r := run(name, "pol", "u1", TriggerCronSchedule, repackv1alpha1.RepackModeExecute, created)
+	withRunPhase(r, repackv1alpha1.RepackPartiallySucceeded, &completed)
+	f.addRun(r)
+}
+
 // Convergence: a Succeeded run leaves inProgress, records the snapshot, and
 // bumps lastSuccessfulTime to its completion.
 func TestHistorySucceededRunConverges(t *testing.T) {
@@ -55,6 +62,27 @@ func TestHistorySucceededRunConverges(t *testing.T) {
 	if ls == nil || ls.Name != "pol-r1" || ls.Trigger != TriggerCronSchedule ||
 		ls.Mode != repackv1alpha1.RepackModeExecute || ls.Resource != testResource || ls.Phase != repackv1alpha1.RepackSucceeded {
 		t.Errorf("lastRunStatus = %+v, want pol-r1 succeeded snapshot", ls)
+	}
+}
+
+// A PartiallySucceeded run has no execution error, so policy accounting treats
+// it as successful while preserving its distinct phase in the snapshot.
+func TestHistoryPartiallySucceededRunConvergesAsSuccessful(t *testing.T) {
+	f := newFixture(t, tCreate.Add(time.Minute), DefaultFragEvalCycle)
+	seedPolicyWithInProgress(f, "pol", []corev1.ObjectReference{runRef("pol-r1")})
+	addPartiallySucceededRun(f, "pol-r1", tCreate, tCreate.Add(30*time.Second))
+
+	f.reconcile("pol")
+
+	polAfter := f.getPolicy("pol")
+	if len(polAfter.Status.InProgress) != 0 {
+		t.Errorf("inProgress = %v, want empty", polAfter.Status.InProgress)
+	}
+	if polAfter.Status.LastSuccessfulTime == nil || !polAfter.Status.LastSuccessfulTime.Time.Equal(tCreate.Add(30*time.Second)) {
+		t.Errorf("lastSuccessfulTime = %v, want 00:00:30", polAfter.Status.LastSuccessfulTime)
+	}
+	if ls := polAfter.Status.LastRunStatus; ls == nil || ls.Name != "pol-r1" || ls.Phase != repackv1alpha1.RepackPartiallySucceeded {
+		t.Errorf("lastRunStatus = %+v, want pol-r1 partially succeeded snapshot", ls)
 	}
 }
 
@@ -194,6 +222,27 @@ func TestHistoryGCDeletesOldestOverLimit(t *testing.T) {
 	got := listRunNames(f)
 	if len(got) != 1 || got[0] != "pol-run-c" {
 		t.Fatalf("surviving runs = %v, want only newest pol-run-c", got)
+	}
+}
+
+// Succeeded and PartiallySucceeded share one combined successful history
+// limit; they must not each retain a full limit independently.
+func TestHistoryGCCombinesFullAndPartialSuccesses(t *testing.T) {
+	f := newFixture(t, tCreate.Add(time.Minute), DefaultFragEvalCycle)
+	limit := int32(2)
+	pol := policy("pol", "u1", tCreate)
+	pol.Spec.SuccessfulRunsHistoryLimit = &limit
+	f.addPolicy(pol)
+	addSucceededRun(f, "pol-old-success", tCreate, tCreate.Add(5*time.Second))
+	addPartiallySucceededRun(f, "pol-partial", tCreate.Add(time.Second), tCreate.Add(6*time.Second))
+	addSucceededRun(f, "pol-new-success", tCreate.Add(2*time.Second), tCreate.Add(7*time.Second))
+
+	f.reconcile("pol")
+
+	got := listRunNames(f)
+	want := []string{"pol-new-success", "pol-partial"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("surviving runs = %v, want %v", got, want)
 	}
 }
 

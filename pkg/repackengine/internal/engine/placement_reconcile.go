@@ -40,19 +40,27 @@ func (e *Engine) reconcilePlacement(ctx context.Context, run *repackv1alpha1.Rep
 	if run == nil {
 		return engineframework.RuntimeResult{}
 	}
-	if executionDeadlinePassed(run, e.now()) {
-		return runtimeError(e.timeoutExecution(ctx, run, run.Generation, e.clusterCache.Client()))
-	}
 	selectedNodePlacements, alternativeNodePlacements, timedOutPlacements := enginestatus.PlacementOutcomeCounts(run)
 	klog.V(4).InfoS("repack: reconciling replacement placement",
 		"run", run.Name, "relocationCount", len(run.Status.Relocations),
 		"selectedNodePlacementCount", selectedNodePlacements,
 		"alternativeNodePlacementCount", alternativeNodePlacements,
 		"timedOutPlacementCount", timedOutPlacements)
+	deadlinePassed := executionDeadlinePassed(run, e.now())
+	placementComplete := placementexecutor.Complete(run)
+	if deadlinePassed {
+		// A complete placement still gets one final coherent result observation at
+		// the deadline. Missing planned freed nodes are a partial success, while an
+		// unfinished eviction or placement remains an execution timeout.
+		if placementComplete && !hasRetryableEvictions(run) {
+			return e.finishPlacement(ctx, run)
+		}
+		return runtimeError(e.timeoutExecution(ctx, run, run.Generation, e.clusterCache.Client()))
+	}
 	if err := e.repairRecreatedPodGroupLeasesIfDue(ctx, run); err != nil {
 		return runtimeError(fmt.Errorf("reconcile recreated PodGroup leases: %w", err))
 	}
-	if placementexecutor.Complete(run) {
+	if placementComplete {
 		if hasRetryableEvictions(run) && !hasTimedOutPlacement(run) {
 			changed := state.MarkRunning(run, state.ReasonEvicting,
 				"Accepted replacements are restored; resuming remaining eviction retries.")

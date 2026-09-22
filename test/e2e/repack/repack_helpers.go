@@ -478,7 +478,9 @@ func waitTerminal(ctx *e2eutil.TestContext, name string) *repackv1alpha1.RepackR
 			lastGetError = nil
 			last = r
 			switch r.Status.Phase {
-			case repackv1alpha1.RepackSucceeded, repackv1alpha1.RepackFailed:
+			case repackv1alpha1.RepackSucceeded,
+				repackv1alpha1.RepackPartiallySucceeded,
+				repackv1alpha1.RepackFailed:
 				return true, nil
 			}
 			return false, nil
