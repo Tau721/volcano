@@ -252,7 +252,7 @@ func (alloc *Action) organizeJobWorksheet(job *api.JobInfo) *JobWorksheet {
 
 	for subJobID, subJob := range job.SubJobs {
 		sjWorksheet := &SubJobWorksheet{
-			tasks: util.NewPriorityQueue(ssn.TaskOrderFn),
+			tasks: util.NewPriorityQueue(nominatedTaskFirst(ssn.TaskOrderFn)),
 		}
 
 		for _, task := range subJob.TaskStatusIndex[api.Pending] {
@@ -280,6 +280,21 @@ func (alloc *Action) organizeJobWorksheet(job *api.JobInfo) *JobWorksheet {
 	}
 
 	return jWorksheet
+}
+
+// nominatedTaskFirst pops tasks that already carry a NominatedNodeName ahead of
+// the rest, so a nominated pod (preempt, or a replacement the repack controller
+// steers) claims its node before unrouted peers of the same subJob can take it.
+func nominatedTaskFirst(base api.LessFn) api.LessFn {
+	return func(l, r interface{}) bool {
+		lt, rt := l.(*api.TaskInfo), r.(*api.TaskInfo)
+		ln := lt.Pod != nil && lt.Pod.Status.NominatedNodeName != ""
+		rn := rt.Pod != nil && rt.Pod.Status.NominatedNodeName != ""
+		if ln != rn {
+			return ln
+		}
+		return base(l, r)
+	}
 }
 
 func (alloc *Action) allocateResources(actx *allocateContext) {

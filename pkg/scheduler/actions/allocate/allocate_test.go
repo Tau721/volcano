@@ -6737,3 +6737,120 @@ func TestSelectBestHyperNodeForJob_TieDeterministic(t *testing.T) {
 		assert.Error(t, err)
 	})
 }
+
+// TestAllocateNominatedTaskClaimsItsNodeFirst pins both halves of the nominated
+// path: the nominated pod must pop before its peer (queue order), and it must
+// then land on its nominated node rather than the node the scorer prefers.
+// p1 competes for exactly n1 (its node selector), so it wins n1 under the base
+// order; p2 is nominated to n1, which is half-occupied and hence scores worse
+// than the empty n2, so only the nominated-node-first branch can send p2 to n1.
+func TestAllocateNominatedTaskClaimsItsNodeFirst(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		gang.PluginName:       gang.New,
+		drf.PluginName:        drf.New,
+		proportion.PluginName: proportion.New,
+		predicates.PluginName: predicates.New,
+		nodeorder.PluginName:  nodeorder.New,
+	}
+
+	nominated := util.BuildPod("c1", "p2", "", v1.PodPending, api.BuildResourceList("1", "1G"), "pg1",
+		make(map[string]string), make(map[string]string))
+	nominated.Status.NominatedNodeName = "n1"
+
+	test := uthelper.TestCommonStruct{
+		Name: "nominated pod p2 claims n1 before its peer p1",
+		PodGroups: []*schedulingv1.PodGroup{
+			util.BuildPodGroup("pg1", "c1", "c1", 1, nil, schedulingv1.PodGroupInqueue),
+			util.BuildPodGroup("pg-occupied", "c1", "c1", 1, nil, schedulingv1.PodGroupRunning),
+		},
+		Pods: []*v1.Pod{
+			// Leaves n1 half-occupied, so p2's scorer would pick the empty n2
+			// when the nomination is ignored.
+			util.BuildPod("c1", "pod-occupied", "n1", v1.PodRunning, api.BuildResourceList("1", "1G"), "pg-occupied",
+				make(map[string]string), make(map[string]string)),
+			util.BuildPod("c1", "p1", "", v1.PodPending, api.BuildResourceList("1", "1G"), "pg1",
+				make(map[string]string), map[string]string{"nodeRole": "receiver"}),
+			nominated,
+		},
+		Nodes: []*v1.Node{
+			util.BuildNode("n1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), map[string]string{"nodeRole": "receiver"}),
+			util.BuildNode("n2", api.BuildResourceList("1", "2Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), make(map[string]string)),
+		},
+		Queues: []*schedulingv1.Queue{
+			util.BuildQueue("c1", 1, nil),
+		},
+		ExpectBindMap: map[string]string{
+			"c1/p2": "n1",
+		},
+		ExpectBindsNum: 1,
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:               drf.PluginName,
+					EnabledPreemptable: &trueValue,
+					EnabledJobOrder:    &trueValue,
+				},
+				{
+					Name:               proportion.PluginName,
+					EnabledQueueOrder:  &trueValue,
+					EnabledReclaimable: &trueValue,
+					EnabledAllocatable: &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:             nodeorder.PluginName,
+					EnabledNodeOrder: &trueValue,
+				},
+			},
+		},
+	}
+
+	test.Plugins = plugins
+	test.RegisterSession(tiers, nil)
+	defer test.Close()
+	test.Run([]framework.Action{New()})
+	if err := test.CheckAll(0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestNominatedTaskFirst covers the queue order itself: nominated tasks first,
+// base order kept inside each group, and a task without a Pod tolerated.
+func TestNominatedTaskFirst(t *testing.T) {
+	byName := func(l, r interface{}) bool {
+		return l.(*api.TaskInfo).Name < r.(*api.TaskInfo).Name
+	}
+
+	jobID := api.JobID("ns/job-order")
+	t1 := newPendingTask(jobID, "p1", "", 1000)
+	t2 := newPendingTask(jobID, "p2", "n1", 1000)
+	t3 := newPendingTask(jobID, "p3", "", 1000)
+	t4 := newPendingTask(jobID, "p4", "n1", 1000)
+	noPod := newPendingTask(jobID, "p5", "", 1000)
+	noPod.Pod = nil
+
+	q := util.NewPriorityQueue(nominatedTaskFirst(byName))
+	for _, task := range []*api.TaskInfo{t1, t2, t3, t4, noPod} {
+		q.Push(task)
+	}
+
+	popped := make([]string, 0, q.Len())
+	for !q.Empty() {
+		popped = append(popped, q.Pop().(*api.TaskInfo).Name)
+	}
+	assert.Equal(t, []string{"p2", "p4", "p1", "p3", "p5"}, popped)
+}
