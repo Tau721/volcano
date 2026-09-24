@@ -30,16 +30,17 @@ import (
 // RepackRunStatus reports lifecycle and business output. Conditions are
 // authoritative; phase is derived. "Worth repacking?" is folded into the
 // terminal Complete condition's reason (RepackRecommended /
-// ExecutionCompleted / NoFragmentation / InsufficientImprovement), not a
-// summary field.
+// ExecutionCompleted / BenefitNotRealized / NoFragmentation /
+// InsufficientImprovement), not a summary field.
 type RepackRunStatusApplyConfiguration struct {
 	// Phase is a derived projection of conditions.
 	Phase *repackv1alpha1.RepackPhase `json:"phase,omitempty"`
 	// Conditions are the authoritative facts (Job-style:
-	// Progressing/Complete/Failed). Admission is CEL-only, so there is no
-	// Admitted condition. Progressing=False explains why a Pending run is
-	// waiting. The Complete condition's reason also encodes whether repacking
-	// was worthwhile.
+	// Progressing/Complete/Failed). Admission is CEL-only, so there is no Admitted
+	// condition. Progressing=False explains why a Pending run is waiting.
+	// Complete=True marks a finished non-failed run; BenefitNotRealized projects
+	// phase=PartiallySucceeded, while other Complete reasons project Succeeded.
+	// The Complete condition's reason also encodes whether repacking was worthwhile.
 	Conditions []v1.ConditionApplyConfiguration `json:"conditions,omitempty"`
 	// Message is the current one-line operator summary.
 	Message *string `json:"message,omitempty"`

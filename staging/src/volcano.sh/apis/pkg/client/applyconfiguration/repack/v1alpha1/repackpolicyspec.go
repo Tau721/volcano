@@ -31,8 +31,9 @@ type RepackPolicySpecApplyConfiguration struct {
 	RunTemplate *RepackRunTemplateSpecApplyConfiguration `json:"runTemplate,omitempty"`
 	// Suspend pauses triggering (running runs are unaffected). Default false.
 	Suspend *bool `json:"suspend,omitempty"`
-	// SuccessfulRunsHistoryLimit keeps the most recent successful derived runs
-	// (flat, CronJob successfulJobsHistoryLimit-style). Default 3.
+	// SuccessfulRunsHistoryLimit keeps the most recent Succeeded and
+	// PartiallySucceeded derived runs as one combined successful history (flat,
+	// CronJob successfulJobsHistoryLimit-style). Default 3.
 	SuccessfulRunsHistoryLimit *int32 `json:"successfulRunsHistoryLimit,omitempty"`
 	// FailedRunsHistoryLimit keeps the most recent failed derived runs. Default 3
 	// (CronJob's failed side defaults to 1; we take 3 to stay symmetric).
