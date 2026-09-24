@@ -36,11 +36,12 @@ type RepackPolicyStatusApplyConfiguration struct {
 	// LastTriggerTime is when a run was last derived (unified across trigger
 	// sources, so not named lastScheduleTime).
 	LastTriggerTime *metav1.Time `json:"lastTriggerTime,omitempty"`
-	// LastSuccessfulTime is when the most recent derived run succeeded.
+	// LastSuccessfulTime is when the most recent Succeeded or PartiallySucceeded
+	// derived run completed.
 	LastSuccessfulTime *metav1.Time `json:"lastSuccessfulTime,omitempty"`
-	// LastRunStatus is the most recent terminal (Succeeded/Failed) derived run's
-	// context + full status snapshot (see LastRunStatus). Written once when the
-	// run turns terminal, then overwritten by the next terminal run.
+	// LastRunStatus is the most recent terminal (Succeeded/PartiallySucceeded/Failed)
+	// derived run's context + full status snapshot (see LastRunStatus). Written
+	// once when the run turns terminal, then overwritten by the next terminal run.
 	LastRunStatus *LastRunStatusApplyConfiguration `json:"lastRunStatus,omitempty"`
 	// LastEvaluationTime is when the trigger sources were last evaluated
 	// (covers cronSchedule and onFragAbovePercent).
