@@ -602,8 +602,9 @@ func (alloc *Action) allocateResourcesForTasks(subJob *api.SubJobInfo, tasks *ut
 
 		// "NominatedNodeName" can potentially be set in a previous scheduling cycle as a result of preemption.
 		// This node is likely the only candidate that will fit the pod, and hence we try it first before iterating over all nodes.
-		if len(task.Pod.Status.NominatedNodeName) > 0 {
-			if nominatedNodeInfo, ok := ssn.Nodes[task.Pod.Status.NominatedNodeName]; ok && task.InitResreq.LessEqual(nominatedNodeInfo.FutureIdle(), api.Zero) {
+		nominatedNodeName := task.Pod.Status.NominatedNodeName
+		if len(nominatedNodeName) > 0 && ssn.RealNodesSet[hyperNode].Has(nominatedNodeName) {
+			if nominatedNodeInfo, ok := ssn.Nodes[nominatedNodeName]; ok && task.InitResreq.LessEqual(nominatedNodeInfo.FutureIdle(), api.Zero) {
 				predicateNodes, fitErrors = ph.PredicateNodes(task, []*api.NodeInfo{nominatedNodeInfo}, alloc.predicate, alloc.enablePredicateErrorCache, ssn.NodesInShard)
 			}
 		}
