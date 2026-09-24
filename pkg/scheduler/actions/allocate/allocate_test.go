@@ -5844,3 +5844,868 @@ func buildPodWithNominatedNode(namespace, name, nominatedNodeName string, req v1
 	pod.Status.NominatedNodeName = nominatedNodeName
 	return pod
 }
+
+func TestAllocateHardTopologyPrefersHyperNodeWithNominatedNode(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// s0 and s1 are symmetric, so both solutions score the same and the nominated node is the only
+	// input that can decide between them. Repeat the case to catch the random tie-break.
+	newCase := func() uthelper.TestCommonStruct {
+		return uthelper.TestCommonStruct{
+			Name: "hard network topology, the task is placed in the hyperNode holding its nominated node",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 0),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "s1-n2", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("s0-n1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("s1-n2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{0: sets.New[string]("s0", "s1"), 1: sets.New[string]("s2")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"s0": api.NewHyperNodeInfo(api.BuildHyperNode("s0", 0, []api.MemberConfig{
+					{
+						Name:     "s0-n1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"s1": api.NewHyperNodeInfo(api.BuildHyperNode("s1", 0, []api.MemberConfig{
+					{
+						Name:     "s1-n2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"s2": api.NewHyperNodeInfo(api.BuildHyperNode("s2", 1, []api.MemberConfig{
+					{
+						Name:     "s0",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "s1",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"s0": sets.New[string]("s0-n1"),
+				"s1": sets.New[string]("s1-n2"),
+				"s2": sets.New[string]("s0-n1", "s1-n2"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "s1-n2",
+			},
+			ExpectBindsNum: 1,
+		}
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for round := 0; round < 20; round++ {
+		test := newCase()
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(0); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologyKeepsEveryNominatedNode(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// The two pods are nominated into different tier 1 hyperNodes, so only the common tier 2 hyperNode
+	// "z" can honour both nominations. The hyperNode "a" alone is able to host the whole job, and
+	// placing the job there would give up the nomination of p2.
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name: "hard network topology, the job goes to the hyperNode holding both nominated nodes",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 2, nil, schedulingv1.PodGroupInqueue, "hard", 2),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "n-a1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}),
+				buildPodWithNominatedNode("c1", "p2", "n-b1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{1: sets.New[string]("a", "b"), 2: sets.New[string]("z")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 1, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-b2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"z": api.NewHyperNodeInfo(api.BuildHyperNode("z", 2, []api.MemberConfig{
+					{
+						Name:     "a",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "b",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1", "n-a2"),
+				"b": sets.New[string]("n-b1", "n-b2"),
+				"z": sets.New[string]("n-a1", "n-a2", "n-b1", "n-b2"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "n-a1",
+				"c1/p2": "n-b1",
+			},
+			ExpectBindsNum: 2,
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologySubJobKeepsEveryNominatedNode(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// Same as TestAllocateHardTopologyKeepsEveryNominatedNode, but both pods belong to the same subJob, so
+	// the subJob cannot fall back into a single tier 1 hyperNode either.
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name: "hard network topology with subjob policy, the subJob goes to the hyperNode holding both nominated nodes",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithSubGroupPolicy("pg1", "c1", "", "q1", 2, nil, schedulingv1.PodGroupInqueue, "hard", 2,
+					[]schedulingv1.SubGroupPolicySpec{
+						util.BuildSubGroupPolicy("task1", []string{"volcano.sh/task-spec"}, "hard", 2),
+					}),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "n-a1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+				buildPodWithNominatedNode("c1", "p2", "n-b1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{1: sets.New[string]("a", "b"), 2: sets.New[string]("z")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 1, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-b2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"z": api.NewHyperNodeInfo(api.BuildHyperNode("z", 2, []api.MemberConfig{
+					{
+						Name:     "a",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "b",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1", "n-a2"),
+				"b": sets.New[string]("n-b1", "n-b2"),
+				"z": sets.New[string]("n-a1", "n-a2", "n-b1", "n-b2"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "n-a1",
+				"c1/p2": "n-b1",
+			},
+			ExpectBindsNum: 2,
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologyKeepsEveryNominatedNodeAcrossSubJobs(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// Same as TestAllocateHardTopologyKeepsEveryNominatedNode, but the pods carry different values of the
+	// subGroup label, so they form two subJobs and the job level has to consider the nominations of both.
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name: "hard network topology with two subjobs, the job goes to the hyperNode holding both nominated nodes",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithSubGroupPolicy("pg1", "c1", "", "q1", 2, nil, schedulingv1.PodGroupInqueue, "hard", 2,
+					[]schedulingv1.SubGroupPolicySpec{
+						util.BuildSubGroupPolicy("task1", []string{"volcano.sh/task-spec"}, "hard", 2),
+					}),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "n-a1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "master"}),
+				buildPodWithNominatedNode("c1", "p2", "n-b1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b2", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{1: sets.New[string]("a", "b"), 2: sets.New[string]("z")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 1, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-b2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"z": api.NewHyperNodeInfo(api.BuildHyperNode("z", 2, []api.MemberConfig{
+					{
+						Name:     "a",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "b",
+						Type:     topologyv1alpha1.MemberTypeHyperNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1", "n-a2"),
+				"b": sets.New[string]("n-b1", "n-b2"),
+				"z": sets.New[string]("n-a1", "n-a2", "n-b1", "n-b2"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "n-a1",
+				"c1/p2": "n-b1",
+			},
+			ExpectBindsNum: 2,
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologyFallsBackWhenTheNominatedHyperNodeFitsNothing(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// The nominated node sits in the tier 0 hyperNode "a", whose three nodes have 1 cpu each: the zone
+	// idle is the sum of its nodes, so "a" stays a candidate for the 2 cpu task while no single node of it
+	// can host the task. The job has to fall back to the tier 1 hyperNode "b".
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name: "hard network topology, the job falls back when no node of the nominated hyperNode can host it",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 1),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "n-a1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a2", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a3", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{0: sets.New[string]("a"), 1: sets.New[string]("b")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 0, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a3",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1", "n-a2", "n-a3"),
+				"b": sets.New[string]("n-b1"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "n-b1",
+			},
+			ExpectBindsNum: 1,
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateTopologyKeepsTheNominatedNodeOutsideEveryHyperNode(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// "n-x" belongs to no hyperNode, so ClusterTopHyperNode, which holds every node, is the only
+	// hyperNode holding the nominated node: the job drops the region constraint and lands on "n-x".
+	// A soft job is converted into a hard one with the ClusterTopHyperNode tier as the highest allowed
+	// tier; the "hard" cases below allow that tier explicitly.
+	newCase := func(name, mode string, highestTierAllowed int, nominatedNodeName, expectedNode string) uthelper.TestCommonStruct {
+		return uthelper.TestCommonStruct{
+			Name: name,
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, mode, highestTierAllowed),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", nominatedNodeName, api.BuildResourceList("1", "1G"), "pg1", nil),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-x", api.BuildResourceList("2", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{0: sets.New[string]("a")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 0, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": expectedNode,
+			},
+			ExpectBindsNum: 1,
+		}
+	}
+
+	tests := []uthelper.TestCommonStruct{
+		newCase("soft network topology, no nominated node, the tier 0 hyperNode is used", "soft", 0, "", "n-a1"),
+		newCase("soft network topology, the nominated node belongs to no hyperNode, the job drops the region constraint", "soft", 0, "n-x", "n-x"),
+		newCase("hard network topology allowing the cluster top tier, no nominated node, the tier 0 hyperNode is used", "hard", 1, "", "n-a1"),
+		newCase("hard network topology allowing the cluster top tier, the nominated node belongs to no hyperNode, the job drops the region constraint", "hard", 1, "n-x", "n-x"),
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologySubJobFallsBackWhenTheNominatedHyperNodeFitsNothing(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	// Same as TestAllocateHardTopologyFallsBackWhenTheNominatedHyperNodeFitsNothing, but both tasks belong
+	// to one subJob, so the fallback is decided at the subJob level too: the subJob tries the hyperNode
+	// holding its nominated nodes first and has to fall back to "b" as well.
+	tests := []uthelper.TestCommonStruct{
+		{
+			Name: "hard network topology with subjob policy, the subJob falls back when no node of the nominated hyperNode can host its tasks",
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithSubGroupPolicy("pg1", "c1", "", "q1", 2, nil, schedulingv1.PodGroupInqueue, "hard", 1,
+					[]schedulingv1.SubGroupPolicySpec{
+						util.BuildSubGroupPolicy("task1", []string{"volcano.sh/task-spec"}, "hard", 1),
+					}),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", "n-a1", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+				buildPodWithNominatedNode("c1", "p2", "n-a2", api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a2", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a3", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-a4", api.BuildResourceList("1", "4Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{0: sets.New[string]("a"), 1: sets.New[string]("b")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 0, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a2",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a3",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+					{
+						Name:     "n-a4",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1", "n-a2", "n-a3", "n-a4"),
+				"b": sets.New[string]("n-b1"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": "n-b1",
+				"c1/p2": "n-b1",
+			},
+			ExpectBindsNum: 2,
+		},
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestAllocateHardTopologyNominatedNodeOverridesTierOrder(t *testing.T) {
+	plugins := map[string]framework.PluginBuilder{
+		predicates.PluginName:           predicates.New,
+		gang.PluginName:                 gang.New,
+		networktopologyaware.PluginName: networktopologyaware.New,
+	}
+
+	newCase := func(name, nominatedNodeName, expectedNode string) uthelper.TestCommonStruct {
+		return uthelper.TestCommonStruct{
+			Name: name,
+			PodGroups: []*schedulingv1.PodGroup{
+				util.BuildPodGroupWithNetWorkTopologies("pg1", "c1", "", "q1", 1, nil, schedulingv1.PodGroupInqueue, "hard", 1),
+			},
+			Pods: []*v1.Pod{
+				buildPodWithNominatedNode("c1", "p1", nominatedNodeName, api.BuildResourceList("2", "4G"), "pg1", map[string]string{"volcano.sh/task-spec": "worker"}),
+			},
+			Nodes: []*v1.Node{
+				util.BuildNode("n-a1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+				util.BuildNode("n-b1", api.BuildResourceList("4", "8Gi", []api.ScalarResource{{Name: "pods", Value: "10"}}...), nil),
+			},
+			HyperNodesSetByTier: map[int]sets.Set[string]{0: sets.New[string]("a"), 1: sets.New[string]("b")},
+			HyperNodesMap: map[string]*api.HyperNodeInfo{
+				"a": api.NewHyperNodeInfo(api.BuildHyperNode("a", 0, []api.MemberConfig{
+					{
+						Name:     "n-a1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+				"b": api.NewHyperNodeInfo(api.BuildHyperNode("b", 1, []api.MemberConfig{
+					{
+						Name:     "n-b1",
+						Type:     topologyv1alpha1.MemberTypeNode,
+						Selector: "exact",
+					},
+				})),
+			},
+			HyperNodes: map[string]sets.Set[string]{
+				"a": sets.New[string]("n-a1"),
+				"b": sets.New[string]("n-b1"),
+			},
+			Queues: []*schedulingv1.Queue{
+				util.BuildQueue("q1", 1, nil),
+			},
+			ExpectBindMap: map[string]string{
+				"c1/p1": expectedNode,
+			},
+			ExpectBindsNum: 1,
+		}
+	}
+
+	// both hyperNodes can host the job, so the lower tier hyperNode "a" wins by the gradient order
+	// unless a task is nominated in the higher tier hyperNode "b"
+	tests := []uthelper.TestCommonStruct{
+		newCase("hard network topology, the nominated node overrides the lower tier hyperNode", "n-b1", "n-b1"),
+		newCase("hard network topology, the job still goes to the lower tier hyperNode without a nominated node", "", "n-a1"),
+	}
+
+	trueValue := true
+	tiers := []conf.Tier{
+		{
+			Plugins: []conf.PluginOption{
+				{
+					Name:                gang.PluginName,
+					EnabledJobOrder:     &trueValue,
+					EnabledJobReady:     &trueValue,
+					EnabledJobPipelined: &trueValue,
+					EnabledJobStarving:  &trueValue,
+				},
+				{
+					Name:             predicates.PluginName,
+					EnabledPredicate: &trueValue,
+				},
+				{
+					Name:                     networktopologyaware.PluginName,
+					EnabledNodeOrder:         &trueValue,
+					EnabledHyperNodeOrder:    &trueValue,
+					EnabledHyperNodeGradient: &trueValue,
+				},
+			},
+		},
+	}
+	for i, test := range tests {
+		t.Run(test.Name, func(t *testing.T) {
+			test.Plugins = plugins
+			test.RegisterSession(tiers, nil)
+			defer test.Close()
+			test.Run([]framework.Action{New()})
+			if err := test.CheckAll(i); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}

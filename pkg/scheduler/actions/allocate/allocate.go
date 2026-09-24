@@ -341,6 +341,74 @@ func (alloc *Action) allocateResources(actx *allocateContext) {
 	}
 }
 
+// nominatedNodeNamesOfJob returns the nodes nominated by the tasks the job worksheet is about to place.
+// It must not modify the worksheet: the caller keeps allocating the remaining subJobs from it.
+func nominatedNodeNamesOfJob(jobWorksheet *JobWorksheet) sets.Set[string] {
+	nominatedNodes := sets.New[string]()
+	for _, subJobWorksheet := range jobWorksheet.subJobWorksheets {
+		nominatedNodes = nominatedNodes.Union(nominatedNodeNamesOfSubJob(subJobWorksheet))
+	}
+	return nominatedNodes
+}
+
+// nominatedNodeNamesOfSubJob returns the nodes nominated by the tasks the subJob worksheet is about
+// to place. It must not modify the worksheet: the caller keeps allocating the tasks from it, and the
+// worksheet is reused for every candidate hyperNode.
+func nominatedNodeNamesOfSubJob(subJobWorksheet *SubJobWorksheet) sets.Set[string] {
+	nominatedNodes := sets.New[string]()
+	if subJobWorksheet == nil || subJobWorksheet.tasks == nil {
+		return nominatedNodes
+	}
+	// Drain a copy of the worksheet queue, the queue has no read-only accessor.
+	tasks := subJobWorksheet.tasks.Clone()
+	for !tasks.Empty() {
+		if nominatedNodeName := tasks.Pop().(*api.TaskInfo).Pod.Status.NominatedNodeName; len(nominatedNodeName) > 0 {
+			nominatedNodes.Insert(nominatedNodeName)
+		}
+	}
+	return nominatedNodes
+}
+
+// splitHyperNodeGradientsByNominatedNodes splits every gradient level in two: the hyperNodes holding
+// every nominated node, and the rest, both keeping the gradient order. A level where one side has no
+// candidate is dropped from that side, so an empty group means there is nothing to try in it.
+func splitHyperNodeGradientsByNominatedNodes(ssn *framework.Session, hyperNodeGradients [][]*api.HyperNodeInfo, nominatedNodes sets.Set[string]) (nominated, rest [][]*api.HyperNodeInfo) {
+	if nominatedNodes.Len() == 0 {
+		return hyperNodeGradients, nil
+	}
+
+	for _, hyperNodes := range hyperNodeGradients {
+		var nominatedHyperNodes, restHyperNodes []*api.HyperNodeInfo
+		for _, hyperNode := range hyperNodes {
+			if nominatedNodes.Difference(ssn.RealNodesSet[hyperNode.Name]).Len() == 0 {
+				nominatedHyperNodes = append(nominatedHyperNodes, hyperNode)
+			} else {
+				restHyperNodes = append(restHyperNodes, hyperNode)
+			}
+		}
+		if len(nominatedHyperNodes) > 0 {
+			nominated = append(nominated, nominatedHyperNodes)
+		}
+		if len(restHyperNodes) > 0 {
+			rest = append(rest, restHyperNodes)
+		}
+	}
+	return nominated, rest
+}
+
+// hyperNodeNamesOfGradients returns the hyperNode names of every gradient level, for logging.
+func hyperNodeNamesOfGradients(hyperNodeGradients [][]*api.HyperNodeInfo) [][]string {
+	names := make([][]string, 0, len(hyperNodeGradients))
+	for _, hyperNodes := range hyperNodeGradients {
+		levelNames := make([]string, 0, len(hyperNodes))
+		for _, hyperNode := range hyperNodes {
+			levelNames = append(levelNames, hyperNode.Name)
+		}
+		names = append(names, levelNames)
+	}
+	return names
+}
+
 func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet, hyperNodeToAllocate *api.HyperNodeInfo) *framework.Statement {
 	ssn := alloc.session
 
@@ -352,6 +420,41 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 	alloc.recorder.SnapshotSubJobStatus(job, jobWorksheet)
 
 	hyperNodeGradients := ssn.HyperNodeGradientForJobFn(job, hyperNodeToAllocate)
+	nominatedNodes := nominatedNodeNamesOfJob(jobWorksheet)
+	// The hyperNodes holding every nominated node go first, so that a nomination is not overruled by the
+	// scores of the sibling hyperNodes or by the gradient order. The rest is the untouched behaviour: a
+	// job never loses a placement it could get without the nominations.
+	nominatedGradients, restGradients := splitHyperNodeGradientsByNominatedNodes(ssn, hyperNodeGradients, nominatedNodes)
+	if klog.V(5).Enabled() && nominatedNodes.Len() > 0 {
+		klog.V(5).InfoS("Split hyperNode candidates by the nominated nodes", "job", job.UID,
+			"nominatedNodes", nominatedNodes.UnsortedList(),
+			"nominatedCandidates", hyperNodeNamesOfGradients(nominatedGradients),
+			"otherCandidates", hyperNodeNamesOfGradients(restGradients))
+	}
+	for _, gradients := range [][][]*api.HyperNodeInfo{nominatedGradients, restGradients} {
+		if len(gradients) == 0 {
+			continue
+		}
+
+		stmt, err := alloc.tryAllocateJobInHyperNodes(job, jobWorksheet, gradients)
+		if err != nil {
+			// The error is already logged, do not fall back to the remaining hyperNodes.
+			return nil
+		}
+		if stmt != nil {
+			return stmt
+		}
+	}
+
+	klog.V(5).InfoS("Cannot find any solution for job", "job", job.UID)
+	return nil
+}
+
+// tryAllocateJobInHyperNodes runs one pass over the hyperNode gradients of the job: it dry runs the
+// subJobs in every candidate hyperNode and returns the statement of the chosen hyperNode.
+func (alloc *Action) tryAllocateJobInHyperNodes(job *api.JobInfo, jobWorksheet *JobWorksheet, hyperNodeGradients [][]*api.HyperNodeInfo) (*framework.Statement, error) {
+	ssn := alloc.session
+
 	for gradient, hyperNodes := range hyperNodeGradients {
 		stmtBackup := make(map[string]*framework.Statement)   // backup the statement after the job is allocated to a hyperNode
 		jobWorksheetsBackup := make(map[string]*JobWorksheet) // backup the job worksheet after the job is allocated to a hyperNode
@@ -412,7 +515,7 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 		bestHyperNode, err := alloc.selectBestHyperNodeForJob(subJobsAllocationScores, job)
 		if err != nil {
 			klog.ErrorS(err, "Cannot find best hyper node for job", "job", job.UID, "gradient", gradient)
-			return nil
+			return nil, err
 		}
 
 		// recover the stmt
@@ -420,7 +523,7 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 		finalStmt := framework.NewStatement(ssn)
 		if err = finalStmt.RecoverOperations(bestStmt); err != nil {
 			klog.ErrorS(err, "Failed to recover operations", "job", job.UID, "hyperNode", bestHyperNode)
-			return nil
+			return nil, err
 		}
 
 		// inherit the remains worksheet after allocate to the best hyperNode
@@ -429,16 +532,14 @@ func (alloc *Action) allocateForJob(job *api.JobInfo, jobWorksheet *JobWorksheet
 		alloc.recorder.SaveJobDecision(job.UID, bestHyperNode)
 		klog.V(3).InfoS("Allocate job to hyperNode success", "job", job.UID, "hyperNode", bestHyperNode)
 
-		return finalStmt
+		return finalStmt, nil
 	}
 
-	klog.V(5).InfoS("Cannot find any solution for job", "job", job.UID)
-	return nil
+	return nil, nil
 }
 
 func (alloc *Action) allocateForSubJob(subJob *api.SubJobInfo, subJobWorksheet *SubJobWorksheet, hyperNodeForJob *api.HyperNodeInfo) (*framework.Statement, float64) {
 	ssn := alloc.session
-	job := ssn.Jobs[subJob.Job]
 
 	if subJobWorksheet == nil || subJobWorksheet.Empty() {
 		klog.V(4).InfoS("Empty subJob worksheet", "job", subJob.Job, "subJob", subJob.UID)
@@ -449,6 +550,40 @@ func (alloc *Action) allocateForSubJob(subJob *api.SubJobInfo, subJobWorksheet *
 		"subJob", subJob.UID, "allocatedHyperNode", subJob.AllocatedHyperNode, "taskNum", subJobWorksheet.tasks.Len())
 
 	hyperNodeGradients := ssn.HyperNodeGradientForSubJobFn(subJob, hyperNodeForJob)
+	nominatedNodes := nominatedNodeNamesOfSubJob(subJobWorksheet)
+	// See allocateForJob for why the hyperNodes holding every nominated node go first.
+	nominatedGradients, restGradients := splitHyperNodeGradientsByNominatedNodes(ssn, hyperNodeGradients, nominatedNodes)
+	if klog.V(5).Enabled() && nominatedNodes.Len() > 0 {
+		klog.V(5).InfoS("Split hyperNode candidates by the nominated nodes", "job", subJob.Job, "subJob", subJob.UID,
+			"nominatedNodes", nominatedNodes.UnsortedList(),
+			"nominatedCandidates", hyperNodeNamesOfGradients(nominatedGradients),
+			"otherCandidates", hyperNodeNamesOfGradients(restGradients))
+	}
+	for _, gradients := range [][][]*api.HyperNodeInfo{nominatedGradients, restGradients} {
+		if len(gradients) == 0 {
+			continue
+		}
+
+		stmt, score, err := alloc.tryAllocateSubJobInHyperNodes(subJob, subJobWorksheet, hyperNodeForJob, gradients)
+		if err != nil {
+			// The error is already logged, do not fall back to the remaining hyperNodes.
+			return nil, 0
+		}
+		if stmt != nil {
+			return stmt, score
+		}
+	}
+
+	klog.V(5).InfoS("Cannot find any solution for subJob", "subJob", subJob.UID)
+	return nil, 0
+}
+
+// tryAllocateSubJobInHyperNodes runs one pass over the hyperNode gradients of the subJob: it dry runs
+// the tasks in every candidate hyperNode and returns the statement of the chosen hyperNode.
+func (alloc *Action) tryAllocateSubJobInHyperNodes(subJob *api.SubJobInfo, subJobWorksheet *SubJobWorksheet, hyperNodeForJob *api.HyperNodeInfo, hyperNodeGradients [][]*api.HyperNodeInfo) (*framework.Statement, float64, error) {
+	ssn := alloc.session
+	job := ssn.Jobs[subJob.Job]
+
 	for gradient, hyperNodes := range hyperNodeGradients {
 		stmtBackup := make(map[string]*framework.Statement)         // backup the statement after the subJob is allocated to a hyperNode
 		subJobWorksheetsBackup := make(map[string]*SubJobWorksheet) // backup the subJob worksheet after the subJob is allocated to a hyperNode
@@ -478,7 +613,7 @@ func (alloc *Action) allocateForSubJob(subJob *api.SubJobInfo, subJobWorksheet *
 		bestHyperNode, bestScore, err := alloc.selectBestHyperNodeForSubJob(stmtBackup, subJob)
 		if err != nil {
 			klog.ErrorS(err, "Cannot find best hyper node for subJob", "subJob", subJob.UID, "gradient", gradient)
-			return nil, 0
+			return nil, 0, err
 		}
 
 		// recover the stmt and update subJob's allocatedHyperNode field
@@ -486,7 +621,7 @@ func (alloc *Action) allocateForSubJob(subJob *api.SubJobInfo, subJobWorksheet *
 		finalStmt := framework.NewStatement(ssn)
 		if err = finalStmt.RecoverOperations(bestStmt); err != nil {
 			klog.ErrorS(err, "Failed to recover operations", "subJob", subJob.UID, "hyperNode", bestHyperNode)
-			return nil, 0
+			return nil, 0, err
 		}
 		newAllocatedHyperNode := ssn.HyperNodes.GetLCAHyperNode(subJob.AllocatedHyperNode, bestHyperNode)
 		subJob.AllocatedHyperNode = newAllocatedHyperNode
@@ -498,11 +633,10 @@ func (alloc *Action) allocateForSubJob(subJob *api.SubJobInfo, subJobWorksheet *
 		klog.V(3).InfoS("Allocate subJob to hyperNode success", "subJob", subJob.UID,
 			"hyperNode", bestHyperNode, "score", bestScore, "newAllocatedHyperNode", newAllocatedHyperNode)
 
-		return finalStmt, bestScore
+		return finalStmt, bestScore, nil
 	}
 
-	klog.V(5).InfoS("Cannot find any solution for subJob", "subJob", subJob.UID)
-	return nil, 0
+	return nil, 0, nil
 }
 
 // selectBestHyperNodeForJob return the best hyperNode for the job,
