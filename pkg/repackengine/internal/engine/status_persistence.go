@@ -122,6 +122,7 @@ func (e *Engine) updateStatusTerminal(ctx context.Context, run *repackv1alpha1.R
 
 	outcome := enginestatus.TerminalOutcome(run)
 	metrics.ObserveRun(string(run.Spec.Mode), outcome)
+	metrics.ObserveRunBenefit(run, e.config.DefaultResource)
 	klog.V(4).InfoS("repack: terminal status persisted", "run", run.Name, "mode", run.Spec.Mode,
 		"phase", run.Status.Phase, "outcome", outcome, "relocationCount", len(run.Status.Relocations))
 	if e.recorder != nil {

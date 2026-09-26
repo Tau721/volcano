@@ -457,8 +457,9 @@ func runtimeError(err error) engineframework.RuntimeResult {
 }
 
 func (e *Engine) observeEvictionSummary(run *repackv1alpha1.RepackRun, summary evictionSummary) {
-	metrics.ObserveEvictions(summary.accepted, summary.rejected)
-	metrics.ObserveIndirectRemovals(summary.indirectlyRemoved)
+	resource := string(engineconf.ResolveResource(run, e.config.DefaultResource))
+	metrics.ObserveEvictions(resource, summary.accepted, summary.rejected)
+	metrics.ObserveIndirectRemovals(resource, summary.indirectlyRemoved)
 	eventType := v1.EventTypeNormal
 	if summary.rejected > 0 {
 		eventType = v1.EventTypeWarning
