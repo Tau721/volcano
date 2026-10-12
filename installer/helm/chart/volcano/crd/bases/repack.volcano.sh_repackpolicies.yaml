@@ -513,8 +513,9 @@ spec:
               successfulRunsHistoryLimit:
                 default: 3
                 description: |-
-                  SuccessfulRunsHistoryLimit keeps the most recent successful derived runs
-                  (flat, CronJob successfulJobsHistoryLimit-style). Default 3.
+                  SuccessfulRunsHistoryLimit keeps the most recent Succeeded and
+                  PartiallySucceeded derived runs as one combined successful history (flat,
+                  CronJob successfulJobsHistoryLimit-style). Default 3.
                 format: int32
                 minimum: 0
                 type: integer
@@ -679,9 +680,9 @@ spec:
                 type: string
               lastRunStatus:
                 description: |-
-                  LastRunStatus is the most recent terminal (Succeeded/Failed) derived run's
-                  context + full status snapshot (see LastRunStatus). Written once when the
-                  run turns terminal, then overwritten by the next terminal run.
+                  LastRunStatus is the most recent terminal (Succeeded/PartiallySucceeded/Failed)
+                  derived run's context + full status snapshot (see LastRunStatus). Written
+                  once when the run turns terminal, then overwritten by the next terminal run.
                 properties:
                   completionTime:
                     description: CompletionTime is when the run first reached a terminal
@@ -691,10 +692,11 @@ spec:
                   conditions:
                     description: |-
                       Conditions are the authoritative facts (Job-style:
-                      Progressing/Complete/Failed). Admission is CEL-only, so there is no
-                      Admitted condition. Progressing=False explains why a Pending run is
-                      waiting. The Complete condition's reason also encodes whether repacking
-                      was worthwhile.
+                      Progressing/Complete/Failed). Admission is CEL-only, so there is no Admitted
+                      condition. Progressing=False explains why a Pending run is waiting.
+                      Complete=True marks a finished non-failed run; BenefitNotRealized projects
+                      phase=PartiallySucceeded, while other Complete reasons project Succeeded.
+                      The Complete condition's reason also encodes whether repacking was worthwhile.
                     items:
                       description: Condition contains details for one aspect of the
                         current state of this API Resource.
@@ -782,6 +784,7 @@ spec:
                     - Pending
                     - Running
                     - Succeeded
+                    - PartiallySucceeded
                     - Failed
                     type: string
                   plan:
@@ -1105,8 +1108,9 @@ spec:
                 - trigger
                 type: object
               lastSuccessfulTime:
-                description: LastSuccessfulTime is when the most recent derived run
-                  succeeded.
+                description: |-
+                  LastSuccessfulTime is when the most recent Succeeded or PartiallySucceeded
+                  derived run completed.
                 format: date-time
                 type: string
               lastTriggerTime:
