@@ -423,35 +423,249 @@ func TestPlacementObservationDeadlinePassed(t *testing.T) {
 func TestPlannedNodeFreeingCanConvergeUntilPlacementDeadline(t *testing.T) {
 	deadline := metav1.NewTime(time.Unix(100, 0))
 	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
-		Plan:              &repackv1alpha1.RepackPlan{FreedNodes: []string{"source"}},
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{{Name: "victim", FromNode: "source", ToNode: "receiver"}},
+			}},
+		},
 		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
 		ExecutionDeadline: &deadline,
 		Relocations: []repackv1alpha1.PodRelocationStatus{{
-			Placement: repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+			Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim", VictimPodUID: types.UID("victim-uid"),
+			PlannedNodeName: "receiver",
+			Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
 		}},
 	}}
+	// The evicted victim is still visible on the source node: its removal and the
+	// scheduler snapshot arrive through independent streams, so a retry is
+	// meaningful until the deadline.
+	terminatingVictim := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"victim-uid": {UID: "victim-uid", Name: "victim"},
+	}}}
 
-	comparison, pending := placementexecutor.FreedNodeVerificationPending(run, time.Unix(99, 0))
+	comparison, pending := placementexecutor.FreedNodeVerificationPending(run, terminatingVictim, time.Unix(99, 0))
 	if comparison.Equal {
 		t.Fatal("planned and actual freed-node sets must initially differ")
 	}
 	if !pending {
-		t.Fatal("a transient missing node must be retried before the deadline")
+		t.Fatal("a still-visible victim must be retried before the deadline")
 	}
 
 	run.Status.Result.FreedNodes = []string{"source"}
-	if comparison, pending = placementexecutor.FreedNodeVerificationPending(run, time.Unix(99, 0)); !comparison.Equal || pending {
+	if comparison, pending = placementexecutor.FreedNodeVerificationPending(run, terminatingVictim, time.Unix(99, 0)); !comparison.Equal || pending {
 		t.Fatalf("comparison=%+v, want converged planned and actual node sets", comparison)
 	}
 
 	run.Status.Result.FreedNodes = nil
-	if comparison, pending = placementexecutor.FreedNodeVerificationPending(run, time.Unix(100, 0)); comparison.Equal || pending {
+	if comparison, pending = placementexecutor.FreedNodeVerificationPending(run, terminatingVictim, time.Unix(100, 0)); comparison.Equal || pending {
 		t.Fatal("a persistently occupied planned node must become terminal at the deadline")
 	}
 	decision := placementexecutor.EvaluateTerminal(run, false)
 	if decision.Outcome != placementexecutor.TerminalPartiallySucceeded ||
 		decision.Reason != state.ReasonBenefitNotRealized {
 		t.Fatalf("decision=%+v, want partially succeeded %s", decision, state.ReasonBenefitNotRealized)
+	}
+
+	// Every planned victim is gone, yet the node still holds the target resource:
+	// an unrelated Pod was scheduled onto it. Waiting cannot free it, so the
+	// verdict is final long before the deadline.
+	foreignOccupant := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"foreign-uid": {UID: "foreign-uid", Name: "foreign"},
+	}}}
+	if comparison, pending = placementexecutor.FreedNodeVerificationPending(run, foreignOccupant, time.Unix(99, 0)); comparison.Equal || pending {
+		t.Fatalf("comparison=%+v, want an immediate verdict for a node occupied beyond the plan", comparison)
+	}
+	if decision = placementexecutor.EvaluateTerminal(run, false); decision.Outcome != placementexecutor.TerminalPartiallySucceeded {
+		t.Fatalf("decision=%+v, want partially succeeded for a node occupied beyond the plan", decision)
+	}
+}
+
+func TestPlannedNodeFreeingWaitsForOutstandingVictimEviction(t *testing.T) {
+	deadline := metav1.NewTime(time.Unix(100, 0))
+	// The planned victim's eviction was never accepted: the plan still owes its
+	// removal, so the node-freeing comparison cannot be final even though the
+	// snapshot does not show the victim.
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{{Name: "victim", FromNode: "source", ToNode: "receiver"}},
+			}},
+		},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
+		Relocations: []repackv1alpha1.PodRelocationStatus{{
+			Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim",
+			PlannedNodeName: "receiver",
+			Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionPending},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+		}},
+	}}
+
+	if comparison, pending := placementexecutor.FreedNodeVerificationPending(run, nil, time.Unix(99, 0)); comparison.Equal || !pending {
+		t.Fatalf("comparison=%+v, want a retry while the planned eviction is outstanding", comparison)
+	}
+
+	// An indirectly removed victim is one the eviction stage saw terminating or
+	// already gone. While the snapshot still shows that Pod, the node is in the same
+	// convergence window as an accepted eviction.
+	run.Status.Relocations[0].Eviction.Phase = repackv1alpha1.PodEvictionIndirectlyRemoved
+	run.Status.Relocations[0].VictimPodUID = types.UID("victim-uid")
+	terminatingVictim := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"victim-uid": {UID: "victim-uid", Name: "victim"},
+	}}}
+	if comparison, pending := placementexecutor.FreedNodeVerificationPending(run, terminatingVictim, time.Unix(99, 0)); comparison.Equal || !pending {
+		t.Fatalf("comparison=%+v, want a retry while an indirectly removed victim is still visible", comparison)
+	}
+
+	// Without a recorded victim UID nothing can be matched against the snapshot, so
+	// the comparison is decided instead of waiting for the deadline.
+	run.Status.Relocations[0].VictimPodUID = ""
+	if comparison, pending := placementexecutor.FreedNodeVerificationPending(run, terminatingVictim, time.Unix(99, 0)); comparison.Equal || pending {
+		t.Fatalf("comparison=%+v, want a final verdict when the victim carries no UID", comparison)
+	}
+}
+
+func TestPlannedNodeFreeingDoesNotWaitForRejectedVictimEviction(t *testing.T) {
+	deadline := metav1.NewTime(time.Unix(100, 0))
+	// A rejected eviction is never retried, so a victim still visible on the
+	// source node cannot disappear through this run. The comparison is final
+	// even though the planned victim is present in the snapshot.
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{{Name: "victim", FromNode: "source", ToNode: "receiver"}},
+			}},
+		},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
+		Relocations: []repackv1alpha1.PodRelocationStatus{{
+			Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim", VictimPodUID: types.UID("victim-uid"),
+			PlannedNodeName: "receiver",
+			Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionRejected},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+		}},
+	}}
+	victimStillRunning := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"victim-uid": {UID: "victim-uid", Name: "victim"},
+	}}}
+
+	comparison, pending := placementexecutor.FreedNodeVerificationPending(run, victimStillRunning, time.Unix(99, 0))
+	if comparison.Equal || pending {
+		t.Fatalf("comparison=%+v, want a final verdict for a rejected eviction", comparison)
+	}
+	if decision := placementexecutor.EvaluateTerminal(run, false); decision.Outcome != placementexecutor.TerminalPartiallySucceeded {
+		t.Fatalf("decision=%+v, want partially succeeded for a rejected eviction", decision)
+	}
+}
+
+func TestPlannedNodeFreeingStillWaitsWhileAnotherVictimIsVisible(t *testing.T) {
+	deadline := metav1.NewTime(time.Unix(100, 0))
+	// The same source node has a rejected victim and an accepted victim that is
+	// still visible. A single rejected victim does not end the wait on its own:
+	// the accepted one can still disappear.
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{
+					{Name: "stuck", FromNode: "source", ToNode: "receiver"},
+					{Name: "moving", FromNode: "source", ToNode: "receiver"},
+				},
+			}},
+		},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
+		Relocations: []repackv1alpha1.PodRelocationStatus{
+			{
+				Namespace: "ns", PodGroupName: "pg", VictimPodName: "stuck", VictimPodUID: types.UID("stuck-uid"),
+				PlannedNodeName: "receiver",
+				Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionRejected},
+				Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+			},
+			{
+				Namespace: "ns", PodGroupName: "pg", VictimPodName: "moving", VictimPodUID: types.UID("moving-uid"),
+				PlannedNodeName: "receiver",
+				Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted},
+				Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+			},
+		},
+	}}
+	bothVisible := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"stuck-uid":  {UID: "stuck-uid", Name: "stuck"},
+		"moving-uid": {UID: "moving-uid", Name: "moving"},
+	}}}
+
+	if comparison, pending := placementexecutor.FreedNodeVerificationPending(run, bothVisible, time.Unix(99, 0)); comparison.Equal || !pending {
+		t.Fatalf("comparison=%+v, want a retry while an accepted victim is still visible", comparison)
+	}
+}
+
+func TestPlannedNodeFreeingDoesNotWaitWhenAcceptedVictimHasNoUID(t *testing.T) {
+	deadline := metav1.NewTime(time.Unix(100, 0))
+	// An accepted eviction recorded without a victim UID leaves nothing to observe
+	// against the snapshot. Matching by Pod name would match a recreated victim,
+	// so the comparison is decided instead of waiting for the deadline.
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{{Name: "victim", FromNode: "source", ToNode: "receiver"}},
+			}},
+		},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
+		Relocations: []repackv1alpha1.PodRelocationStatus{{
+			Namespace: "ns", PodGroupName: "pg", VictimPodName: "victim",
+			PlannedNodeName: "receiver",
+			Eviction:        repackv1alpha1.PodEvictionStatus{Phase: repackv1alpha1.PodEvictionAccepted},
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementPlaced},
+		}},
+	}}
+	victimStillRunning := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"victim-uid": {UID: "victim-uid", Name: "victim"},
+	}}}
+
+	if comparison, pending := placementexecutor.FreedNodeVerificationPending(run, victimStillRunning, time.Unix(99, 0)); comparison.Equal || pending {
+		t.Fatalf("comparison=%+v, want a final verdict when the accepted victim carries no UID", comparison)
+	}
+}
+
+func TestPlannedNodeFreeingDoesNotWaitWhenPlanVictimHasNoRelocation(t *testing.T) {
+	deadline := metav1.NewTime(time.Unix(100, 0))
+	// The eviction stage prunes every relocation that did not end in an accepted
+	// removal before placement starts. A planned move whose relocation is gone is
+	// therefore a victim this run will not move — the production shape of a rejected
+	// eviction — and its node cannot be freed by waiting.
+	run := &repackv1alpha1.RepackRun{Status: repackv1alpha1.RepackRunStatus{
+		Plan: &repackv1alpha1.RepackPlan{
+			FreedNodes: []string{"source"},
+			Moves: []repackv1alpha1.RepackMove{{
+				Namespace: "ns", PodGroupName: "pg",
+				Pods: []repackv1alpha1.PodMove{{Name: "victim", FromNode: "source", ToNode: "receiver"}},
+			}},
+		},
+		Result:            &repackv1alpha1.RepackResult{MetricsVerified: true},
+		ExecutionDeadline: &deadline,
+	}}
+	victimStillRunning := []*schedapi.NodeInfo{{Name: "source", Tasks: map[schedapi.TaskID]*schedapi.TaskInfo{
+		"victim-uid": {UID: "victim-uid", Name: "victim"},
+	}}}
+
+	comparison, pending := placementexecutor.FreedNodeVerificationPending(run, victimStillRunning, time.Unix(99, 0))
+	if comparison.Equal || pending {
+		t.Fatalf("comparison=%+v, want a final verdict for a pruned victim relocation", comparison)
+	}
+	if decision := placementexecutor.EvaluateTerminal(run, false); decision.Outcome != placementexecutor.TerminalPartiallySucceeded {
+		t.Fatalf("decision=%+v, want partially succeeded for a pruned victim relocation", decision)
 	}
 }
 

@@ -930,8 +930,8 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 	// Engine nominates the occupied planned receiver verbatim and the scheduler
 	// overrides it, binding the replacement back onto the source node the plan
 	// meant to free. The execution itself completed, so the Run must report
-	// partial success for the unrealized plan, and the deadline must release the
-	// gate and lease instead of stranding the workload.
+	// partial success for the unrealized plan, and the terminal cleanup must
+	// release the gate and lease instead of stranding the workload.
 	It("nominates an occupied planned receiver, lets the scheduler override it, and partially succeeds", func() {
 		restoreEngine := pauseRepackEngine(ctx)
 		defer restoreEngine()
@@ -1021,9 +1021,10 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 	})
 
 	// A replacement can bind successfully while unrelated concurrent work lands
-	// on the planned source node. The execution completed without an error, but
-	// the planned benefit was not fully realized, so the Run is partially
-	// successful once the observation window closes.
+	// on the planned source node. That occupant is final because repack never
+	// planned to move it, so the execution completed without an error but its
+	// planned benefit was not realized: partially succeeded, and reported without
+	// idling until the execution deadline.
 	It("projects zero realized nodes through Complete/BenefitNotRealized as PartiallySucceeded", func() {
 		restoreEngine := pauseRepackEngine(ctx)
 		defer restoreEngine()
@@ -1045,6 +1046,57 @@ var _ = Describe("Repack placement protocol", Serial, func() {
 		Expect(got.Status.Result.FreedNodes).NotTo(ContainElement(nodes[0]))
 		Expect(got.Status.Message).To(ContainSubstring("partially succeeded"),
 			"status.message must explain that the planned node-freeing benefit was incomplete")
+		Expect(got.Status.CompletionTime).NotTo(BeNil())
+		Expect(got.Status.ExecutionDeadline).NotTo(BeNil(), "an Execute run must carry its execution deadline")
+		Expect(got.Status.CompletionTime.Time.Before(got.Status.ExecutionDeadline.Time.Add(-30*time.Second))).To(BeTrue(),
+			"an occupant the plan never moves cannot be freed by waiting: the Run must not idle until the execution deadline")
+		Eventually(func() bool {
+			pod, err := ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Get(
+				context.TODO(), replacement.Name, metav1.GetOptions{})
+			return err == nil && pod.Spec.NodeName == nodes[1]
+		}, repackTimeout, repackPoll).Should(BeTrue())
+		assertPlacementLeaseReleased(ctx, pgName)
+	})
+
+	// The plan can name a victim this run cannot evict while another victim of the
+	// same node is evicted and replaced. The eviction stage keeps only accepted
+	// removals in the journal, so that victim survives as a plan move with no
+	// relocation and its Pod keeps running on the source node. Nothing this run does
+	// can free that node, so the execution completed without an error but realized no
+	// benefit: partially succeeded, and reported without idling until the execution
+	// deadline.
+	It("projects zero realized nodes while a planned victim could not be evicted", func() {
+		restoreEngine := pauseRepackEngine(ctx)
+		defer restoreEngine()
+
+		stuck := occupyNativeDeployment(ctx, "placement-unevicted-victim", nodes[0], "stay", 2)
+		defer deleteNativeWorkloads(ctx, stuck)
+
+		run, pgName, replacement := preparePlacementWithStuckVictim(
+			ctx, "placement-unevicted-victim-run", nodes[1], nodes[0], stuck, 90*time.Second)
+		defer deleteRun(ctx, run.Name)
+		Eventually(func() repackv1alpha1.PodPlacementPhase {
+			return getRun(ctx, run.Name).Status.Relocations[0].Placement.Phase
+		}, repackTimeout, repackPoll).Should(Equal(repackv1alpha1.PodPlacementWaitingForNodeSelection))
+
+		restoreEngine()
+
+		got := waitTerminal(ctx, run.Name)
+		expectPartiallySucceededContract(got, 0)
+		Expect(got.Status.Result.FreedNodes).NotTo(ContainElement(nodes[0]))
+		Expect(got.Status.Plan.Moves).To(HaveLen(2),
+			"the plan keeps the move this run could not perform")
+		Expect(got.Status.Relocations).To(HaveLen(1),
+			"the rejected eviction is dropped from the journal and must not reappear in the terminal status")
+		Expect(got.Status.CompletionTime).NotTo(BeNil())
+		Expect(got.Status.ExecutionDeadline).NotTo(BeNil(), "an Execute run must carry its execution deadline")
+		Expect(got.Status.CompletionTime.Time.Before(got.Status.ExecutionDeadline.Time.Add(-30*time.Second))).To(BeTrue(),
+			"a victim this run cannot evict cannot be freed by waiting: the Run must not idle until the execution deadline")
+		Eventually(func() bool {
+			pod, err := ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Get(
+				context.TODO(), stuck.podName, metav1.GetOptions{})
+			return err == nil && pod.Spec.NodeName == nodes[0] && pod.Status.Phase == v1.PodRunning
+		}, repackTimeout, repackPoll).Should(BeTrue(), "the unevictable victim must keep running on the source node")
 		Eventually(func() bool {
 			pod, err := ctx.Kubeclient.CoreV1().Pods(ctx.Namespace).Get(
 				context.TODO(), replacement.Name, metav1.GetOptions{})
@@ -1198,6 +1250,76 @@ func prepareGatedPlacement(ctx *e2eutil.TestContext, name, plannedNode string, f
 		Req:         resources,
 		Limit:       resources,
 		Annotations: map[string]string{"scheduling.k8s.io/group-name": pgName},
+	})
+	return run, pgName, pod
+}
+
+// preparePlacementWithStuckVictim is prepareGatedPlacement plus a second planned
+// victim of the same source node that this run cannot evict: its Eviction was
+// rejected while the other victim was evicted and replaced. The eviction stage
+// keeps only accepted removals in the journal, so the rejected victim survives as
+// a plan move with no relocation and its Pod keeps running on the source node.
+// This is the journal an Execute run reaches when one victim is blocked.
+func preparePlacementWithStuckVictim(
+	ctx *e2eutil.TestContext, name, plannedNode, sourceNode string,
+	stuck *nativeWorkload, deadline time.Duration,
+) (*repackv1alpha1.RepackRun, string, *v1.Pod) {
+	run, err := newRun(name, repackv1alpha1.RepackModeExecute).goal(npuResource).create(ctx)
+	Expect(err).NotTo(HaveOccurred())
+	pgName := fmt.Sprintf("%s-pg", run.Name)
+	podName := fmt.Sprintf("%s-replacement", run.Name)
+	expires := metav1.NewTime(time.Now().Add(deadline))
+	run.Status = repackv1alpha1.RepackRunStatus{
+		Phase:             repackv1alpha1.RepackRunning,
+		ExecutionDeadline: &expires,
+		Plan: &repackv1alpha1.RepackPlan{
+			Summary: &repackv1alpha1.RepackSummary{
+				FreedNodeCount: 1,
+				MovedCardCount: 2,
+			},
+			FreedNodes: []string{sourceNode},
+			Moves: []repackv1alpha1.RepackMove{
+				{
+					Namespace: ctx.Namespace, PodGroupName: pgName, Cards: 2,
+					Pods: []repackv1alpha1.PodMove{{Name: podName, FromNode: sourceNode, ToNode: plannedNode, Cards: 2}},
+				},
+				{
+					Namespace: ctx.Namespace, PodGroupName: stuck.podGroup, Cards: 2,
+					Pods: []repackv1alpha1.PodMove{{Name: stuck.podName, FromNode: sourceNode, ToNode: plannedNode, Cards: 2}},
+				},
+			},
+		},
+		Result: &repackv1alpha1.RepackResult{MovedCardCount: 2},
+		Relocations: []repackv1alpha1.PodRelocationStatus{{
+			Namespace: ctx.Namespace, PodGroupName: pgName, VictimPodName: podName,
+			VictimPodUID:    "evicted-original",
+			PlannedNodeName: plannedNode,
+			Eviction:        acceptedEviction(),
+			Placement:       repackv1alpha1.PodPlacementStatus{Phase: repackv1alpha1.PodPlacementWaitingForReplacement},
+		}},
+	}
+	markPlacementReconciliationCheckpoint(run)
+	run, err = ctx.Vcclient.RepackV1alpha1().RepackRuns().UpdateStatus(context.TODO(), run, metav1.UpdateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "persist in-flight placement checkpoint")
+
+	_, err = ctx.Vcclient.SchedulingV1beta1().PodGroups(ctx.Namespace).Create(context.TODO(), &schedulingv1beta1.PodGroup{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: pgName, Namespace: ctx.Namespace,
+			Annotations: map[string]string{repackv1alpha1.PlacementLeaseAnnotation: run.Name + "/" + string(run.UID)},
+		},
+		Spec: schedulingv1beta1.PodGroupSpec{MinMember: 1},
+	}, metav1.CreateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "create leased PodGroup")
+
+	quantity := resource.MustParse("2")
+	resources := v1.ResourceList{npuResource: quantity}
+	pod := e2eutil.CreatePod(ctx, e2eutil.PodSpec{
+		Name: podName, SchedulerName: e2eutil.SchedulerName, RestartPolicy: v1.RestartPolicyNever,
+		Req:   resources,
+		Limit: resources,
+		Annotations: map[string]string{
+			"scheduling.k8s.io/group-name": pgName,
+		},
 	})
 	return run, pgName, pod
 }
