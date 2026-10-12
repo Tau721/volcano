@@ -588,6 +588,39 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (US-02)", Seria
 		})
 	})
 
+	Context("E26: a fully drained multi-role job takes the sibling domain that holds both (US-02)", func() {
+		It("moves both roles into rt-s1 when the source domain has room for one", func() {
+			// E24's geometry with rt-s1's spare node widened to hold both roles (n2 at
+			// 4/8, n3 still full). rt-s0 can take role A alone and rt-s0 sorts first, so
+			// per-unit first fit marries the job to rt-s0: role B, pinned to role A's
+			// settled domain, finds nothing there and the whole drain is refused. The
+			// whole-job trial asks each candidate domain for both roles and finds rt-s1.
+			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e26", ptr.To(1),
+				repackSubGroupTask{name: "task-a", cards: 2, reps: 1, tier: ptr.To(1)},
+				repackSubGroupTask{name: "task-b", cards: 2, reps: 1, tier: ptr.To(1)}), nodes[0])
+			occupy(ctx, "e26-s1", nodes[1], 6)    // rt-s0: one slot, room for one role
+			occupy(ctx, "e26-s2", nodes[2], 4)    // rt-s1: room for both roles
+			occupy(ctx, "e26-full3", nodes[3], 8) // rt-s1 has no second slot
+
+			run, err := newRun("e26", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(HaveKey(nodes[0]), "both roles' source must be drained")
+
+			waitRunningPodCount(ctx, job, 2)
+			expectSameTierDomain(ctx, job, 1)
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(tierDomainOfPod(ctx, pod, 1)).To(Equal("rt-s1"),
+					"both roles must land in the sibling domain rt-s1")
+			}
+		})
+	})
+
 	Context("E13: both-moving self-harm is rejected at planning (US-02)", func() {
 		It("never moves the mutually anti-affine PodGroups into one domain", func() {
 			// Mutually anti-affine A (rt-s0) and B (rt-s1), both drain targets; A's
@@ -982,6 +1015,72 @@ var _ = Describe("Repack HyperNode-aware constraint preservation (custom tree)",
 			Expect(domains.Len()).To(Equal(1), "all replacement selections must share one tier-1 domain (got %v)",
 				domains.UnsortedList())
 			Expect(domains.Has("rt-s1")).To(BeTrue(), "the single domain must be the plan's whole-gang receiver rt-s1")
+		})
+	})
+})
+
+var _ = Describe("Repack HyperNode-aware constraint preservation (split across sibling domains)", Serial, func() {
+	var ctx *e2eutil.TestContext
+	var nodes []string
+
+	// E27 needs three tier-1 domains under one parent: with two, excluding the
+	// peer's domain leaves a single root and no split is expressible.
+	//
+	//	                     rt-s3 (tier 2: {rt-s0, rt-s1, rt-s2})
+	//	          /                     |                     \
+	//	rt-s0 (tier 1: {n0, n1})  rt-s1 (tier 1: {n2})  rt-s2 (tier 1: {n3})
+	BeforeEach(func() {
+		ctx = e2eutil.InitTestContext(e2eutil.Options{})
+		nodes = npuFixture(ctx, 4)
+		setupRepackTopologyCustom(ctx, []hyperNodeFixture{
+			{name: "rt-s0", tier: 1, members: []string{nodes[0], nodes[1]}, memberIsNode: true},
+			{name: "rt-s1", tier: 1, members: []string{nodes[2]}, memberIsNode: true},
+			{name: "rt-s2", tier: 1, members: []string{nodes[3]}, memberIsNode: true},
+			{name: "rt-s3", tier: 2, members: []string{"rt-s0", "rt-s1", "rt-s2"}},
+		})
+	})
+	AfterEach(func() {
+		e2eutil.CleanupTestContext(ctx) // also wipes this spec's HyperNodes
+		for _, n := range nodes {
+			clearNPU(ctx, n)
+		}
+	})
+
+	Context("E27: a PodGroup-anti-affine job splits across the sibling domains that can hold it (US-02, R30)", func() {
+		It("drains a two-role job into rt-s1 and rt-s2 when no single allowed domain holds both", func() {
+			// Both roles start on n0 (rt-s0), whose second node holds a static peer
+			// the job's required PodGroup anti-affinity excludes. Each remaining
+			// tier-1 domain has room for exactly one role, so only a plan reading
+			// the domain layer as one union can drain n0: per domain the job is
+			// infeasible and the source stays occupied.
+			job := createMovableJob(ctx, subGroupJobSpec(ctx, "e27", nil,
+				repackSubGroupTask{name: "task-a", cards: 2, reps: 1},
+				repackSubGroupTask{name: "task-b", cards: 2, reps: 1}), nodes[0])
+			peer := occupy(ctx, "e27-peer", nodes[1], 8) // full pinned peer in the source domain
+			occupy(ctx, "e27-s1", nodes[2], 6)           // rt-s1: room for one role
+			occupy(ctx, "e27-s2", nodes[3], 6)           // rt-s2: room for one role
+			patchPodGroupTopologyAffinity(ctx, job, podGroupAntiAffinity(map[string]string{"app": "e27-peer"}), nil)
+			patchPodGroupTopologyAffinity(ctx, peer, nil, map[string]string{"app": "e27-peer"})
+
+			run, err := newRun("e27", repackv1alpha1.RepackModeExecute).
+				goal(npuResource).create(ctx)
+			Expect(err).NotTo(HaveOccurred())
+
+			got := waitTerminal(ctx, run.Name)
+			Expect(got.Status.Phase).To(Equal(repackv1alpha1.RepackSucceeded))
+			Expect(completeReason(got)).To(Equal("ExecutionCompleted"))
+			freed := freedSet(got.Status.Plan.FreedNodes)
+			Expect(freed).To(HaveKey(nodes[0]), "both roles' source must be drained")
+
+			waitRunningPodCount(ctx, job, 2)
+			domains := sets.New[string]()
+			for _, pod := range runningPodsOfJob(ctx, job) {
+				Expect(nodeOfPod(pod)).NotTo(Equal(nodes[0]), "no role may stay on the drained source")
+				domains.Insert(tierDomainOfPod(ctx, pod, 1))
+			}
+			Expect(domains.UnsortedList()).To(ConsistOf("rt-s1", "rt-s2"),
+				"the roles must split over the sibling domains the excluded peer domain leaves, one in each")
+			Expect(nodeOfPod(runningPodsOfJob(ctx, peer)[0])).To(Equal(nodes[1]), "the static peer must not move")
 		})
 	})
 })

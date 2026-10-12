@@ -224,6 +224,19 @@ func TestHyperNodeGradientForPodGroupAntiAffinity(t *testing.T) {
 			wantTierOrder:  []int{2},
 		},
 		{
+			// The anchor must not narrow this gradient: the term is the only
+			// constraint, so an anchor inside the peer's supernode still leaves
+			// the free supernode (an anchored search would yield nothing).
+			name:           "own anchor inside the peer supernode does not narrow the search root",
+			hn:             buildTwoSupernodeTree(),
+			setByTier:      twoSupernodeSetByTier(),
+			jobs:           map[api.JobID]*api.JobInfo{"other": otherJobOn("other", "sn-b", "prod")},
+			selfJob:        jobWithAllocatedHyperNode("self", "sn-b", supernodeTerm),
+			root:           "root",
+			wantHyperNodes: []string{"sn-a"},
+			wantTierOrder:  []int{2},
+		},
+		{
 			name:      "follow-up after minMember partial placement rejects peer supernode",
 			hn:        buildTwoSupernodeTree(),
 			setByTier: twoSupernodeSetByTier(),
@@ -404,6 +417,52 @@ func TestHyperNodeConstraintForJobPreferredSubGroupContainer(t *testing.T) {
 	result = plugin.hyperNodeConstraintForJob(ssn, job, hn["root"])
 	if result.Applied || result.Ordered || len(result.Gradients) != 0 {
 		t.Fatalf("expected complete abstention without a peer, got %#v", result)
+	}
+}
+
+// Required SubGroup terms belong to the SubJob entry; a consumer that keys on
+// whether the Job entry constrains the Job (repack's whole-job trial) must not
+// read "keep these subGroups apart" as "keep the whole Job in one domain".
+func TestRequiredSubGroupTermsLeaveTheJobEntryUnconstrained(t *testing.T) {
+	tests := []struct {
+		name         string
+		required     []scheduling.SubGroupAffinityTerm
+		requiredAnti []scheduling.SubGroupAffinityTerm
+	}{
+		{
+			name: "required subGroup affinity",
+			required: []scheduling.SubGroupAffinityTerm{
+				{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode"},
+			},
+		},
+		{
+			name: "required subGroup anti-affinity",
+			requiredAnti: []scheduling.SubGroupAffinityTerm{
+				{SubGroups: []string{"prefill", "decode"}, TopologyTierName: "supernode"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			job := jobWithSubGroupTopologyAffinity(tt.required, nil, tt.requiredAnti, nil)
+			prefill := subJobForPolicy(job, "prefill", "prefill-0", "sn-a")
+			decode := subJobForPolicy(job, "decode", "decode-0", "sn-b")
+			job.SubJobs = map[api.SubJobID]*api.SubJobInfo{prefill.UID: prefill, decode.UID: decode}
+
+			hn := buildTwoSupernodeTree()
+			ssn := &framework.Session{
+				Jobs:                 map[api.JobID]*api.JobInfo{job.UID: job},
+				HyperNodes:           hn,
+				HyperNodesSetByTier:  twoSupernodeSetByTier(),
+				HyperNodeTierNameMap: defaultTierNameMap(),
+			}
+			plugin := New(framework.Arguments{}).(*groupTopologyAffinityPlugin)
+
+			result := plugin.hyperNodeConstraintForJob(ssn, job, hn["root"])
+			if result.Applied || result.Ordered || len(result.Gradients) != 0 {
+				t.Fatalf("SubGroup-only terms must leave the Job entry unconstrained, got %#v", result)
+			}
+		})
 	}
 }
 

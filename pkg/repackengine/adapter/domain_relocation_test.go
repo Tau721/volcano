@@ -40,6 +40,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	schedulingapi "volcano.sh/apis/pkg/apis/scheduling"
+	topologyv1alpha1 "volcano.sh/apis/pkg/apis/topology/v1alpha1"
 	schedapi "volcano.sh/volcano/pkg/scheduler/api"
 	schedcache "volcano.sh/volcano/pkg/scheduler/cache"
 	schedconf "volcano.sh/volcano/pkg/scheduler/conf"
@@ -51,6 +52,7 @@ const (
 	gradientStubName         = "hard-tier-stub"
 	antiAffinityStubName     = "anti-affinity-stub"
 	subgroupAffinityStubName = "subgroup-affinity-stub"
+	emptyGradientStubName    = "empty-gradient-stub"
 )
 
 // phaseBTask builds an allocated task with Resreq and InitResreq set (AddTask/
@@ -219,6 +221,19 @@ func registerHardTierAndAntiAffinityGradient(ssn *schedframework.Session, exclud
 	}}}
 }
 
+// registerEmptyJobGradient installs a Job-entry stub that constrains every
+// candidate away: an applied empty gradient is an unschedulable result, not an
+// abstention.
+func registerEmptyJobGradient(ssn *schedframework.Session) {
+	ssn.AddHyperNodeGradientForJobFn(emptyGradientStubName,
+		func(*schedapi.JobInfo, *schedapi.HyperNodeInfo, schedapi.SearchPurpose) schedapi.HyperNodeGradientResult {
+			return schedapi.HyperNodeGradientConstrain(nil)
+		})
+	ssn.Tiers = []schedconf.Tier{{Plugins: []schedconf.PluginOption{
+		{Name: emptyGradientStubName, EnabledHyperNodeGradient: ptr.To(true)},
+	}}}
+}
+
 // hardTierGradientStub mimics the hard-mode gradient: soft abstains; hard narrows
 // to the gang's highest-allowed ancestor subtree via GetSearchRoot, reading the
 // plan-state AllocatedHyperNode the carrier rewrites (a fully-vacated gang clears
@@ -327,7 +342,7 @@ func registerSubGroupAffinityGradient(ssn *schedframework.Session) {
 // entry abstains; the SubJob entry keeps candidates whose ancestor at each
 // term tier is the single occupied peer domain (empty peers impose nothing) and
 // outside anti-affinity peers. Occupancy reads plan-state bindings the carrier
-// rewrites, so a serial unit commit re-anchors the peer and pins the follower.
+// rewrites, so a serial gang commit re-anchors the peer and pins the follower.
 func subGroupAffinityGradientStub(ssn *schedframework.Session) (schedapi.HyperNodeGradientForJobFn, schedapi.HyperNodeGradientForSubJobFn) {
 	jobFn := func(job *schedapi.JobInfo, root *schedapi.HyperNodeInfo, purpose schedapi.SearchPurpose) schedapi.HyperNodeGradientResult {
 		return schedapi.HyperNodeGradientAbstain()
@@ -536,7 +551,7 @@ func TestDomainRelocation_HardTierFullyVacatedSingleDomain(t *testing.T) {
 }
 
 // Negative: a hard-tier-1 gang NOT fully vacated keeps anchor top (tier 2, out of
-// the allowed subtree) -> no feasible domain; unit rejected with no residue.
+// the allowed subtree) -> no feasible domain; gang rejected with no residue.
 func TestDomainRelocation_HardTierPartiallyVacatedInfeasible(t *testing.T) {
 	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
 	uB := phaseBTask("uB", "ns/job", "uB", "n1", 4)
@@ -557,10 +572,10 @@ func TestDomainRelocation_HardTierPartiallyVacatedInfeasible(t *testing.T) {
 		t.Fatalf("hard-tier-1 gang anchored at tier-2 top must be infeasible, got fit=%t moves=%v", fit, moves)
 	}
 	if got := ji.AllocatedHyperNode; got != "top" {
-		t.Errorf("infeasible unit must leave the anchor at %q, want top", got)
+		t.Errorf("infeasible gang must leave the anchor at %q, want top", got)
 	}
 	if uA.NodeName != "n0" || uB.NodeName != "n1" {
-		t.Errorf("infeasible unit must not rewrite tasks, uA=%q uB=%q", uA.NodeName, uB.NodeName)
+		t.Errorf("infeasible gang must not rewrite tasks, uA=%q uB=%q", uA.NodeName, uB.NodeName)
 	}
 }
 
@@ -578,7 +593,7 @@ func TestDomainRelocation_SoftModeUnrestricted(t *testing.T) {
 
 	// White-box: soft gang's allowed domains are the full universe, tier-2 root
 	// included (abstain == no constraint).
-	layers, ok := snap.allowedDomains(&gangUnit{job: ji, victims: []*schedapi.TaskInfo{uA}})
+	layers, ok := snap.allowedDomains(&jobGangs{job: ji}, &gang{victims: []*schedapi.TaskInfo{uA}})
 	if !ok {
 		t.Fatal("soft-mode gang must have allowed domains (the universe)")
 	}
@@ -643,7 +658,147 @@ func TestDomainRelocation_RequiredAntiAffinityExcludesDomain(t *testing.T) {
 	moves2, fit2 := snap2.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{uB},
 		[]*schedapi.NodeInfo{nodes2["n1"], nodes2["n2"]})
 	if fit2 || moves2 != nil {
-		t.Fatalf("only-excluded-domain unit must be infeasible, got fit=%t moves=%v", fit2, moves2)
+		t.Fatalf("only-excluded-domain gang must be infeasible, got fit=%t moves=%v", fit2, moves2)
+	}
+}
+
+// twoRoleSubGroupJob builds a SubGroupPolicy job over roleA/roleB, so the
+// victims split into one gang per role.
+func twoRoleSubGroupJob(uA, uB *schedapi.TaskInfo) *schedapi.JobInfo {
+	sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+	sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+	ji := planTestJob("ns/job", sjA, sjB)
+	ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+		SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+	}}}
+	return ji
+}
+
+// Required PodGroup anti-affinity whose term sits at the finest tier leaves no
+// coarser candidate: excluding the peer's domain also excludes its ancestors
+// (top, <cluster-top-hypernode>), so the Job's allowed roots are siblings and no
+// single one of them holds both roles. allocate answers this class with its
+// candidate forest — one gradient layer is one set of allowed roots and a SubJob
+// settles in any of them — and the container mirrors it. A real Job-level hard
+// network topology keeps allocate's legacy single-root path, so there the
+// container still demands one domain.
+func TestDomainRelocation_RequiredAntiAffinitySpreadsGangsAcrossAllowedRoots(t *testing.T) {
+	// Both roles are drained from n0 (hA); n3 (hA) and n2 (hD) are the two empty
+	// receivers, one per allowed tier-1 root. phaseBSession always builds its own
+	// reference tree, so the session is assembled by hand to add n3 to it.
+	build := func(t *testing.T, ji *schedapi.JobInfo, uA, uB *schedapi.TaskInfo, register func(*schedframework.Session)) (*SessionSnapshot, []*schedapi.TaskInfo, []*schedapi.NodeInfo) {
+		t.Helper()
+		hyperNodes, rns := planTestHyperNodes()
+		rns["hA"].Insert("n3")
+		rns["top"].Insert("n3")
+		rns[schedframework.ClusterTopHyperNode].Insert("n3")
+		nodes := map[string]*schedapi.NodeInfo{
+			"n0": phaseBNode("n0", 8, uA, uB), // hA: the drained source
+			"n2": phaseBNode("n2", 4),         // hD
+			"n3": phaseBNode("n3", 4),         // hA
+		}
+		schedapi.SyncJobAllocatedHyperNode(ji, hyperNodes, rns)
+		ssn := newPhaseBSSN(t)
+		ssn.Jobs = map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}
+		ssn.Nodes = nodes
+		ssn.HyperNodes = hyperNodes
+		ssn.RealNodesSet = rns
+		register(ssn)
+		return NewSessionSnapshot(ssn, gpu, nil), []*schedapi.TaskInfo{uA, uB},
+			[]*schedapi.NodeInfo{nodes["n3"], nodes["n2"]}
+	}
+	t.Run("required PodGroup anti-affinity spreads the roles across the allowed roots", func(t *testing.T) {
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+		uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+		ji := twoRoleSubGroupJob(uA, uB)
+		ji.PodGroup.Spec.TopologyAffinity = &schedulingapi.TopologyAffinitySpec{
+			PodGroupAntiAffinity: &schedulingapi.PodGroupAntiAffinity{
+				Required: []schedulingapi.PodGroupAffinityTerm{{TopologyTier: ptr.To(int32(1))}},
+			},
+		}
+		snap, victims, receivers := build(t, ji, uA, uB,
+			func(s *schedframework.Session) { registerHardTierAndAntiAffinityGradient(s, sets.New("hB")) })
+
+		// hB's exclusion drops top and <cluster-top-hypernode> with it, so hA and hD
+		// are the only allowed roots — sibling roots their LCA ("top") may not stand
+		// in for, since its subtree also holds the excluded hB.
+		moves, fit := snap.FeasibleRelocation(context.Background(), nil, victims, receivers)
+		if !fit {
+			t.Fatalf("each role fits one allowed root, got fit=false")
+		}
+		if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n3", "uB: from n0 to n2"}) {
+			t.Errorf("roles must spread across the allowed roots, got %v", got)
+		}
+		if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "top" {
+			t.Errorf("committed job anchor=%q, want top (the LCA of hA and hD)", got)
+		}
+	})
+
+	t.Run("a hard Job-level topology still demands one domain", func(t *testing.T) {
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+		uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+		ji := twoRoleSubGroupJob(uA, uB)
+		ji.NetworkTopology = hardTopology(1)
+		snap, victims, receivers := build(t, ji, uA, uB, registerHardTierGradient)
+
+		// Same geometry, but the hard constraint allows only tier-1 domains and this
+		// class keeps the single-root path: neither hA nor hD holds both roles.
+		moves, fit := snap.FeasibleRelocation(context.Background(), nil, victims, receivers)
+		if fit || moves != nil {
+			t.Fatalf("a hard topology Job must stay in one domain, got fit=%t moves=%v", fit, moves)
+		}
+	})
+}
+
+// A container trial that settles one gang and then fails must leave the task
+// placements as it found them: trialGangInDomains only discards its own attempt,
+// so the settled gang's residue is removed by the container-level restore. The
+// map is call-local to FeasibleRelocation, so the container is called directly to
+// see it.
+func TestTrialWholeJob_FailedContainerRestoresTaskPlacements(t *testing.T) {
+	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+	uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+	// A hard Job-level topology keeps the container on the single-domain path: its
+	// candidate domains are the three tier-1 roots, tried hA, hB, hD. No tier-1 root
+	// holds both roles, so every set fails — but hA fails only after roleA has
+	// settled on n3, so the container is left holding a partial placement.
+	ji := twoRoleSubGroupJob(uA, uB)
+	ji.NetworkTopology = hardTopology(1)
+	// An earlier container of this call moved its own victim to n2; that placement
+	// must survive the failing container's rollback.
+	prior := phaseBTask("prior", "ns/prior", "prior", "n0", 1)
+
+	hyperNodes, rns := planTestHyperNodes()
+	rns["hA"].Insert("n3")
+	rns["top"].Insert("n3")
+	rns[schedframework.ClusterTopHyperNode].Insert("n3")
+	nodes := map[string]*schedapi.NodeInfo{
+		"n0": phaseBNode("n0", 12, uA, uB, prior), // hA: the drained source
+		"n2": phaseBNode("n2", 4),                 // hD
+		"n3": phaseBNode("n3", 4),                 // hA
+	}
+	schedapi.SyncJobAllocatedHyperNode(ji, hyperNodes, rns)
+	ssn := newPhaseBSSN(t)
+	ssn.Jobs = map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji, "ns/prior": phaseBJob("ns/prior", nil, prior)}
+	ssn.Nodes = nodes
+	ssn.HyperNodes = hyperNodes
+	ssn.RealNodesSet = rns
+	registerHardTierGradient(ssn)
+	snap := NewSessionSnapshot(ssn, gpu, nil)
+
+	victims := []*schedapi.TaskInfo{uA, uB}
+	jgs := snap.groupVictimsByJobGangs(victims)
+	if len(jgs) != 1 || len(jgs[0].gangs) != 2 {
+		t.Fatalf("the victims must form one two-gang container, got %d containers", len(jgs))
+	}
+	tasksPlacedByNode := map[string][]*schedapi.TaskInfo{"n2": {prior}}
+	moves, fit := snap.trialWholeJob(context.Background(), jgs[0], newTrialScope(victims), append(victims, prior),
+		[]*schedapi.NodeInfo{nodes["n3"], nodes["n2"]}, tasksPlacedByNode)
+	if fit || moves != nil {
+		t.Fatalf("no tier-1 root holds both roles, got fit=%t moves=%v", fit, moves)
+	}
+	if len(tasksPlacedByNode) != 1 || !slices.Equal(tasksPlacedByNode["n2"], []*schedapi.TaskInfo{prior}) {
+		t.Errorf("a failed container trial must restore the task placements to the prior container's move, got %v", tasksPlacedByNode)
 	}
 }
 
@@ -696,10 +851,10 @@ func TestDomainRelocation_MixedGangAtomicity(t *testing.T) {
 	}
 }
 
-// SubJob unit: the two-entry gradient narrowing (Job-entry ∩ SubJob-entry,
+// SubJob gang: the two-entry gradient narrowing (Job-entry ∩ SubJob-entry,
 // root-or-ancestor) keeps the whole subJob inside one allowed tier-1 domain;
 // commits the subJob and job anchors together.
-func TestDomainRelocation_SubJobUnitCommonDomain(t *testing.T) {
+func TestDomainRelocation_SubJobGangCommonDomain(t *testing.T) {
 	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
 	uB := phaseBTask("uB", "ns/job", "uB", "n1", 4)
 	sj := planTestSubJob("ns/job/grp", "ns/job", uA, uB)
@@ -836,11 +991,10 @@ func TestDomainRelocation_PartialVacateKeepsSiblingDomainAllowed(t *testing.T) {
 		t.Fatalf("initial job anchor=%q, want top (LCA of hA/hB)", got)
 	}
 	snap := NewSessionSnapshot(ssn, gpu, nil)
-	unit := &gangUnit{job: ji, subJob: sj, victims: []*schedapi.TaskInfo{uA}}
 
-	stale := allowedDomainNames(t, snap, unit)
+	stale := allowedDomainNames(t, snap, ji, sj, uA)
 	ji.AllocatedHyperNode = "hB" // the anchor a post-eviction recompute would leave
-	survivor := allowedDomainNames(t, snap, unit)
+	survivor := allowedDomainNames(t, snap, ji, sj, uA)
 
 	if !slices.Equal(stale, survivor) {
 		t.Errorf("a residual pod must keep the envelope: pre-eviction %v vs survivor-only %v", stale, survivor)
@@ -851,7 +1005,7 @@ func TestDomainRelocation_PartialVacateKeepsSiblingDomainAllowed(t *testing.T) {
 }
 
 // Two roles of one job drained together: the job's envelope must follow the whole
-// call, not one unit. Both roles leave n0/hA, and the Job entry must not keep the
+// call, not one gang. Both roles leave n0/hA, and the Job entry must not keep the
 // pre-eviction anchor hA — its only node is the drained source, so the run would
 // report no plan (the multi-SubJob bug). Only hB's n1 and hD's n2 can receive.
 func TestDomainRelocation_MultipleSubJobsVacatedTogetherLeaveSourceDomain(t *testing.T) {
@@ -936,8 +1090,267 @@ func TestDomainRelocation_MultiSubJobCoLocationRejectsSplitPlan(t *testing.T) {
 	}
 }
 
+// Two roles of one job drained together, and only one of the two domains holds
+// both: hB's single free slot fits roleA alone, hD fits both. The first gang's
+// first fit must not marry the job to hB — the group is settled per domain, so
+// the plan lands in hD instead of being refused.
+func TestDomainRelocation_TwoRolesVacatedTogetherMoveToTheDomainHoldingBoth(t *testing.T) {
+	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+	uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+	sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+	sjA.NetworkTopology = hardTopology(1)
+	sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+	sjB.NetworkTopology = hardTopology(1)
+	ji := planTestJob("ns/job", sjA, sjB)
+	ji.NetworkTopology = hardTopology(1)
+	ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+		SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+	}}}
+
+	nodes := map[string]*schedapi.NodeInfo{
+		"n0": phaseBNode("n0", 8, uA, uB), // hA: the drained source
+		"n1": phaseBNode("n1", 4),         // hB: room for one role
+		"n2": phaseBNode("n2", 8),         // hD: room for both
+	}
+	ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, registerHardTierGradient)
+	snap := NewSessionSnapshot(ssn, gpu, nil)
+
+	moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{uA, uB},
+		[]*schedapi.NodeInfo{nodes["n1"], nodes["n2"]})
+	if !fit {
+		t.Fatalf("hD holds both roles, so the whole-job trial must find it, got fit=false")
+	}
+	if len(moves) != 2 || moves[0].To != "n2" || moves[1].To != "n2" {
+		t.Errorf("both roles must land in hD, got %+v", moves)
+	}
+	if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "hD" {
+		t.Errorf("committed job anchor=%q, want hD", got)
+	}
+}
+
+// One role declared tighter than the job: the tighter role narrows only its own
+// gang. The group is settled inside one Job-entry candidate domain (tier ascending,
+// first fit), and inside it each gang uses its own Job∩SubJob gradient — the
+// scheduler's allocate semantics, where the candidate comes from the job's
+// gradient and each SubJob is allocated inside that candidate.
+func TestDomainRelocation_TighterRoleDoesNotPinTheWholeJob(t *testing.T) {
+	build := func(t *testing.T, n1cap, n2cap int64) (*SessionSnapshot, *schedapi.JobInfo, map[string]*schedapi.TaskInfo) {
+		t.Helper()
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+		uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+		sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+		sjA.NetworkTopology = hardTopology(2)
+		sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+		sjB.NetworkTopology = hardTopology(1) // tighter than the job's tier 2
+		ji := planTestJob("ns/job", sjA, sjB)
+		ji.NetworkTopology = hardTopology(2)
+		ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+			SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+		}}}
+
+		nodes := map[string]*schedapi.NodeInfo{
+			"n0": phaseBNode("n0", 8, uA, uB), // hA: the drained source
+			"n1": phaseBNode("n1", n1cap),     // hB
+			"n2": phaseBNode("n2", n2cap),     // hD
+		}
+		ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, registerHardTierGradient)
+		return NewSessionSnapshot(ssn, gpu, nil), ji, map[string]*schedapi.TaskInfo{"uA": uA, "uB": uB}
+	}
+
+	t.Run("a tier-1 domain holds both roles", func(t *testing.T) {
+		snap, ji, tasks := build(t, 4, 8)
+		moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{tasks["uA"], tasks["uB"]},
+			[]*schedapi.NodeInfo{snap.ssn.Nodes["n1"], snap.ssn.Nodes["n2"]})
+		if !fit {
+			t.Fatalf("hD holds both roles, got fit=false")
+		}
+		if len(moves) != 2 || moves[0].To != "n2" || moves[1].To != "n2" {
+			t.Errorf("both roles must land in hD, got %+v", moves)
+		}
+		// Candidates are tried tier ascending, so the tier-1 domain that holds both
+		// roles wins before "top" (tier 2) is ever reached.
+		if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "hD" {
+			t.Errorf("committed job anchor=%q, want hD", got)
+		}
+	})
+
+	t.Run("no tier-1 domain holds both roles so the job spreads inside its tier-2 domain", func(t *testing.T) {
+		snap, ji, tasks := build(t, 4, 4)
+		moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{tasks["uA"], tasks["uB"]},
+			[]*schedapi.NodeInfo{snap.ssn.Nodes["n1"], snap.ssn.Nodes["n2"]})
+		if !fit {
+			t.Fatalf("neither tier-1 domain holds both roles, but the job's tier-2 domain does, got fit=false")
+		}
+		// Role A (tier 2) takes hB, role B (the tighter tier-1 role) takes hD: each
+		// gang stays inside its own Job∩SubJob candidate, both inside the tier-2
+		// candidate "top" the trial fell through to.
+		if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n1", "uB: from n0 to n2"}) {
+			t.Errorf("each role must land in its own tier-1 domain, got %v", got)
+		}
+		if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "top" {
+			t.Errorf("committed job anchor=%q, want top (the LCA of hB and hD)", got)
+		}
+	})
+}
+
+// The same geometry with the Job-level constraint removed: no plugin applies at the
+// Job entry, so the container yields the unconstrained candidate and each gang
+// keeps its own first fit — role A takes hB instead of the two roles being gathered
+// into hD. That is the unconstrained boundary's whole point: an unconstrained Job
+// entry must not buy a tighter plan than today's per-gang path.
+func TestDomainRelocation_UnconstrainedJobEntryKeepsPerGangChoice(t *testing.T) {
+	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+	uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+	sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+	sjA.NetworkTopology = hardTopology(2)
+	sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+	sjB.NetworkTopology = hardTopology(1)
+	ji := planTestJob("ns/job", sjA, sjB)
+	ji.NetworkTopology = softTopology() // the only difference from the tighter-role test
+	ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+		SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+	}}}
+
+	nodes := map[string]*schedapi.NodeInfo{
+		"n0": phaseBNode("n0", 8, uA, uB), // hA: the drained source
+		"n1": phaseBNode("n1", 4),         // hB
+		"n2": phaseBNode("n2", 8),         // hD
+	}
+	ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, registerHardTierGradient)
+	snap := NewSessionSnapshot(ssn, gpu, nil)
+
+	moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{uA, uB},
+		[]*schedapi.NodeInfo{nodes["n1"], nodes["n2"]})
+	if !fit {
+		t.Fatalf("both roles fit, got fit=false")
+	}
+	if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n1", "uB: from n0 to n2"}) {
+		t.Errorf("an unconstrained Job entry must keep each gang's own first fit, got %v", got)
+	}
+}
+
+// The container's candidate list is the Job-entry gradient on the anchors this pass
+// intends, not the intersection of the gangs' own domains: a Job entry no plugin
+// constrains yields the tree root (a domain that excludes nothing, so every gang
+// falls back to its own domains — the per-gang path), and the anchors still bind (a
+// fully drained job reads the cleared job anchor). A Job entry with no tree to
+// search, or one that constrains every candidate away, yields no layer at all: the
+// container is INFEASIBLE, not unconstrained.
+func TestJobEntryDomains_JobGradientOrUnconstrained(t *testing.T) {
+	subGroupJob := func(t *testing.T, topology *schedulingapi.NetworkTopologySpec) *schedapi.JobInfo {
+		t.Helper()
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 1)
+		uB := phaseBTask("uB", "ns/job", "uB", "n0", 1)
+		sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+		sjA.NetworkTopology = hardTopology(2)
+		sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+		sjB.NetworkTopology = hardTopology(1)
+		ji := planTestJob("ns/job", sjA, sjB)
+		ji.NetworkTopology = topology
+		ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+			SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+		}}}
+		return ji
+	}
+
+	cases := []struct {
+		name            string
+		topology        *schedulingapi.NetworkTopologySpec
+		register        func(*schedframework.Session)
+		victimsAll      bool
+		noHyperNodeTree bool
+		wantInfeasible  bool
+		want            []string
+	}{
+		{
+			name:       "no gradient plugin registered",
+			topology:   hardTopology(1),
+			victimsAll: true,
+			want:       []string{schedframework.ClusterTopHyperNode},
+		},
+		{
+			name:       "Job entry abstains while the SubJob entry constrains",
+			topology:   softTopology(),
+			register:   registerSubGroupAffinityGradient,
+			victimsAll: true,
+			want:       []string{schedframework.ClusterTopHyperNode},
+		},
+		{
+			name:       "hard Job-level topology, fully drained",
+			topology:   hardTopology(1),
+			register:   registerHardTierGradient,
+			victimsAll: true,
+			want:       []string{"hA", "hB", "hD"},
+		},
+		{
+			name:     "partly drained job keeps its anchor",
+			topology: hardTopology(1),
+			register: registerHardTierGradient,
+			want:     []string{"hA"},
+		},
+		{
+			// A registered plugin reads the tree, so a nil tree root must be
+			// rejected before the gradient is asked — not left to the plugin.
+			name:            "no HyperNode tree to search",
+			topology:        hardTopology(1),
+			register:        registerHardTierGradient,
+			victimsAll:      true,
+			noHyperNodeTree: true,
+			wantInfeasible:  true,
+		},
+		{
+			name:           "the Job entry constrains every candidate away",
+			topology:       softTopology(),
+			register:       registerEmptyJobGradient,
+			victimsAll:     true,
+			wantInfeasible: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ji := subGroupJob(t, tc.topology)
+			nodes := map[string]*schedapi.NodeInfo{
+				"n0": phaseBNode("n0", 8, ji.Tasks["uA"], ji.Tasks["uB"]),
+				"n1": phaseBNode("n1", 8),
+				"n2": phaseBNode("n2", 8),
+			}
+			victims := []*schedapi.TaskInfo{ji.Tasks["uA"]}
+			if tc.victimsAll {
+				victims = append(victims, ji.Tasks["uB"])
+			}
+			ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, tc.register)
+			if tc.noHyperNodeTree {
+				ssn.HyperNodes = schedapi.HyperNodeInfoMap{}
+			}
+			snap := NewSessionSnapshot(ssn, gpu, nil)
+			jg := &jobGangs{job: ji, gangs: []gang{{victims: victims}}}
+
+			layers, ok := snap.jobEntryDomains(jg, newTrialScope(victims))
+			if tc.wantInfeasible {
+				if ok || layers != nil {
+					t.Fatalf("no candidate layer must be INFEASIBLE, got ok=%t layers=%v", ok, layers)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("the Job entry must yield candidates")
+			}
+			var names []string
+			for _, layer := range layers {
+				for _, hyperNode := range layer {
+					names = append(names, hyperNode.Name)
+				}
+			}
+			sort.Strings(names)
+			if !slices.Equal(names, tc.want) {
+				t.Errorf("Job-entry candidates=%v, want %v", names, tc.want)
+			}
+		})
+	}
+}
+
 // jobFullyVacated asks a job-level question of the call's victim set: with more
-// than one gang a unit only sees its own pods, so the sibling gangs are what tell
+// than one gang, each gang only sees its own pods, so the sibling gangs are what tell
 // whether the job is leaving whole.
 func TestJobFullyVacated_CallScopeMembership(t *testing.T) {
 	uA := phaseBTask("uA", "ns/job", "uA", "n0", 1)
@@ -956,18 +1369,18 @@ func TestJobFullyVacated_CallScopeMembership(t *testing.T) {
 	snap := &SessionSnapshot{}
 	tests := []struct {
 		name    string
-		unit    *gangUnit
+		job     *schedapi.JobInfo
 		victims []*schedapi.TaskInfo
 		want    bool
 	}{
-		{"every gang of the job is a victim", &gangUnit{job: ji, subJob: sjA}, []*schedapi.TaskInfo{uA, uB}, true},
-		{"a sibling gang keeps a pod", &gangUnit{job: ji, subJob: sjA}, []*schedapi.TaskInfo{uA}, false},
-		{"the job holds no allocated pod", &gangUnit{job: jiPending, subJob: sjP}, []*schedapi.TaskInfo{pending}, false},
-		{"unit without a Job", &gangUnit{}, []*schedapi.TaskInfo{uA}, false},
+		{"every gang of the job is a victim", ji, []*schedapi.TaskInfo{uA, uB}, true},
+		{"a sibling gang keeps a pod", ji, []*schedapi.TaskInfo{uA}, false},
+		{"the job holds no allocated pod", jiPending, []*schedapi.TaskInfo{pending}, false},
+		{"container without a Job", nil, []*schedapi.TaskInfo{uA}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := snap.jobFullyVacated(newTrialScope(tt.victims), tt.unit); got != tt.want {
+			if got := snap.jobFullyVacated(newTrialScope(tt.victims), tt.job); got != tt.want {
 				t.Errorf("jobFullyVacated = %t, want %t", got, tt.want)
 			}
 		})
@@ -1010,11 +1423,12 @@ func TestAllowedDomains_SortsDomainsWithinTier(t *testing.T) {
 	}
 	ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, register)
 	snap := NewSessionSnapshot(ssn, gpu, nil)
-	unit := &gangUnit{job: ji, subJob: sj, victims: []*schedapi.TaskInfo{uA}}
+	jg := &jobGangs{job: ji}
+	g := &gang{subJob: sj, victims: []*schedapi.TaskInfo{uA}}
 
-	layers, ok := snap.allowedDomains(unit)
+	layers, ok := snap.allowedDomains(jg, g)
 	if !ok {
-		t.Fatalf("unit must have allowed domains")
+		t.Fatalf("gang must have allowed domains")
 	}
 	var got []string
 	for _, layer := range layers {
@@ -1027,12 +1441,12 @@ func TestAllowedDomains_SortsDomainsWithinTier(t *testing.T) {
 	}
 }
 
-// allowedDomainNames returns the unit's allowed HyperNode names, sorted.
-func allowedDomainNames(t *testing.T, snap *SessionSnapshot, unit *gangUnit) []string {
+// allowedDomainNames returns the gang's allowed HyperNode names, sorted.
+func allowedDomainNames(t *testing.T, snap *SessionSnapshot, job *schedapi.JobInfo, subJob *schedapi.SubJobInfo, victims ...*schedapi.TaskInfo) []string {
 	t.Helper()
-	layers, ok := snap.allowedDomainsForTrial(newTrialScope(unit.victims), unit)
+	layers, ok := snap.allowedDomainsForTrial(&jobGangs{job: job}, &gang{subJob: subJob, victims: victims}, newTrialScope(victims))
 	if !ok {
-		t.Fatalf("unit must have allowed domains")
+		t.Fatalf("gang must have allowed domains")
 	}
 	names := sets.New[string]()
 	for _, layer := range layers {
@@ -1077,8 +1491,51 @@ func TestIntersectGradientForest(t *testing.T) {
 	}
 }
 
-// Serial unit pinning co-locates Required-affinity subJobs (each member its own
-// unit, in victim order): A pins to unmoved peer B's hB and lands on hB's empty
+// layerCandidateDomainSets decides what one candidate layer yields: without a
+// candidate forest each domain is its own attempt, in layer order; with one, the
+// whole layer is a single attempt over its deduped roots, and a layer whose roots
+// the tree does not join is skipped (allocate's guard).
+func TestLayerCandidateDomainSets(t *testing.T) {
+	hyperNodes, _ := planTestHyperNodes()
+	render := func(attempts [][]*schedapi.HyperNodeInfo) []string {
+		out := make([]string, 0, len(attempts))
+		for _, attempt := range attempts {
+			out = append(out, domainsByTier([][]*schedapi.HyperNodeInfo{attempt}))
+		}
+		return out
+	}
+
+	if got := layerCandidateDomainSets(nil, false, hyperNodes); len(got) != 0 {
+		t.Errorf("an empty layer must yield no attempt, got %v", got)
+	}
+	if got := layerCandidateDomainSets(nil, true, hyperNodes); len(got) != 0 {
+		t.Errorf("an empty forest layer must yield no attempt, got %v", got)
+	}
+	// Without a forest a nil domain is no attempt at all; with one it is dropped
+	// by the name dedup.
+	if got := render(layerCandidateDomainSets([]*schedapi.HyperNodeInfo{hyperNodes["hD"], nil, hyperNodes["hA"]}, false, hyperNodes)); !slices.Equal(got, []string{"tier-1: hD", "tier-1: hA"}) {
+		t.Errorf("each domain must be its own attempt in layer order, got %v", got)
+	}
+	if got := render(layerCandidateDomainSets([]*schedapi.HyperNodeInfo{hyperNodes["hD"], hyperNodes["hA"], hyperNodes["hA"], nil}, true, hyperNodes)); !slices.Equal(got, []string{"tier-1: hA, hD"}) {
+		t.Errorf("a forest must read the layer as one deduped set, got %v", got)
+	}
+	if got := render(layerCandidateDomainSets([]*schedapi.HyperNodeInfo{hyperNodes["hA"]}, true, hyperNodes)); !slices.Equal(got, []string{"tier-1: hA"}) {
+		t.Errorf("a single-root forest is that one domain, got %v", got)
+	}
+
+	// Roots with no common ancestor have no envelope: allocate skips the layer and
+	// so does the container.
+	disjoint := schedapi.HyperNodeInfoMap{
+		"x": schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "x"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 1}}, schedapi.TierOpt(1)),
+		"y": schedapi.NewHyperNodeInfo(&topologyv1alpha1.HyperNode{ObjectMeta: metav1.ObjectMeta{Name: "y"}, Spec: topologyv1alpha1.HyperNodeSpec{Tier: 1}}, schedapi.TierOpt(1)),
+	}
+	if got := layerCandidateDomainSets([]*schedapi.HyperNodeInfo{disjoint["x"], disjoint["y"]}, true, disjoint); got != nil {
+		t.Errorf("roots with no common ancestor must skip the layer, got %v", render(got))
+	}
+}
+
+// Serial gang pinning co-locates Required-affinity subJobs (each member its own
+// gang, in victim order): A pins to unmoved peer B's hB and lands on hB's empty
 // n3; the commit re-anchors A to hB, so B follows onto n3. Both stay in one
 // HyperNode domain.
 func TestDomainRelocation_SubJobAffinitySerialCoLocation(t *testing.T) {
@@ -1089,7 +1546,7 @@ func TestDomainRelocation_SubJobAffinitySerialCoLocation(t *testing.T) {
 	ji := phaseBSubGroupAffinityJob("ns/job", 1, [][]string{{"policyA", "policyB"}}, sjA, sjB)
 
 	// n3 is an empty cap-8 receiver under hB (the peer's domain), not n1, or the
-	// first unit could land beside the peer and pin it in place.
+	// first gang could land beside the peer and pin it in place.
 	hyperNodes, rns := planTestHyperNodes()
 	rns["hB"].Insert("n3")
 	rns["top"].Insert("n3")
@@ -1237,7 +1694,7 @@ func TestGangFullyVacated_SetMembership(t *testing.T) {
 			want:    false,
 		},
 		{
-			// SubJob unit, partial evac: residual allocated peer is not a victim.
+			// SubJob gang, partial evac: residual allocated peer is not a victim.
 			name: "subjob execute residual keeps anchor",
 			job:  mkJob(phaseBTask("uA", "ns/job", "uA", "n1", 4), mkPending("uB")),
 			subJob: func() *schedapi.SubJobInfo {
@@ -1249,13 +1706,220 @@ func TestGangFullyVacated_SetMembership(t *testing.T) {
 			want:    false,
 		},
 	}
-	snap := &SessionSnapshot{} // gangFullyVacated reads only the unit
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := snap.gangFullyVacated(&gangUnit{job: tc.job, subJob: tc.subJob, victims: tc.victims})
+			got := (&jobGangs{job: tc.job}).gangFullyVacated(&gang{subJob: tc.subJob, victims: tc.victims})
 			if got != tc.want {
 				t.Errorf("gangFullyVacated()=%t, want %t", got, tc.want)
 			}
 		})
+	}
+}
+
+// Victims of Jobs the session does not carry share one container with job == nil
+// and stay on the greedy path: the container trial reads the Job-entry gradient, so
+// the grouping must not assume a Job is there.
+func TestDomainRelocation_VictimsOfJobsOutsideTheSessionStayGreedy(t *testing.T) {
+	uA := phaseBTask("uA", "ns/absent", "uA", "n0", 4)
+	uB := phaseBTask("uB", "ns/absent2", "uB", "n0", 4)
+	victims := []*schedapi.TaskInfo{uA, uB}
+
+	nodes := map[string]*schedapi.NodeInfo{
+		"n0": phaseBNode("n0", 8, uA, uB),
+		"n1": phaseBNode("n1", 8),
+	}
+	ssn := phaseBSession(t, nodes, nil, registerHardTierGradient)
+	snap := NewSessionSnapshot(ssn, gpu, nil)
+
+	jgs := snap.groupVictimsByJobGangs(victims)
+	if len(jgs) != 1 || jgs[0].job != nil || len(jgs[0].gangs) != 1 {
+		t.Fatalf("victims without a session Job must share one job==nil gang, got %d containers", len(jgs))
+	}
+	if jgs[0].requiresHyperNodeAllocate(snap) {
+		t.Error("a job==nil container cannot hit RequiresHyperNodeAllocate")
+	}
+
+	moves, fit := snap.FeasibleRelocation(context.Background(), nil, victims, []*schedapi.NodeInfo{nodes["n1"]})
+	if !fit {
+		t.Fatalf("the greedy path must place both victims, got fit=false")
+	}
+	if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n1", "uB: from n0 to n1"}) {
+		t.Errorf("greedy placements=%v", got)
+	}
+}
+
+// Two calls of one pass share one snapshot and the second gets the first one's
+// moves as `committed`, whose pods count as present: it must not reuse the receiver
+// they occupy. The refusal is a planning matter, not residue — the failed call rolls
+// back to its own baseline, which already holds the first call's commit.
+func TestDomainRelocation_SecondCallDoesNotReuseTheCommittedPlacement(t *testing.T) {
+	build := func(t *testing.T) (*SessionSnapshot, *schedapi.JobInfo, map[string]*schedapi.NodeInfo) {
+		t.Helper()
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+		uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+		ji := phaseBJob("ns/job", hardTopology(1), uA, uB)
+
+		hyperNodes, rns := planTestHyperNodes()
+		rns["hA"].Insert("n3")
+		rns["top"].Insert("n3")
+		rns[schedframework.ClusterTopHyperNode].Insert("n3")
+		nodes := map[string]*schedapi.NodeInfo{
+			"n0": phaseBNode("n0", 8, uA, uB), // hA: the drained source
+			"n3": phaseBNode("n3", 4),         // hA: room for one task
+			"n2": phaseBNode("n2", 4),         // hD
+		}
+		schedapi.SyncJobAllocatedHyperNode(ji, hyperNodes, rns)
+		ssn := newPhaseBSSN(t)
+		ssn.Jobs = map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}
+		ssn.Nodes = nodes
+		ssn.HyperNodes = hyperNodes
+		ssn.RealNodesSet = rns
+		registerHardTierGradient(ssn)
+		return NewSessionSnapshot(ssn, gpu, nil), ji, nodes
+	}
+
+	snap, ji, nodes := build(t)
+	receivers := []*schedapi.NodeInfo{nodes["n3"], nodes["n2"]}
+
+	// Call 1 drains uA: the Job keeps uB, so the anchor stays hA and n3 is the only
+	// in-domain receiver.
+	first, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{ji.Tasks["uA"]}, receivers)
+	if !fit || len(first) != 1 || first[0].To != "n3" {
+		t.Fatalf("the first call must place uA on n3, got fit=%t moves=%v", fit, first)
+	}
+
+	// Call 2 drains uB with that move committed: hA's only node is taken, so uB has
+	// no in-domain receiver and the call is refused.
+	second, fit := snap.FeasibleRelocation(context.Background(), first, []*schedapi.TaskInfo{ji.Tasks["uB"]}, receivers)
+	if fit || second != nil {
+		t.Fatalf("the committed placement occupies n3, got fit=%t moves=%v", fit, second)
+	}
+	if got := snap.ssn.Jobs[ji.UID].Tasks["uA"].NodeName; got != "n3" {
+		t.Errorf("the failed second call must keep the first call's commit, uA node=%q", got)
+	}
+
+	// Control: without the committed move the same call fits uB on n3 — the refusal
+	// above is the committed pod's occupancy, not the geometry.
+	control, controlJob, controlNodes := build(t)
+	third, fit := control.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{controlJob.Tasks["uB"]},
+		[]*schedapi.NodeInfo{controlNodes["n3"], controlNodes["n2"]})
+	if !fit || len(third) != 1 || third[0].To != "n3" {
+		t.Fatalf("without the committed move uB fits n3, got fit=%t moves=%v", fit, third)
+	}
+}
+
+// A Job whose pods sit on two nodes is evacuated by two drain steps, and no single
+// step sees the whole Job: the other gang's pod stays allocated, so jobFullyVacated
+// is false and the Job anchor is never cleared — each step is bound to the
+// pre-eviction domain hA, which holds only the two drain units, and hD (room for both
+// roles) is never tried. Registered as a known gap in §7.2.
+func TestDomainRelocation_MultiStepEvacuationStaysInAnchoredDomain(t *testing.T) {
+	build := func(t *testing.T) (*SessionSnapshot, *schedapi.JobInfo, map[string]*schedapi.NodeInfo) {
+		t.Helper()
+		uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+		uB := phaseBTask("uB", "ns/job", "uB", "n3", 4)
+		sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+		sjA.NetworkTopology = hardTopology(1)
+		sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+		sjB.NetworkTopology = hardTopology(1)
+		ji := planTestJob("ns/job", sjA, sjB)
+		ji.NetworkTopology = hardTopology(1)
+		ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+			SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}},
+		}}}
+
+		hyperNodes, rns := planTestHyperNodes()
+		rns["hA"].Insert("n3")
+		rns["top"].Insert("n3")
+		rns[schedframework.ClusterTopHyperNode].Insert("n3")
+		nodes := map[string]*schedapi.NodeInfo{
+			"n0": phaseBNode("n0", 4, uA), // hA: the first step's drain unit
+			"n3": phaseBNode("n3", 4, uB), // hA: the second step's drain unit
+			"n1": phaseBNode("n1", 4),     // hB: room for one role
+			"n2": phaseBNode("n2", 8),     // hD: room for both
+		}
+		schedapi.SyncJobAllocatedHyperNode(ji, hyperNodes, rns)
+		ssn := newPhaseBSSN(t)
+		ssn.Jobs = map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}
+		ssn.Nodes = nodes
+		ssn.HyperNodes = hyperNodes
+		ssn.RealNodesSet = rns
+		registerHardTierGradient(ssn)
+		return NewSessionSnapshot(ssn, gpu, nil), ji, nodes
+	}
+
+	snap, ji, nodes := build(t)
+	if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "hA" {
+		t.Fatalf("initial job anchor=%q, want hA (both roles sit in hA)", got)
+	}
+	receivers := []*schedapi.NodeInfo{nodes["n1"], nodes["n2"]}
+
+	for _, step := range []struct {
+		name   string
+		victim *schedapi.TaskInfo
+	}{
+		{"step 1 drains n0 (roleA)", ji.Tasks["uA"]},
+		{"step 2 drains n3 (roleB)", ji.Tasks["uB"]},
+	} {
+		moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{step.victim}, receivers)
+		if fit || moves != nil {
+			t.Errorf("%s: the anchored domain has no receiver, want fit=false, got fit=%t moves=%v", step.name, fit, moves)
+		}
+	}
+	if got := snap.ssn.Jobs[ji.UID].Tasks["uA"].NodeName; got != "n0" {
+		t.Errorf("a refused step must leave no residue, uA node=%q", got)
+	}
+
+	// The boundary the container does cover: one call evacuating the whole Job clears
+	// the anchor and lands both roles in hD. Not planner-reachable — §2.4 drains one
+	// node unit per step, which is what splits the Job in the first place.
+	oneCall, oneCallJob, oneCallNodes := build(t)
+	moves, fit := oneCall.FeasibleRelocation(context.Background(), nil,
+		[]*schedapi.TaskInfo{oneCallJob.Tasks["uA"], oneCallJob.Tasks["uB"]},
+		[]*schedapi.NodeInfo{oneCallNodes["n1"], oneCallNodes["n2"]})
+	if !fit {
+		t.Fatalf("a whole-job evacuation fits hD, got fit=false")
+	}
+	if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n2", "uB: from n3 to n2"}) {
+		t.Errorf("both roles must land in hD, got %v", got)
+	}
+}
+
+// Three gangs in one container: only hD holds all three, and it is reached after the
+// two earlier domain sets fail — those sets must leave no residue behind.
+func TestDomainRelocation_ThreeRolesShareTheDomainHoldingAll(t *testing.T) {
+	uA := phaseBTask("uA", "ns/job", "uA", "n0", 4)
+	uB := phaseBTask("uB", "ns/job", "uB", "n0", 4)
+	uC := phaseBTask("uC", "ns/job", "uC", "n0", 4)
+	sjA := phaseBSubJob("ns/job/roleA", "ns/job", "roleA", uA)
+	sjA.NetworkTopology = hardTopology(1)
+	sjB := phaseBSubJob("ns/job/roleB", "ns/job", "roleB", uB)
+	sjB.NetworkTopology = hardTopology(1)
+	sjC := phaseBSubJob("ns/job/roleC", "ns/job", "roleC", uC)
+	sjC.NetworkTopology = hardTopology(1)
+	ji := planTestJob("ns/job", sjA, sjB, sjC)
+	ji.NetworkTopology = hardTopology(1)
+	ji.PodGroup = &schedapi.PodGroup{PodGroup: schedulingapi.PodGroup{Spec: schedulingapi.PodGroupSpec{
+		SubGroupPolicy: []schedulingapi.SubGroupPolicySpec{{Name: "roleA"}, {Name: "roleB"}, {Name: "roleC"}},
+	}}}
+
+	nodes := map[string]*schedapi.NodeInfo{
+		"n0": phaseBNode("n0", 12, uA, uB, uC), // hA: the drained source
+		"n1": phaseBNode("n1", 4),              // hB: room for one role
+		"n2": phaseBNode("n2", 12),             // hD: room for all three
+	}
+	ssn := phaseBSession(t, nodes, map[schedapi.JobID]*schedapi.JobInfo{"ns/job": ji}, registerHardTierGradient)
+	snap := NewSessionSnapshot(ssn, gpu, nil)
+
+	moves, fit := snap.FeasibleRelocation(context.Background(), nil, []*schedapi.TaskInfo{uA, uB, uC},
+		[]*schedapi.NodeInfo{nodes["n1"], nodes["n2"]})
+	if !fit {
+		t.Fatalf("hD holds all three roles, got fit=false")
+	}
+	if got := moveSummary(moves); !slices.Equal(got, []string{"uA: from n0 to n2", "uB: from n0 to n2", "uC: from n0 to n2"}) {
+		t.Errorf("all three roles must land in hD, got %v", got)
+	}
+	if got := snap.planState().JobAllocatedHyperNode(ji.UID); got != "hD" {
+		t.Errorf("committed job anchor=%q, want hD", got)
 	}
 }

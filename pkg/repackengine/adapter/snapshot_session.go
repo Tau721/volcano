@@ -120,11 +120,6 @@ func (s *SessionSnapshot) HyperNodeTierNameMap() map[string]int {
 	return out
 }
 
-// FeasibleRelocation simulates evicting `victims` and relocating them onto
-// `receivers`, on clones only — never mutating the shared session. Feasibility
-// uses the full filter stack (SimulatePredicateFn); `committed` are earlier
-// moves this pass, their pods counted as present so capacity/topology stay
-
 // ListPodDisruptionBudgets returns the PDB objects already maintained by the
 // scheduler's shared informer factory. It never creates a second informer.
 func (s *SessionSnapshot) ListPodDisruptionBudgets() ([]*policyv1.PodDisruptionBudget, error) {
@@ -140,11 +135,14 @@ func (s *SessionSnapshot) ListPodDisruptionBudgets() ([]*policyv1.PodDisruptionB
 // moves this pass, their pods counted as present so capacity/topology stay
 // consistent; receivers are tried in the given order (first fit wins).
 //
-// Dual-mode: victims of gangs hitting RequiresHyperNodeAllocate land within a
-// single allowed HyperNode domain (tier ascending, first fit); other victims
-// keep per-victim greedy placement. A failing gang reverts the whole unit's
-// plan-state commits (mixed gang atomicity). Returns the placements and whether
-// every victim fit.
+// Dual-mode: victims of jobs hitting RequiresHyperNodeAllocate are settled as one
+// container of gangs against the Job-entry gradient's candidate domain sets (tier
+// ascending, first fit). A set is normally one domain; a Job whose hard boundary
+// is required PodGroup anti-affinity reads a whole layer as one set of roots, so
+// sibling domains can split the container (trialWholeJob). Other victims keep
+// per-victim greedy placement. A failing set rolls the container's plan-state
+// commits back before the next set is tried (mixed gang atomicity).
+// Returns the placements and whether every victim fit.
 func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*api.Move, victims []*schedapi.TaskInfo, receivers []*schedapi.NodeInfo) ([]*api.Move, bool) {
 	if ctx.Err() != nil {
 		return nil, false
@@ -173,28 +171,34 @@ func (s *SessionSnapshot) FeasibleRelocation(ctx context.Context, committed []*a
 
 	relocationMoves := make([]*api.Move, 0, len(victims))
 
-	// ==true gang units first, committed to plan state before the next is tried;
-	// the serial commit narrows a Required-affinity-linked peer to the settled
-	// domain, keeping co-migrating members co-located. Others follow greedily.
-	units := s.groupVictimsByGang(victims)
+	// ==true Job containers first, committed to plan state before the next is
+	// tried; the serial commit narrows a Required-affinity-linked peer to the
+	// settled domain, keeping co-migrating members co-located. A Job's gangs are
+	// settled as one container, so the first gang's first fit cannot pick a domain
+	// the rest of the job does not fit into — under required PodGroup anti-affinity
+	// that container may span sibling roots (trialWholeJob). Others follow greedily.
+	jgs := s.groupVictimsByJobGangs(victims)
 	scope := newTrialScope(victims)
-	for _, unit := range units {
-		if !unit.requiresHyperNodeAllocate(s) {
-			if unit.job != nil && unit.job.RequiresHyperNodeAllocate() {
-				klog.V(4).InfoS("repack relocation: constrained gang kept on the greedy path — HyperNode topology not ready",
-					"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
+	for _, jg := range jgs {
+		if !jg.requiresHyperNodeAllocate(s) {
+			if jg.job != nil && jg.job.RequiresHyperNodeAllocate() {
+				for _, g := range jg.gangs {
+					klog.V(4).InfoS("repack relocation: constrained gang kept on the greedy path — HyperNode topology not ready",
+						"job", jg.jobID(), "subJob", g.subJobID(), "victims", taskNames(g.victims))
+				}
 			} else {
-				klog.V(5).InfoS("repack relocation: gang unit on the greedy path",
-					"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
+				for _, g := range jg.gangs {
+					klog.V(5).InfoS("repack relocation: gang on the greedy path",
+						"job", jg.jobID(), "subJob", g.subJobID(), "victims", taskNames(g.victims))
+				}
 			}
 			continue
 		}
-		moves, fit := s.domainTrialRelocation(ctx, scope, unit, sourceTasksToRemove, receivers, tasksPlacedByNode)
+		moves, fit := s.trialWholeJob(ctx, jg, scope, sourceTasksToRemove, receivers, tasksPlacedByNode)
 		if !fit {
 			s.planState().Restore(baseline)
 			return nil, false
 		}
-		s.planState().ApplyCommit(moves)
 		relocationMoves = append(relocationMoves, moves...)
 	}
 
