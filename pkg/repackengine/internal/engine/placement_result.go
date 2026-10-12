@@ -66,7 +66,7 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 			placementexecutor.MarkBenefitUnverified(run)
 		} else {
 			updateActualExecuteResult(run, nodes, targetResource)
-			comparison, verificationPending := placementexecutor.FreedNodeVerificationPending(run, e.now())
+			comparison, verificationPending := placementexecutor.FreedNodeVerificationPending(run, nodes, e.now())
 			schedframework.CloseSessionReadOnly(schedulerSession)
 			// Replacement binding and source-node resource release are observed
 			// through independent informer streams. A coherent scheduler snapshot
@@ -74,9 +74,12 @@ func (e *Engine) finishPlacement(ctx context.Context, run *repackv1alpha1.Repack
 			// terminating victim (or another stale source-node task) briefly.
 			// Do not turn that convergence window into a permanent failed Run.
 			//
-			// A genuinely occupied planned node remains unequal through the
-			// placement deadline and is then reported as PartiallySucceeded: the
-			// execution completed, but its planned benefit was not fully realized.
+			// Waiting is only justified while a planned victim of the missing
+			// node can still disappear. Otherwise the node is occupied by work
+			// repack cannot move — a workload it never planned to move, or a
+			// victim whose eviction was rejected — and that occupancy is final:
+			// report PartiallySucceeded instead of idling to the execution
+			// deadline.
 			if verificationPending {
 				klog.V(4).InfoS("repack: waiting for planned node-freeing observation to converge",
 					"run", run.Name,

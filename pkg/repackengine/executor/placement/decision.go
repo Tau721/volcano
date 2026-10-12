@@ -164,9 +164,89 @@ func ObservationDeadlinePassed(run *repackv1alpha1.RepackRun, now time.Time) boo
 		!now.Before(run.Status.ExecutionDeadline.Time)
 }
 
-func FreedNodeVerificationPending(run *repackv1alpha1.RepackRun, now time.Time) (FreedNodeComparison, bool) {
+// FreedNodeVerificationPending reports whether the node-freeing comparison still
+// has a reason to wait: only while a planned victim of a missing node can still
+// disappear. Any other occupancy — a workload the plan never moves, or a victim
+// this run will not move — is final, because observation cannot free it.
+func FreedNodeVerificationPending(run *repackv1alpha1.RepackRun, nodes []*schedapi.NodeInfo, now time.Time) (FreedNodeComparison, bool) {
 	comparison := CompareFreedNodeSets(run)
-	return comparison, len(comparison.Missing) > 0 && !ObservationDeadlinePassed(run, now)
+	if len(comparison.Missing) == 0 || ObservationDeadlinePassed(run, now) {
+		return comparison, false
+	}
+	return comparison, plannedVictimsStillVisible(run, nodes, comparison.Missing)
+}
+
+// plannedVictimsStillVisible reports whether the missing nodes still hold a
+// planned victim that can disappear: one whose eviction is outstanding or was
+// accepted, or one classified as indirectly removed, while the snapshot still
+// shows it — a victim's removal trails the scheduler snapshot. A rejected eviction
+// is never retried, and the eviction stage drops every relocation that did not end
+// in an accepted removal before placement starts, so neither is a reason to wait.
+func plannedVictimsStillVisible(run *repackv1alpha1.RepackRun, nodes []*schedapi.NodeInfo, missing []string) bool {
+	if run == nil || run.Status.Plan == nil {
+		return false
+	}
+	missingNodes := make(map[string]struct{}, len(missing))
+	for _, nodeName := range missing {
+		missingNodes[nodeName] = struct{}{}
+	}
+	victimUIDs := make(map[string]struct{})
+	for moveIndex := range run.Status.Plan.Moves {
+		move := &run.Status.Plan.Moves[moveIndex]
+		for podIndex := range move.Pods {
+			pod := &move.Pods[podIndex]
+			if _, missingNode := missingNodes[pod.FromNode]; !missingNode {
+				continue
+			}
+			relocation := relocationFor(run, IdentityForMove(move.Namespace, move.PodGroupName, pod.Name, pod.ToNode))
+			if relocation == nil {
+				// The eviction stage keeps only accepted removals in the journal, so a
+				// move that lost its relocation is a victim this run will not move.
+				continue
+			}
+			switch relocation.Eviction.Phase {
+			case repackv1alpha1.PodEvictionAccepted, repackv1alpha1.PodEvictionIndirectlyRemoved:
+				if uid := string(relocation.VictimPodUID); uid != "" {
+					victimUIDs[uid] = struct{}{}
+				}
+			case repackv1alpha1.PodEvictionRejected:
+				// A rejected eviction is never retried, so its victim staying put
+				// is final rather than a convergence window.
+			default:
+				return true // The eviction is still outstanding work.
+			}
+		}
+	}
+	if len(victimUIDs) == 0 {
+		return false
+	}
+	for _, node := range nodes {
+		if node == nil {
+			continue
+		}
+		if _, missingNode := missingNodes[node.Name]; !missingNode {
+			continue
+		}
+		for _, task := range node.Tasks {
+			if task == nil {
+				continue
+			}
+			if _, victim := victimUIDs[string(task.UID)]; victim {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func relocationFor(run *repackv1alpha1.RepackRun, key Identity) *repackv1alpha1.PodRelocationStatus {
+	for index := range run.Status.Relocations {
+		relocation := &run.Status.Relocations[index]
+		if IdentityForRelocation(relocation) == key {
+			return relocation
+		}
+	}
+	return nil
 }
 
 func BindingsVisible(nodes []*schedapi.NodeInfo, relocations []repackv1alpha1.PodRelocationStatus) bool {
