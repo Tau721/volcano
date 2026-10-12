@@ -31,7 +31,7 @@ import (
 	"volcano.sh/volcano/pkg/repackengine/api"
 )
 
-// trialScope is the call-wide evacuation intent: the pods every unit of one
+// trialScope is the call-wide evacuation intent: the pods every gang of one
 // FeasibleRelocation call is about to evict. A gang's own victims cannot tell
 // whether the job as a whole is being drained — its sibling gangs can.
 type trialScope struct {
@@ -48,90 +48,114 @@ func newTrialScope(victims []*schedapi.TaskInfo) *trialScope {
 	return &trialScope{victims: ids}
 }
 
-// gangUnit is one constraint-bearing gang: a Job (no SubGroupPolicy) or one
+// gang is one constraint-bearing gang: a whole Job (no SubGroupPolicy) or one
 // SubJob, placed together within a single allowed HyperNode domain. It is the
-// granularity of the domain-trial relocation and the plan-state commit.
-type gangUnit struct {
-	job     *schedapi.JobInfo
-	subJob  *schedapi.SubJobInfo // nil for a Job unit
+// granularity of the domain trial and the plan-state commit.
+type gang struct {
+	subJob  *schedapi.SubJobInfo // nil for the whole-job gang
 	victims []*schedapi.TaskInfo
 }
 
-// requiresHyperNodeAllocate reports whether the unit's job hits the scheduler's
+// jobGangs is one Job inside one FeasibleRelocation call: the container of its
+// gangs and the granularity of the whole-job domain trial. A Job whose victims
+// form a single gang is no special case — it is a container with one element.
+type jobGangs struct {
+	job   *schedapi.JobInfo
+	gangs []gang
+}
+
+// requiresHyperNodeAllocate reports whether the job hits the scheduler's
 // RequiresHyperNodeAllocate predicate AND the session carries a HyperNode tree.
-// Without a tree the constraint stack is inert and the unit must keep the
-// legacy greedy behavior.
-func (u *gangUnit) requiresHyperNodeAllocate(s *SessionSnapshot) bool {
-	return u.job != nil && u.job.RequiresHyperNodeAllocate() && s.hasHyperNodeTopology()
+// Without a tree the constraint stack is inert and the job must keep the legacy
+// greedy behavior.
+func (jg *jobGangs) requiresHyperNodeAllocate(s *SessionSnapshot) bool {
+	return jg.job != nil && jg.job.RequiresHyperNodeAllocate() && s.hasHyperNodeTopology()
 }
 
-// jobID returns the unit's Job ID, or "" when the session has no such Job.
-func (u *gangUnit) jobID() schedapi.JobID {
-	if u.job == nil {
+// jobID returns the container's Job ID, or "" when the session has no such Job.
+func (jg *jobGangs) jobID() schedapi.JobID {
+	if jg.job == nil {
 		return ""
 	}
-	return u.job.UID
+	return jg.job.UID
 }
 
-func (u *gangUnit) subJobID() schedapi.SubJobID {
-	if u.subJob == nil {
+// allVictims returns every gang's victims, for logs.
+func (jg *jobGangs) allVictims() []*schedapi.TaskInfo {
+	var all []*schedapi.TaskInfo
+	for i := range jg.gangs {
+		all = append(all, jg.gangs[i].victims...)
+	}
+	return all
+}
+
+func (g *gang) subJobID() schedapi.SubJobID {
+	if g.subJob == nil {
 		return ""
 	}
-	return u.subJob.UID
+	return g.subJob.UID
 }
 
 // hasHyperNodeTopology reports whether the scheduler's HyperNode tree is ready.
-// Without a ready tree the constraint stack is inert and the unit keeps the
-// legacy greedy path.
+// Without a ready tree the constraint stack is inert and a constrained gang
+// stays on the legacy greedy path.
 func (s *SessionSnapshot) hasHyperNodeTopology() bool {
 	return s.ssn != nil && s.ssn.HyperNodesReadyToSchedule
 }
 
-// groupVictimsByGang splits victims into gang units in first-encounter order:
-// one Job unit, or one unit per SubJob for a SubGroupPolicy job (TaskToSubJob
-// always maps a task, the default subJob included).
-func (s *SessionSnapshot) groupVictimsByGang(victims []*schedapi.TaskInfo) []*gangUnit {
+// groupVictimsByJobGangs splits victims into Job containers in first-encounter
+// order: one gang, or one gang per SubJob for a SubGroupPolicy job (TaskToSubJob
+// always maps a task, the default subJob included). Victims of Jobs the session
+// does not carry all share one container with job == nil, which always takes the
+// greedy path.
+func (s *SessionSnapshot) groupVictimsByJobGangs(victims []*schedapi.TaskInfo) []*jobGangs {
 	type gangKey struct {
-		job    schedapi.JobID
-		subJob schedapi.SubJobID // "" = Job unit
+		job    *schedapi.JobInfo
+		subJob schedapi.SubJobID // "" = the whole-job gang
 	}
-	var units []*gangUnit
-	byKey := map[gangKey]int{}
+	var groups []*jobGangs
+	byJob := map[*schedapi.JobInfo]*jobGangs{}
+	byGang := map[gangKey]int{}
 	for _, v := range victims {
-		key := gangKey{job: v.Job}
+		job := s.ssn.Jobs[v.Job]
+		subJobID := schedapi.SubJobID("")
 		var subJob *schedapi.SubJobInfo
-		if job := s.ssn.Jobs[v.Job]; job != nil && job.ContainsSubJobPolicy() {
-			key.subJob = job.TaskToSubJob[v.UID]
-			subJob = job.SubJobs[key.subJob]
+		if job != nil && job.ContainsSubJobPolicy() {
+			subJobID = job.TaskToSubJob[v.UID]
+			subJob = job.SubJobs[subJobID]
 		}
-		if idx, found := byKey[key]; found {
-			units[idx].victims = append(units[idx].victims, v)
-			continue
+		jg := byJob[job]
+		if jg == nil {
+			jg = &jobGangs{job: job}
+			byJob[job] = jg
+			groups = append(groups, jg)
 		}
-		byKey[key] = len(units)
-		units = append(units, &gangUnit{
-			job:     s.ssn.Jobs[v.Job],
-			subJob:  subJob,
-			victims: []*schedapi.TaskInfo{v},
-		})
+		key := gangKey{job: job, subJob: subJobID}
+		index, found := byGang[key]
+		if !found {
+			index = len(jg.gangs)
+			byGang[key] = index
+			jg.gangs = append(jg.gangs, gang{subJob: subJob})
+		}
+		jg.gangs[index].victims = append(jg.gangs[index].victims, v)
 	}
-	return units
+	return groups
 }
 
-// allowedDomains returns the unit's tier-ascending candidate HyperNode layers
+// allowedDomains returns the gang's tier-ascending candidate HyperNode layers
 // on the current plan state: the Job-entry gradient, intersected with the
-// SubJob-entry gradient for a SubJob unit (Job entry carries the Job-level
+// SubJob-entry gradient for a SubJob gang (Job entry carries the Job-level
 // topology the SubGroupPolicy branches do not inherit).
-func (s *SessionSnapshot) allowedDomains(unit *gangUnit) ([][]*schedapi.HyperNodeInfo, bool) {
+func (s *SessionSnapshot) allowedDomains(jg *jobGangs, g *gang) ([][]*schedapi.HyperNodeInfo, bool) {
 	root := s.ssn.HyperNodes[schedframework.ClusterTopHyperNode]
 	if root == nil {
 		return nil, false
 	}
-	jobGradients, _ := s.ssn.HyperNodeGradientForJobFn(unit.job, root, schedapi.PurposeAllocate)
-	if unit.subJob == nil {
+	jobGradients, _ := s.ssn.HyperNodeGradientForJobFn(jg.job, root, schedapi.PurposeAllocate)
+	if g.subJob == nil {
 		return sortLayersByName(jobGradients), len(jobGradients) > 0
 	}
-	subJobGradients, _ := s.ssn.HyperNodeGradientForSubJobFn(unit.subJob, root, schedapi.PurposeAllocate)
+	subJobGradients, _ := s.ssn.HyperNodeGradientForSubJobFn(g.subJob, root, schedapi.PurposeAllocate)
 	layers, ok := intersectGradientForest(jobGradients, subJobGradients, s.ssn.HyperNodes)
 	return sortLayersByName(layers), ok
 }
@@ -186,21 +210,218 @@ func underAnyRoot(hyperNodes schedapi.HyperNodeInfoMap, name string, roots sets.
 	return false
 }
 
-// domainTrialRelocation places a gang unit entirely within one allowed domain,
-// tier ascending, first fit wins. A failed trial moves to the next domain; when
-// every domain fails the unit is infeasible (nil, false).
-func (s *SessionSnapshot) domainTrialRelocation(
+// shouldUsePodGroupAntiAffinityCandidateForest reports whether the Job's hard
+// boundary is required PodGroup anti-affinity rather than a real Job-level hard
+// network topology — a copy of allocate's function of the same name.
+func shouldUsePodGroupAntiAffinityCandidateForest(job *schedapi.JobInfo) bool {
+	if job == nil || !job.ContainsHardPodGroupAntiAffinity() {
+		return false
+	}
+	hardMode, _ := job.IsHardTopologyMode()
+	return !hardMode
+}
+
+// layerCandidateDomainSets turns one candidate layer into the domain sets to try,
+// one set per attempt. By default each domain is its own set: the container has to
+// fit inside that one domain. A required-anti-affinity forest takes the layer as
+// one set over all its roots, so sibling domains can split the container — the
+// same reading of a layer as allocate's candidate forest
+// (allocate.normalizeCandidateForestRoots and filterGradientsByCandidateForest).
+func layerCandidateDomainSets(layer []*schedapi.HyperNodeInfo, useCandidateForest bool, hyperNodes schedapi.HyperNodeInfoMap) [][]*schedapi.HyperNodeInfo {
+	if !useCandidateForest {
+		sets := make([][]*schedapi.HyperNodeInfo, 0, len(layer))
+		for _, domain := range layer {
+			if domain == nil {
+				continue
+			}
+			sets = append(sets, []*schedapi.HyperNodeInfo{domain})
+		}
+		return sets
+	}
+	roots := distinctDomainsByName(layer)
+	if len(roots) == 0 {
+		return nil
+	}
+	// The roots' union is the semantic bound; the envelope is only the guard
+	// allocate applies too: a layer whose roots the tree does not join is skipped.
+	if candidateForestEnvelope(hyperNodes, roots) == nil {
+		klog.V(4).InfoS("repack relocation: candidate forest layer skipped — its roots share no HyperNode ancestor",
+			"roots", domainsByTier([][]*schedapi.HyperNodeInfo{roots}))
+		return nil
+	}
+	return [][]*schedapi.HyperNodeInfo{roots}
+}
+
+// candidateForestEnvelope is the LCA of a layer's roots, nil when the tree does
+// not join them (allocate.candidateForestEnvelope).
+func candidateForestEnvelope(hyperNodes schedapi.HyperNodeInfoMap, roots []*schedapi.HyperNodeInfo) *schedapi.HyperNodeInfo {
+	if len(roots) == 0 {
+		return nil
+	}
+	envelope := roots[0].Name
+	for _, root := range roots[1:] {
+		envelope = hyperNodes.GetLCAHyperNode(envelope, root.Name)
+		if envelope == "" {
+			return nil
+		}
+	}
+	return hyperNodes[envelope]
+}
+
+// distinctDomainsByName dedupes a layer's domains in name order.
+func distinctDomainsByName(layer []*schedapi.HyperNodeInfo) []*schedapi.HyperNodeInfo {
+	unique := make(map[string]*schedapi.HyperNodeInfo, len(layer))
+	for _, domain := range layer {
+		if domain != nil {
+			unique[domain.Name] = domain
+		}
+	}
+	names := make([]string, 0, len(unique))
+	for name := range unique {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	roots := make([]*schedapi.HyperNodeInfo, 0, len(names))
+	for _, name := range names {
+		roots = append(roots, unique[name])
+	}
+	return roots
+}
+
+// trialWholeJob settles every gang of one Job container inside the Job's allowed
+// HyperNode domains: the candidates come from the Job-entry gradient, tried tier
+// ascending, first fit wins. A domain set that cannot hold the whole container is
+// rolled back and the next one is tried — without this, the first gang's first
+// fit decides where the rest of the job can go, and a job that fits another
+// domain is refused. Inside a set each gang keeps its own allowed domains and its
+// own per-pod trial, so subjob-level and relational constraints still hold.
+func (s *SessionSnapshot) trialWholeJob(
 	ctx context.Context,
+	jg *jobGangs,
 	scope *trialScope,
-	unit *gangUnit,
 	sourceTasksToRemove []*schedapi.TaskInfo,
 	receivers []*schedapi.NodeInfo,
 	tasksPlacedByNode map[string][]*schedapi.TaskInfo,
 ) ([]*api.Move, bool) {
-	allowed, ok := s.allowedDomainsForTrial(scope, unit)
+	layers, ok := s.jobEntryDomains(jg, scope)
 	if !ok {
-		klog.V(4).InfoS("repack relocation: unit INFEASIBLE — no allowed HyperNode domain",
-			"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims))
+		klog.V(4).InfoS("repack relocation: whole-job INFEASIBLE — no allowed HyperNode domain",
+			"job", jg.job.UID, "gangs", len(jg.gangs), "victims", taskNames(jg.allVictims()))
+		return nil, false
+	}
+	// Rollback base is the container's own start, not the call's baseline: the
+	// gangs before this container stay committed.
+	jobBase := s.planState().Save()
+	savedPlaced := clonePlaced(tasksPlacedByNode)
+	useCandidateForest := shouldUsePodGroupAntiAffinityCandidateForest(jg.job)
+	for _, layer := range layers {
+		for _, domains := range layerCandidateDomainSets(layer, useCandidateForest, s.ssn.HyperNodes) {
+			if ctx.Err() != nil {
+				return nil, false
+			}
+			moves, fit := s.trialWholeJobInDomains(ctx, jg, domains, scope, sourceTasksToRemove, receivers, tasksPlacedByNode)
+			if fit {
+				klog.V(4).InfoS("repack relocation: whole job placed in one domain set",
+					"job", jg.job.UID, "allowedDomains", domainsByTier([][]*schedapi.HyperNodeInfo{domains}),
+					"gangs", len(jg.gangs), "placements", moveSummary(moves))
+				return moves, true
+			}
+			s.planState().Restore(jobBase)
+			restorePlaced(tasksPlacedByNode, savedPlaced)
+		}
+	}
+	klog.V(4).InfoS("repack relocation: whole-job INFEASIBLE — every allowed domain failed the trial",
+		"job", jg.job.UID, "gangs", len(jg.gangs), "victims", taskNames(jg.allVictims()),
+		"domainsTried", domainsByTier(layers))
+	return nil, false
+}
+
+// jobEntryDomains returns the container's candidate domain layers: the Job-entry
+// gradient under the anchors this pass intends. A Job the entry leaves
+// unconstrained yields the tree root as its one candidate — a domain that
+// excludes nothing, so every gang keeps its own domains; that is today's per-gang
+// path, and the whole-job retry only pays off when a plugin pins gangs to the
+// Job anchor.
+func (s *SessionSnapshot) jobEntryDomains(jg *jobGangs, scope *trialScope) ([][]*schedapi.HyperNodeInfo, bool) {
+	root := s.ssn.HyperNodes[schedframework.ClusterTopHyperNode]
+	if root == nil {
+		return nil, false
+	}
+	plan := s.planState()
+	anchor := plan.Save()
+	defer plan.Restore(anchor)
+	if s.jobFullyVacated(scope, jg.job) {
+		plan.SetGangAnchor(jg.job.UID, "", s.jobAnchorAfterEvacuation(scope, jg.job))
+	}
+	jobGradients, stats := s.ssn.HyperNodeGradientForJobFn(jg.job, root, schedapi.PurposeAllocate)
+	if len(jobGradients) == 0 {
+		return nil, false
+	}
+	if noPluginApplied(stats) {
+		return [][]*schedapi.HyperNodeInfo{{root}}, true
+	}
+	return sortLayersByName(jobGradients), true
+}
+
+// noPluginApplied reports whether no gradient plugin claimed the Job entry: the
+// framework fills PluginEligibleByTier only for Applied plugins, and a nil stats
+// means none is registered. The returned forest is then the bare candidate
+// universe, so the caller uses the tree root as its one candidate.
+func noPluginApplied(stats *schedapi.HyperNodeGradientStats) bool {
+	return stats == nil || len(stats.PluginEligibleByTier) == 0
+}
+
+// trialWholeJobInDomains places every gang of the container in one domain set, in
+// gang order, committing each gang so the next one is graded against the previous
+// gang's plan-state placement — the serial pinning that keeps Required-linked
+// gangs co-located. Any failure discards the whole set; the caller rolls back.
+func (s *SessionSnapshot) trialWholeJobInDomains(
+	ctx context.Context,
+	jg *jobGangs,
+	domains []*schedapi.HyperNodeInfo,
+	scope *trialScope,
+	sourceTasksToRemove []*schedapi.TaskInfo,
+	receivers []*schedapi.NodeInfo,
+	tasksPlacedByNode map[string][]*schedapi.TaskInfo,
+) ([]*api.Move, bool) {
+	var moves []*api.Move
+	for i := range jg.gangs {
+		gangMoves, fit := s.trialGangInDomains(ctx, jg, &jg.gangs[i], domains, scope, sourceTasksToRemove, receivers, tasksPlacedByNode)
+		if !fit {
+			return nil, false
+		}
+		s.planState().ApplyCommit(gangMoves)
+		moves = append(moves, gangMoves...)
+	}
+	return moves, true
+}
+
+// trialGangInDomains places one gang entirely inside one set's allowed domains,
+// tier ascending, first fit wins. A failed trial moves to the next domain; when
+// every domain fails the gang is infeasible (nil, false).
+func (s *SessionSnapshot) trialGangInDomains(
+	ctx context.Context,
+	jg *jobGangs,
+	g *gang,
+	domains []*schedapi.HyperNodeInfo,
+	scope *trialScope,
+	sourceTasksToRemove []*schedapi.TaskInfo,
+	receivers []*schedapi.NodeInfo,
+	tasksPlacedByNode map[string][]*schedapi.TaskInfo,
+) ([]*api.Move, bool) {
+	allowed, ok := s.allowedDomainsForTrial(jg, g, scope)
+	if !ok {
+		klog.V(5).InfoS("repack relocation: gang has no allowed HyperNode domain",
+			"job", jg.jobID(), "subJob", g.subJobID(), "victims", taskNames(g.victims))
+		return nil, false
+	}
+	// Keep the gang's own allowed domains inside the set: the gradient is still the
+	// gang's, only its candidates narrow.
+	allowed, ok = intersectGradientForest([][]*schedapi.HyperNodeInfo{domains}, allowed, s.ssn.HyperNodes)
+	if !ok {
+		klog.V(5).InfoS("repack relocation: gang has no allowed HyperNode domain inside the container's domains",
+			"job", jg.jobID(), "subJob", g.subJobID(), "allowedDomains", domainsByTier([][]*schedapi.HyperNodeInfo{domains}),
+			"victims", taskNames(g.victims))
 		return nil, false
 	}
 	for _, layer := range allowed {
@@ -208,68 +429,69 @@ func (s *SessionSnapshot) domainTrialRelocation(
 			if ctx.Err() != nil {
 				return nil, false
 			}
-			if moves, fit := s.trialFitDomain(ctx, unit.victims, domain, sourceTasksToRemove, receivers, tasksPlacedByNode); fit {
-				klog.V(4).InfoS("repack relocation: unit placed inside one domain",
-					"job", unit.jobID(), "subJob", unit.subJobID(), "domain", domain.Name, "tier", domain.Tier(),
+			if moves, fit := s.trialFitDomain(ctx, g.victims, domain, sourceTasksToRemove, receivers, tasksPlacedByNode); fit {
+				klog.V(4).InfoS("repack relocation: gang placed inside one domain",
+					"job", jg.jobID(), "subJob", g.subJobID(), "domain", domain.Name, "tier", domain.Tier(),
 					"placements", moveSummary(moves))
 				return moves, true
 			}
 		}
 	}
-	klog.V(4).InfoS("repack relocation: unit INFEASIBLE — every allowed domain failed the trial",
-		"job", unit.jobID(), "subJob", unit.subJobID(), "victims", taskNames(unit.victims),
+	klog.V(4).InfoS("repack relocation: gang INFEASIBLE — every allowed domain failed the trial",
+		"job", jg.jobID(), "subJob", g.subJobID(), "victims", taskNames(g.victims),
 		"domainsTried", domainsByTier(allowed))
 	return nil, false
 }
 
-// allowedDomainsForTrial evaluates the unit's domains on the anchors the plan
+// allowedDomainsForTrial evaluates the gang's domains on the anchors the plan
 // intends once this pass's evacuations are done: a stale anchor pins the trial to
 // the drained subtree — the source only, never a receiver.
-func (s *SessionSnapshot) allowedDomainsForTrial(scope *trialScope, unit *gangUnit) ([][]*schedapi.HyperNodeInfo, bool) {
-	gangVacated := s.gangFullyVacated(unit)
+func (s *SessionSnapshot) allowedDomainsForTrial(jg *jobGangs, g *gang, scope *trialScope) ([][]*schedapi.HyperNodeInfo, bool) {
+	gangVacated := jg.gangFullyVacated(g)
 	jobVacated := false
 	if gangVacated {
-		anchor := s.plan.Save()
-		defer s.plan.Restore(anchor)
-		if unit.subJob != nil {
-			s.plan.SetGangAnchor(unit.job.UID, unit.subJobID(), "")
+		plan := s.planState()
+		anchor := plan.Save()
+		defer plan.Restore(anchor)
+		if g.subJob != nil {
+			plan.SetGangAnchor(jg.job.UID, g.subJobID(), "")
 		}
-		if s.jobFullyVacated(scope, unit) {
+		if s.jobFullyVacated(scope, jg.job) {
 			jobVacated = true
-			s.plan.SetGangAnchor(unit.job.UID, "", s.jobAnchorAfterEvacuation(scope, unit))
+			plan.SetGangAnchor(jg.job.UID, "", s.jobAnchorAfterEvacuation(scope, jg.job))
 		}
 	}
-	allowed, ok := s.allowedDomains(unit)
+	allowed, ok := s.allowedDomains(jg, g)
 	if klog.V(4).Enabled() {
 		// Read before the deferred restore: these are the values the gradient saw.
-		klog.V(4).InfoS("repack relocation: unit allowed domains", "job", unit.jobID(), "subJob", unit.subJobID(),
-			"victims", taskNames(unit.victims), "gangFullyVacated", gangVacated, "jobFullyVacated", jobVacated,
-			"jobAnchor", s.planState().JobAllocatedHyperNode(unit.job.UID),
-			"subJobAnchor", s.planState().SubJobAllocatedHyperNode(unit.job.UID, unit.subJobID()),
+		klog.V(4).InfoS("repack relocation: gang allowed domains", "job", jg.jobID(), "subJob", g.subJobID(),
+			"victims", taskNames(g.victims), "gangFullyVacated", gangVacated, "jobFullyVacated", jobVacated,
+			"jobAnchor", s.planState().JobAllocatedHyperNode(jg.job.UID),
+			"subJobAnchor", s.planState().SubJobAllocatedHyperNode(jg.job.UID, g.subJobID()),
 			"allowedCount", len(allowed), "allowed", domainsByTier(allowed), "usable", ok)
 	}
 	return allowed, ok
 }
 
-// gangFullyVacated reports whether every plan-state allocated task of the unit's
-// gang is a victim of this unit (no residual pod anchors it).
-func (s *SessionSnapshot) gangFullyVacated(unit *gangUnit) bool {
-	index := unit.job.TaskStatusIndex
-	if unit.subJob != nil {
-		index = unit.subJob.TaskStatusIndex
+// gangFullyVacated reports whether every plan-state allocated task of the gang is
+// a victim of that gang (no residual pod anchors it).
+func (jg *jobGangs) gangFullyVacated(g *gang) bool {
+	index := jg.job.TaskStatusIndex
+	if g.subJob != nil {
+		index = g.subJob.TaskStatusIndex
 	}
-	return unitFullyVacated(unit, index)
+	return victimsCoverAllocatedTasks(g.victims, index)
 }
 
 // jobFullyVacated reports whether this pass evacuates the whole job, not just one
 // of its gangs: the Job-entry gradient stays anchored to the job until its last
 // pod leaves.
-func (s *SessionSnapshot) jobFullyVacated(scope *trialScope, unit *gangUnit) bool {
-	if unit.job == nil {
+func (s *SessionSnapshot) jobFullyVacated(scope *trialScope, job *schedapi.JobInfo) bool {
+	if job == nil {
 		return false
 	}
 	allocated := 0
-	for status, tasks := range unit.job.TaskStatusIndex {
+	for status, tasks := range job.TaskStatusIndex {
 		if !schedapi.AllocatedStatus(status) {
 			continue
 		}
@@ -287,14 +509,14 @@ func (s *SessionSnapshot) jobFullyVacated(scope *trialScope, unit *gangUnit) boo
 // pass's evictions are done: the LCA over the gangs that still hold a pod — the
 // gangs the plan has already placed included. Empty when the job keeps no pod, so
 // a fully drained job is bound by nothing.
-func (s *SessionSnapshot) jobAnchorAfterEvacuation(scope *trialScope, unit *gangUnit) string {
-	if unit.job == nil {
+func (s *SessionSnapshot) jobAnchorAfterEvacuation(scope *trialScope, job *schedapi.JobInfo) string {
+	if job == nil {
 		return ""
 	}
-	displaced := s.plan.DisplacedTasks(unit.job.UID)
+	displaced := s.planState().DisplacedTasks(job.UID)
 	anchor := ""
 	kept := 0
-	for _, subJob := range unit.job.SubJobs {
+	for _, subJob := range job.SubJobs {
 		if !subJobKeepsPods(subJob, scope.victims, displaced) {
 			continue
 		}
@@ -305,7 +527,7 @@ func (s *SessionSnapshot) jobAnchorAfterEvacuation(scope *trialScope, unit *gang
 		// Downstream reads "" as unconstrained, so a kept gang with no resolvable
 		// HyperNode widens the trial silently instead of failing it.
 		klog.V(4).InfoS("repack relocation: kept gangs resolve to no HyperNode ancestor — the job anchor stays empty (unconstrained)",
-			"job", unit.jobID(), "keptGangs", kept)
+			"job", job.UID, "keptGangs", kept)
 	}
 	return anchor
 }
@@ -329,16 +551,16 @@ func subJobKeepsPods(subJob *schedapi.SubJobInfo, victims, displaced sets.Set[sc
 	return false
 }
 
-// unitFullyVacated compares victim set membership against statusIndex's allocated
-// tasks: set membership, not count equality — on the Execute-side reconcile a
-// victim is the live Pending replacement pod, so counts could match while a
-// residual allocated pod still anchors the gang.
-func unitFullyVacated(unit *gangUnit, statusIndex map[schedapi.TaskStatus]schedapi.TasksMap) bool {
-	if len(unit.victims) == 0 {
+// victimsCoverAllocatedTasks compares victim set membership against statusIndex's
+// allocated tasks: set membership, not count equality — on the Execute-side
+// reconcile a victim is the live Pending replacement pod, so counts could match
+// while a residual allocated pod still anchors the gang.
+func victimsCoverAllocatedTasks(victims []*schedapi.TaskInfo, statusIndex map[schedapi.TaskStatus]schedapi.TasksMap) bool {
+	if len(victims) == 0 {
 		return false
 	}
 	victimIDs := sets.New[schedapi.TaskID]()
-	for _, v := range unit.victims {
+	for _, v := range victims {
 		if v != nil {
 			victimIDs.Insert(v.UID)
 		}

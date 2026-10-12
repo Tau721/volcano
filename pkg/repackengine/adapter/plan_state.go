@@ -67,7 +67,7 @@ type PlanStateCarrier interface {
 	// ignored. The caller re-Saves to advance the rollback baseline.
 	ApplyCommit(moves []*api.Move)
 	// SetGangAnchor overwrites a gang's AllocatedHyperNode for the anchor override
-	// of a vacated unit (subJobID == "" = job anchor; "" clears it). The caller
+	// of a vacated gang (subJobID == "" = the Job anchor; "" clears it). The caller
 	// must bracket it with Save/Restore.
 	SetGangAnchor(jobID schedapi.JobID, subJobID schedapi.SubJobID, value string)
 	// DisplacedTasks returns the job's tasks whose job-side binding this pass has
