@@ -22,10 +22,15 @@ import (
 	"github.com/robfig/cron/v3"
 )
 
+// parseCron parses a standard 5-field cron expression.
+func parseCron(expr string) (cron.Schedule, error) {
+	return cron.ParseStandard(expr)
+}
+
 // nextCronFire returns the next activation of a standard 5-field cron schedule
 // strictly after the given instant.
 func nextCronFire(expr string, after time.Time) (time.Time, error) {
-	schedule, err := cron.ParseStandard(expr)
+	schedule, err := parseCron(expr)
 	if err != nil {
 		return time.Time{}, err
 	}

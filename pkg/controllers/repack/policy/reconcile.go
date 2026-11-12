@@ -188,12 +188,24 @@ func (c *Controller) reconcile(ctx context.Context, policyName string) error {
 		if status.LastTriggerTime != nil && status.LastTriggerTime.Time.After(anchor) {
 			anchor = status.LastTriggerTime.Time
 		}
-		nextFire, err := nextCronFire(*spec.Trigger.CronSchedule, anchor)
+		schedule, err := parseCron(*spec.Trigger.CronSchedule)
 		if err != nil {
 			cronParseErr = err
-		} else if !now.Before(nextFire) && (status.LastTriggerTime == nil || nextFire.After(status.LastTriggerTime.Time)) {
-			triggered = true
-			triggerSource = TriggerCronSchedule
+		} else if due := schedule.Next(anchor); !now.Before(due) {
+			// due is the first unconsumed slot. Without a deadline it is caught up
+			// however old it is. With one, a stale due is only discarded when no
+			// newer slot falls inside the window either (the freshest slot is what
+			// a resume should fire, not the oldest miss).
+			if spec.Trigger.StartingDeadlineSeconds == nil {
+				triggered = true
+				triggerSource = TriggerCronSchedule
+			} else {
+				windowStart := now.Add(-time.Duration(*spec.Trigger.StartingDeadlineSeconds) * time.Second)
+				if !due.Before(windowStart) || !schedule.Next(windowStart.Add(-time.Nanosecond)).After(now) {
+					triggered = true
+					triggerSource = TriggerCronSchedule
+				}
+			}
 		}
 	}
 
