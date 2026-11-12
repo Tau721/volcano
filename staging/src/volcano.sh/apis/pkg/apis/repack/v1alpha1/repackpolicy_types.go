@@ -79,6 +79,7 @@ type RepackPolicySpec struct {
 	// Trigger is when a new RepackRun is derived (either source firing suffices).
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:XValidation:rule="(has(self.cronSchedule) && self.cronSchedule != '') || has(self.onFragAbovePercent)",message="trigger must set at least one of cronSchedule or onFragAbovePercent"
+	// +kubebuilder:validation:XValidation:rule="!has(self.startingDeadlineSeconds) || (has(self.cronSchedule) && self.cronSchedule != '')",message="startingDeadlineSeconds requires cronSchedule"
 	Trigger RepackRunTrigger `json:"trigger"`
 
 	// RunTemplate is the template for derived RepackRuns.
@@ -114,6 +115,15 @@ type RepackRunTrigger struct {
 	// +optional
 	// +kubebuilder:validation:XValidation:rule="!self.contains('TZ')",message="cronSchedule cannot contain TZ or CRON_TZ (RepackPolicy has no timeZone field); a policy always runs in the controller's local time"
 	CronSchedule *string `json:"cronSchedule,omitempty"`
+
+	// StartingDeadlineSeconds bounds how late a missed cron slot may still be
+	// caught up (Kubernetes CronJob semantics): the fire is discarded once the
+	// slot is older than this. Unset means no deadline — the most recent missed
+	// slot is caught up however old it is. 0 discards every slot in practice,
+	// since evaluation always lands after the slot.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
 
 	// OnFragAbovePercent fires when the cluster-wide fragmentation rate for the
 	// template's resource exceeds this 0-100 threshold (strictly greater than;

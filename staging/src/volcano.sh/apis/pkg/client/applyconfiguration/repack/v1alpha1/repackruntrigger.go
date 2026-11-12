@@ -26,6 +26,12 @@ package v1alpha1
 type RepackRunTriggerApplyConfiguration struct {
 	// CronSchedule fires on a standard 5-field cron expression; empty disables.
 	CronSchedule *string `json:"cronSchedule,omitempty"`
+	// StartingDeadlineSeconds bounds how late a missed cron slot may still be
+	// caught up (Kubernetes CronJob semantics): the fire is discarded once the
+	// slot is older than this. Unset means no deadline — the most recent missed
+	// slot is caught up however old it is. 0 discards every slot in practice,
+	// since evaluation always lands after the slot.
+	StartingDeadlineSeconds *int64 `json:"startingDeadlineSeconds,omitempty"`
 	// OnFragAbovePercent fires when the cluster-wide fragmentation rate for the
 	// template's resource exceeds this 0-100 threshold (strictly greater than;
 	// equal does not fire). 0 fires on any fragmentation (FragRate > 0). Unset disables.
@@ -43,6 +49,14 @@ func RepackRunTrigger() *RepackRunTriggerApplyConfiguration {
 // If called multiple times, the CronSchedule field is set to the value of the last call.
 func (b *RepackRunTriggerApplyConfiguration) WithCronSchedule(value string) *RepackRunTriggerApplyConfiguration {
 	b.CronSchedule = &value
+	return b
+}
+
+// WithStartingDeadlineSeconds sets the StartingDeadlineSeconds field in the declarative configuration to the given value
+// and returns the receiver, so that objects can be built by chaining "With" function invocations.
+// If called multiple times, the StartingDeadlineSeconds field is set to the value of the last call.
+func (b *RepackRunTriggerApplyConfiguration) WithStartingDeadlineSeconds(value int64) *RepackRunTriggerApplyConfiguration {
+	b.StartingDeadlineSeconds = &value
 	return b
 }
 

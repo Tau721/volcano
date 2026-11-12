@@ -607,6 +607,11 @@ func (in *RepackRunTrigger) DeepCopyInto(out *RepackRunTrigger) {
 		*out = new(string)
 		**out = **in
 	}
+	if in.StartingDeadlineSeconds != nil {
+		in, out := &in.StartingDeadlineSeconds, &out.StartingDeadlineSeconds
+		*out = new(int64)
+		**out = **in
+	}
 	if in.OnFragAbovePercent != nil {
 		in, out := &in.OnFragAbovePercent, &out.OnFragAbovePercent
 		*out = new(int32)
