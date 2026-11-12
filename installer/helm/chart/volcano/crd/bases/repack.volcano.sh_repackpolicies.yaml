@@ -546,10 +546,23 @@ spec:
                     maximum: 100
                     minimum: 0
                     type: integer
+                  startingDeadlineSeconds:
+                    description: |-
+                      StartingDeadlineSeconds bounds how late a missed cron slot may still be
+                      caught up (Kubernetes CronJob semantics): the fire is discarded once the
+                      slot is older than this. Unset means no deadline — the most recent missed
+                      slot is caught up however old it is. 0 discards every slot in practice,
+                      since evaluation always lands after the slot.
+                    format: int64
+                    minimum: 0
+                    type: integer
                 type: object
                 x-kubernetes-validations:
                 - message: trigger must set at least one of cronSchedule or onFragAbovePercent
                   rule: (has(self.cronSchedule) && self.cronSchedule != '') || has(self.onFragAbovePercent)
+                - message: startingDeadlineSeconds requires cronSchedule
+                  rule: '!has(self.startingDeadlineSeconds) || (has(self.cronSchedule)
+                    && self.cronSchedule != '''')'
             required:
             - runTemplate
             - trigger
