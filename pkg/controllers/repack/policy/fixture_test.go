@@ -100,6 +100,19 @@ func (f *fixture) addPolicy(pol *repackv1alpha1.RepackPolicy) {
 	}
 }
 
+// updatePolicy applies a spec change (e.g. resume) to both the fake API and the
+// lister store, bumping Generation as the API server would.
+func (f *fixture) updatePolicy(pol *repackv1alpha1.RepackPolicy) {
+	f.t.Helper()
+	pol.Generation++
+	if _, err := f.vc.RepackV1alpha1().RepackPolicies().Update(context.Background(), pol, metav1.UpdateOptions{}); err != nil {
+		f.t.Fatalf("update policy %s: %v", pol.Name, err)
+	}
+	if err := f.pol.Update(pol.DeepCopy()); err != nil {
+		f.t.Fatalf("update policy indexer %s: %v", pol.Name, err)
+	}
+}
+
 // addRun seeds the same run into both the fake API and the lister store.
 func (f *fixture) addRun(run *repackv1alpha1.RepackRun) {
 	f.t.Helper()
@@ -258,6 +271,11 @@ func policy(name string, uid string, created time.Time) *repackv1alpha1.RepackPo
 
 func withCron(pol *repackv1alpha1.RepackPolicy, expr string) *repackv1alpha1.RepackPolicy {
 	pol.Spec.Trigger.CronSchedule = ptr.To(expr)
+	return pol
+}
+
+func withStartingDeadline(pol *repackv1alpha1.RepackPolicy, seconds int64) *repackv1alpha1.RepackPolicy {
+	pol.Spec.Trigger.StartingDeadlineSeconds = ptr.To(seconds)
 	return pol
 }
 

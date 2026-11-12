@@ -164,6 +164,115 @@ func TestReconcileCronResumeCatchesUpOne(t *testing.T) {
 	}
 }
 
+// A slot older than startingDeadlineSeconds is not caught up: no run, no
+// lastTriggerTime advance, and the wakeup still targets the next slot (discard
+// must not stall the clock).
+func TestReconcileCronDeadlineDiscardsStaleSlot(t *testing.T) {
+	clock := tCreate.Add(5*time.Minute + 45*time.Second) // 00:05:45; the 00:05 slot is 45s old
+	f := newFixture(t, clock, DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(policy("pol", "u1", tCreate), everyMin), 30))
+
+	f.reconcile("pol")
+
+	if got := listRunNames(f); len(got) != 0 {
+		t.Fatalf("stale slot beyond deadline created %v", got)
+	}
+	if got := f.getPolicy("pol").Status.LastTriggerTime; got != nil {
+		t.Errorf("discard advanced lastTriggerTime to %v", got)
+	}
+	f.assertHealthy("pol", repackv1alpha1.ReasonReconcileSucceeded, "no trigger fired")
+	if d, ok := f.lastScheduled("pol"); !ok || d != 15*time.Second {
+		t.Errorf("wakeup after discard = %v (present=%v), want 15s to 00:06:00", d, ok)
+	}
+}
+
+// The first unconsumed slot may be stale while a newer slot is still inside the
+// deadline window: the newest slot is what fires, executed at now.
+func TestReconcileCronDeadlineFiresFreshestSlot(t *testing.T) {
+	clock := tCreate.Add(5*time.Minute + 10*time.Second) // 00:05:10; the 00:05 slot is 10s old
+	f := newFixture(t, clock, DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(policy("pol", "u1", tCreate), everyMin), 30))
+
+	f.reconcile("pol")
+
+	runs := listRunNames(f)
+	if len(runs) != 1 {
+		t.Fatalf("runs = %v, want one catch-up", runs)
+	}
+	if want := "pol-" + clock.UTC().Format(runNameFormat); runs[0] != want {
+		t.Errorf("catch-up run = %q, want name stamped at now %q", runs[0], want)
+	}
+	if got := f.getPolicy("pol").Status.LastTriggerTime; got == nil || !got.Time.Equal(clock) {
+		t.Errorf("lastTriggerTime = %v, want %v", got, clock)
+	}
+}
+
+// Age exactly equal to the deadline still fires: the window lower bound is
+// inclusive (guarded by the -time.Nanosecond probe).
+func TestReconcileCronDeadlineBoundaryIsInclusive(t *testing.T) {
+	clock := tCreate.Add(5*time.Minute + 30*time.Second) // 00:05:30; the 00:05 slot is exactly 30s old
+	f := newFixture(t, clock, DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(policy("pol", "u1", tCreate), everyMin), 30))
+
+	f.reconcile("pol")
+
+	if got := len(listRunNames(f)); got != 1 {
+		t.Fatalf("age == deadline created %d runs, want 1", got)
+	}
+}
+
+// Deadline 0 discards a slot the evaluation reaches late, which is the common
+// case (CronJob semantics).
+func TestReconcileCronDeadlineZeroDiscardsLateEvaluation(t *testing.T) {
+	clock := tCreate.Add(5*time.Minute + time.Second) // 00:05:01
+	f := newFixture(t, clock, DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(policy("pol", "u1", tCreate), everyMin), 0))
+
+	f.reconcile("pol")
+
+	if got := listRunNames(f); len(got) != 0 {
+		t.Fatalf("deadline 0 created %v", got)
+	}
+	f.assertHealthy("pol", repackv1alpha1.ReasonReconcileSucceeded, "no trigger fired")
+}
+
+// A discarded slot does not poison later evaluations: once a slot lands inside
+// the window again, cron fires normally.
+func TestReconcileCronDeadlineRecoversAtNextSlot(t *testing.T) {
+	f := newFixture(t, tCreate.Add(5*time.Minute+45*time.Second), DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(policy("pol", "u1", tCreate), everyMin), 30))
+
+	f.reconcile("pol")
+	if got := listRunNames(f); len(got) != 0 {
+		t.Fatalf("stale slot created %v", got)
+	}
+
+	f.clock = tCreate.Add(6*time.Minute + 30*time.Second) // 00:06:30; the 00:06 slot is 30s old
+	f.reconcile("pol")
+	if got := len(listRunNames(f)); got != 1 {
+		t.Fatalf("post-discard slot created %d runs, want 1", got)
+	}
+}
+
+// A discarded cron slot only disables the cron source; onFrag still fires on the
+// same evaluation.
+func TestReconcileCronDeadlineDoesNotBlockOnFrag(t *testing.T) {
+	clock := tCreate.Add(5*time.Minute + 45*time.Second)
+	f := newFixture(t, clock, DefaultFragEvalCycle)
+	halfFragCluster(f)
+	f.addPolicy(withStartingDeadline(withOnFrag(withCron(policy("pol", "u1", tCreate), everyMin), 0), 30))
+
+	f.reconcile("pol")
+
+	runs := f.listPolicyRuns("pol")
+	if len(runs) != 1 {
+		t.Fatalf("runs = %d, want the onFrag run only", len(runs))
+	}
+	if got := runs[0].Labels[repackv1alpha1.RepackTriggerLabel]; got != TriggerOnFrag {
+		t.Errorf("trigger label = %q, want %q", got, TriggerOnFrag)
+	}
+}
+
 // A policy that vanished (lister NotFound) reconciles silently — no create, no
 // status write, no wakeup.
 func TestReconcilePolicyNotFound(t *testing.T) {
@@ -227,6 +336,31 @@ func TestReconcileSuspendStillConvergesTerminalRun(t *testing.T) {
 	if len(f.scheduled) != 0 {
 		t.Errorf("suspended policy armed a wakeup")
 	}
+}
+
+// The reported scenario: suspended across cron slots and resumed long after the
+// deadline — the missed slot is discarded, so no catch-up run appears.
+func TestReconcileSuspendResumeBeyondDeadlineDoesNotFire(t *testing.T) {
+	f := newFixture(t, tCreate.Add(time.Minute), DefaultFragEvalCycle)
+	f.addPolicy(withStartingDeadline(withCron(withSuspend(policy("pol", "u1", tCreate), true), everyMin), 30))
+
+	f.reconcile("pol") // suspended: a due slot derives nothing
+	if got := listRunNames(f); len(got) != 0 {
+		t.Fatalf("suspended policy derived %v", got)
+	}
+
+	// Resume at 00:10:45, past the 30s deadline of the 00:10 slot as well.
+	f.clock = tCreate.Add(10*time.Minute + 45*time.Second)
+	f.updatePolicy(withSuspend(f.getPolicy("pol"), false))
+
+	f.reconcile("pol")
+	if got := listRunNames(f); len(got) != 0 {
+		t.Fatalf("resume beyond deadline caught up %v", got)
+	}
+	if got := f.getPolicy("pol").Status.LastTriggerTime; got != nil {
+		t.Errorf("discard advanced lastTriggerTime to %v", got)
+	}
+	f.assertHealthy("pol", repackv1alpha1.ReasonReconcileSucceeded, "no trigger fired")
 }
 
 // With a run still in progress, both trigger sources skip creation and report the

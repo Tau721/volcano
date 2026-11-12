@@ -135,6 +135,22 @@ var _ = Describe("RepackPolicy CRD & controller", Serial, func() {
 		}
 	})
 
+	It("rejects startingDeadlineSeconds without cronSchedule; accepts it with cron", func() {
+		// The deadline only bounds cron catch-up, so a policy that omits cron has
+		// nothing for it to bound.
+		noCron := newPolicy("pol-deadline-no-cron", repackv1alpha1.RepackModeDryRun).
+			onFrag(0).deadline(60).goal(npuResource).pol
+		_, err := ctx.Vcclient.RepackV1alpha1().RepackPolicies().Create(context.TODO(), noCron, metav1.CreateOptions{})
+		Expect(err).To(HaveOccurred())
+		Expect(err.Error()).To(ContainSubstring("startingDeadlineSeconds requires cronSchedule"))
+
+		withCron := newPolicy("pol-deadline-with-cron", repackv1alpha1.RepackModeDryRun).
+			cron(policyCronYearly).deadline(60).goal(npuResource).pol
+		created, err := createPolicy(ctx, withCron)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(created.UID).NotTo(BeEmpty())
+	})
+
 	It("installs the STATUS printer column with the Healthy filter", func() {
 		// The kubernetes Clientset does not expose apiextensions, so read the CRD
 		// through the apiextensions clientset built from the same kubeconfig.
@@ -230,6 +246,40 @@ var _ = Describe("RepackPolicy CRD & controller", Serial, func() {
 		// No burst of backfilled runs: until the next slot the count stays at one.
 		Consistently(func() int { return len(policyRunNames(ctx, pol.Name)) }, 15*time.Second, repackPoll).
 			Should(BeEquivalentTo(1), "resume must derive exactly one run, not one per missed slot")
+	})
+
+	It("resume past startingDeadlineSeconds skips the missed slot; within it derives a run", func() {
+		nodes = npuFixture(ctx, 1)
+
+		// Two policies differing only in the deadline, resumed at the same instant,
+		// so the outcome hinges on the field rather than on timing.
+		wide, err := createPolicy(ctx, newPolicy("pol-deadline-wide", repackv1alpha1.RepackModeDryRun).
+			cron("* * * * *").deadline(3600).goal(npuResource).suspend(true).pol)
+		Expect(err).NotTo(HaveOccurred())
+		narrow, err := createPolicy(ctx, newPolicy("pol-deadline-narrow", repackv1alpha1.RepackModeDryRun).
+			cron("* * * * *").deadline(1).goal(npuResource).suspend(true).pol)
+		Expect(err).NotTo(HaveOccurred())
+
+		// Resume 5s after a minute boundary: the missed slot is then 5s old (inside
+		// 3600s, outside 1s) and the following slot is ~55s away, so the narrow
+		// policy's no-catch-up window cannot race a legitimate slot fire.
+		time.Sleep(time.Until(time.Now().Truncate(time.Minute).Add(time.Minute + 5*time.Second)))
+		for _, pol := range []*repackv1alpha1.RepackPolicy{wide, narrow} {
+			got := getPolicy(ctx, pol.Name)
+			got.Spec.Suspend = boolPtr(false)
+			_, err := ctx.Vcclient.RepackV1alpha1().RepackPolicies().Update(context.TODO(), got, metav1.UpdateOptions{})
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		// Fresh enough: the missed slot is caught up promptly.
+		waitForPolicyRuns(ctx, wide.Name, 1)
+
+		// Stale: nothing is derived while the next slot is still in the future...
+		Consistently(func() int { return len(policyRunNames(ctx, narrow.Name)) }, 30*time.Second, repackPoll).
+			Should(BeEquivalentTo(0), "a slot older than startingDeadlineSeconds must not be caught up")
+
+		// ...and the next slot fires normally (a discard does not stall the schedule).
+		waitForPolicyRuns(ctx, narrow.Name, 1)
 	})
 
 	// ---- onFrag trigger: threshold, label, self-stop -------------------------
@@ -338,6 +388,10 @@ func (b *policyBuilder) goal(res v1.ResourceName) *policyBuilder {
 }
 func (b *policyBuilder) cron(expr string) *policyBuilder {
 	b.pol.Spec.Trigger.CronSchedule = &expr
+	return b
+}
+func (b *policyBuilder) deadline(seconds int64) *policyBuilder {
+	b.pol.Spec.Trigger.StartingDeadlineSeconds = &seconds
 	return b
 }
 func (b *policyBuilder) onFrag(percent int32) *policyBuilder {
