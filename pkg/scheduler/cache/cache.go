@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
@@ -228,6 +229,12 @@ type imageState struct {
 }
 
 type BindContextExtension interface{}
+
+// BindNumaReservation is implemented by a BindContext extension whose NUMA resources are
+// pre-occupied when the bind is submitted.
+type BindNumaReservation interface {
+	ReservedNumaSets() schedulingapi.ResNumaSets
+}
 
 type BindContext struct {
 	TaskInfo *schedulingapi.TaskInfo
@@ -1173,26 +1180,29 @@ func (sc *SchedulerCache) SetSharedInformerFactory(factory informers.SharedInfor
 	sc.informerFactory = factory
 }
 
-// AddUnassignedNumaPods adds the pods that are newly-scheduled but has not been allocated resources to nodes' UnassignedNumaPods
-func (sc *SchedulerCache) AddUnassignedNumaPods(allocatedSets map[schedulingapi.PodMeta]map[string]schedulingapi.ResNumaSets) error {
-	sc.Mutex.Lock()
-	defer sc.Mutex.Unlock()
-
-	for podMeta, podAlloc := range allocatedSets {
-		for nodeName, resSets := range podAlloc {
-			node, found := sc.Nodes[nodeName]
-			if !found || node == nil {
-				klog.Warningf("failed to find node %s, skip adding unassigned pod %v with resourceSet %v to it", nodeName, podMeta, resSets)
-				continue
-			}
-			if node.UnassignedNumaPods == nil {
-				node.UnassignedNumaPods = make(map[schedulingapi.PodMeta]schedulingapi.ResNumaSets)
-			}
-			node.UnassignedNumaPods[podMeta] = resSets
-			klog.V(3).Infof("added pod %v with resourceSet %v to the unassigned numa pods of node %s", podMeta, resSets, nodeName)
-		}
+// reserveBindNumaResources runs before the bind context is exposed to the bind goroutine, so a
+// later bind failure is always reconciled against an existing entry.
+// Assumes that lock is already acquired.
+func (sc *SchedulerCache) reserveBindNumaResources(node *schedulingapi.NodeInfo, task *schedulingapi.TaskInfo, bindCtx *BindContext) {
+	if task.Pod == nil {
+		return
 	}
-	return nil
+	for _, ext := range bindCtx.Extensions {
+		reservation, ok := ext.(BindNumaReservation)
+		if !ok {
+			continue
+		}
+		resSets := reservation.ReservedNumaSets()
+		if len(resSets) == 0 {
+			continue
+		}
+		if node.UnassignedNumaPods == nil {
+			node.UnassignedNumaPods = make(map[schedulingapi.PodMeta]schedulingapi.ResNumaSets)
+		}
+		podMeta := schedulingapi.PodMeta{UID: task.Pod.UID, Name: task.Pod.Name, Namespace: task.Pod.Namespace}
+		node.UnassignedNumaPods[podMeta] = resSets
+		klog.V(3).Infof("reserved resources %v for pod %v on node %s before bind", resSets, podMeta, node.Name)
+	}
 }
 
 // EventRecorder returns the Event Recorder
@@ -1522,6 +1532,9 @@ func (sc *SchedulerCache) AddBindTask(bindContext *BindContext) error {
 		return err
 	}
 
+	// Must run before the bind goroutine can observe the task.
+	sc.reserveBindNumaResources(node, task, bindContext)
+
 	sc.BindFlowChannel <- bindContext
 	if previousNode != task.NodeName || previouslyOccupied != task.OccupiesTopologyDomain() {
 		job.TaskPlacementGeneration++
@@ -1628,6 +1641,42 @@ func (sc *SchedulerCache) BindTask() {
 	sc.bindCache = make([]*BindContext, 0)
 }
 
+// keepNumaReservation drops only states known to no longer need a reservation; Unknown and
+// future states are kept to avoid releasing one too early.
+func keepNumaReservation(status schedulingapi.TaskStatus) bool {
+	switch status {
+	case schedulingapi.Pending, schedulingapi.Pipelined, schedulingapi.Succeeded, schedulingapi.Failed:
+		return false
+	default:
+		return true
+	}
+}
+
+// pruneUnassignedNumaPods drops entries with no live task on the same node; safety net for
+// missed events and stale resyncs.
+// Assumes that lock is already acquired.
+func (sc *SchedulerCache) pruneUnassignedNumaPods() {
+	// UID -> the node the cached task is on; AddBindTask writes it back to the task.
+	inflight := make(map[k8stypes.UID]string)
+	for _, job := range sc.Jobs {
+		for uid, task := range job.Tasks {
+			if keepNumaReservation(task.Status) {
+				inflight[k8stypes.UID(uid)] = task.NodeName
+			}
+		}
+	}
+
+	for _, node := range sc.Nodes {
+		for podMeta := range node.UnassignedNumaPods {
+			if nodeName, ok := inflight[podMeta.UID]; ok && nodeName == node.Name {
+				continue
+			}
+			delete(node.UnassignedNumaPods, podMeta)
+			klog.V(3).Infof("pruned unassigned numa pod %v from node %s: no in-flight task for this node in cache", podMeta, node.Name)
+		}
+	}
+}
+
 // Snapshot returns the complete snapshot of the cluster from cache
 func (sc *SchedulerCache) Snapshot() *schedulingapi.ClusterInfo {
 	sc.Mutex.Lock()
@@ -1650,6 +1699,8 @@ func (sc *SchedulerCache) Snapshot() *schedulingapi.ClusterInfo {
 
 	copy(snapshot.NodeList, sc.NodeList)
 	snapshot.NodesInShard = sc.InUseNodesInShard.Clone()
+	// Must run before Refresh uses the entries to compute NUMA resources.
+	sc.pruneUnassignedNumaPods()
 	for _, value := range sc.Nodes {
 		value.RefreshNumaSchedulerInfoByCrd()
 	}

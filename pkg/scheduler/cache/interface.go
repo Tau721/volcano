@@ -77,8 +77,6 @@ type Cache interface {
 	// ClientConfig returns the rest config
 	ClientConfig() *rest.Config
 
-	AddUnassignedNumaPods(allocatedSets map[api.PodMeta]map[string]api.ResNumaSets) error
-
 	// SharedInformerFactory return scheduler SharedInformerFactory
 	SharedInformerFactory() informers.SharedInformerFactory
 

@@ -210,12 +210,18 @@ func (p *PodMeta) UnmarshalText(data []byte) error {
 	return nil
 }
 
-// CheckNumaPodAssigned returns true if the specified pod has been assigned numa resources, returns false otherwise.
-// Both UID and the (Namespace, Name) pair are matched because the resource-exporter uses
-// UID when reading cpu_manager_state, and Namespace+Name when querying the PodResources API.
+// CheckNumaPodAssigned reports whether the pod appears in the CRD's PodAllocations. Records with
+// a UID match by UID only, so a stale same-name record cannot mark a recreated pod as assigned;
+// UID-less records (from the PodResources API) fall back to namespace/name.
 func (info *NumatopoInfo) CheckNumaPodAssigned(podMeta PodMeta) bool {
 	for _, podAlloc := range info.PodAllocations {
-		if types.UID(podAlloc.UID) == podMeta.UID || (podAlloc.Name == podMeta.Name && podAlloc.Namespace == podMeta.Namespace) {
+		if len(podAlloc.UID) != 0 {
+			if types.UID(podAlloc.UID) == podMeta.UID {
+				return true
+			}
+			continue
+		}
+		if podAlloc.Name == podMeta.Name && podAlloc.Namespace == podMeta.Namespace {
 			return true
 		}
 	}

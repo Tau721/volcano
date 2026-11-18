@@ -2151,7 +2151,8 @@ func TestClearUnassignedNumaTask_RemovesEntry(t *testing.T) {
 	}
 }
 
-func TestClearUnassignedNumaTask_NoOpWhenTaskHasNoNode(t *testing.T) {
+// Cleanup must work when TaskInfo.NodeName is empty (pipelined tasks, bind-failure resyncs).
+func TestClearUnassignedNumaTask_RemovesEntryWithoutNodeName(t *testing.T) {
 	sc := newCacheWithNodes("n1")
 	node := sc.Nodes["n1"]
 
@@ -2163,8 +2164,8 @@ func TestClearUnassignedNumaTask_NoOpWhenTaskHasNoNode(t *testing.T) {
 
 	sc.clearUnassignedNumaTask(task)
 
-	if len(node.UnassignedNumaPods) != 1 {
-		t.Errorf("expected entry to remain when task has no node, got %v", node.UnassignedNumaPods)
+	if len(node.UnassignedNumaPods) != 0 {
+		t.Errorf("expected entry to be cleared even without a node name, got %v", node.UnassignedNumaPods)
 	}
 }
 
@@ -2195,7 +2196,7 @@ func TestClearUnassignedNumaTask_NoOpWhenNodeMissing(t *testing.T) {
 	sc.clearUnassignedNumaTask(task)
 }
 
-func TestClearUnassignedNumaPod_FallsBackToPodInfoWhenTaskNotInJob(t *testing.T) {
+func TestClearUnassignedNumaPod_RemovesEntryWithoutJob(t *testing.T) {
 	sc := newCacheWithNodes("n1")
 	node := sc.Nodes["n1"]
 
@@ -2203,44 +2204,254 @@ func TestClearUnassignedNumaPod_FallsBackToPodInfoWhenTaskNotInJob(t *testing.T)
 	node.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
 		podMetaFrom(pod): resSets("0-1"),
 	}
-	// No job registered in sc.Jobs, so clearUnassignedNumaPod falls back to the
-	// TaskInfo built directly from the pod.
+	// No job registered in sc.Jobs: cleanup must work purely from the pod UID.
 	sc.clearUnassignedNumaPod(pod)
 
 	if len(node.UnassignedNumaPods) != 0 {
-		t.Errorf("expected entry cleared via fallback path, got %v", node.UnassignedNumaPods)
+		t.Errorf("expected entry cleared without a cached job, got %v", node.UnassignedNumaPods)
 	}
 }
 
-func TestClearUnassignedNumaPod_UsesTaskFromJobWhenPresent(t *testing.T) {
-	sc := newCacheWithNodes("n1")
-	nodeN1 := sc.Nodes["n1"]
-
-	sc.Nodes["n2"] = schedulingapi.NewNodeInfo(buildNode("n2", nil))
-	nodeN2 := sc.Nodes["n2"]
+func TestClearUnassignedNumaPod_RemovesEntryFromEveryNode(t *testing.T) {
+	sc := newCacheWithNodes("n1", "n2")
 
 	pod := buildPod("ns1", "p1", "n1", v1.PodRunning, nil, nil, nil)
 	podMeta := podMetaFrom(pod)
-	nodeN1.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{podMeta: resSets("0-1")}
-	nodeN2.UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{podMeta: resSets("2-3")}
-
-	fallbackTask := schedulingapi.NewTaskInfo(pod)
-	// Register a job whose task points at n2 (different from the pod's nn=n1 so
-	// the fallback TaskInfo would clear the wrong node). clearUnassignedNumaPod
-	// must prefer the job's task.
-	standalone := schedulingapi.NewTaskInfo(pod)
-	jobTask := *standalone
-	jobTask.NodeName = "n2"
-	job := &schedulingapi.JobInfo{Tasks: map[schedulingapi.TaskID]*schedulingapi.TaskInfo{fallbackTask.UID: &jobTask}}
-	sc.Jobs[fallbackTask.Job] = job
+	for _, name := range []string{"n1", "n2"} {
+		sc.Nodes[name].UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+			podMeta: resSets("0-1"),
+		}
+	}
 
 	sc.clearUnassignedNumaPod(pod)
 
-	if len(nodeN1.UnassignedNumaPods) != 1 {
-		t.Errorf("n1 entry should remain since job task points to n2, got %v", nodeN1.UnassignedNumaPods)
+	for _, name := range []string{"n1", "n2"} {
+		if len(sc.Nodes[name].UnassignedNumaPods) != 0 {
+			t.Errorf("entry on %s should be cleared, got %v", name, sc.Nodes[name].UnassignedNumaPods)
+		}
 	}
-	if len(nodeN2.UnassignedNumaPods) != 0 {
-		t.Errorf("n2 entry should have been cleared, got %v", nodeN2.UnassignedNumaPods)
+}
+
+func TestReconcileUnassignedNumaPod(t *testing.T) {
+	tests := []struct {
+		name        string
+		podNode     string
+		wantKeptN1  bool
+		wantKeptN2  bool
+		wantOtherOn bool
+	}{
+		{
+			name:        "unbound pod releases entries on every node",
+			podNode:     "",
+			wantOtherOn: true,
+		},
+		{
+			name:        "pod bound to the entry node keeps only that node",
+			podNode:     "n1",
+			wantKeptN1:  true,
+			wantOtherOn: true,
+		},
+		{
+			name:        "pod bound to another node releases all entries",
+			podNode:     "n3",
+			wantOtherOn: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := newCacheWithNodes("n1", "n2")
+			pod := buildPod("ns1", "p1", tt.podNode, v1.PodRunning, nil, nil, nil)
+			podMeta := podMetaFrom(pod)
+			otherPod := buildPod("ns1", "other", "n1", v1.PodRunning, nil, nil, nil)
+			otherMeta := podMetaFrom(otherPod)
+
+			sc.Nodes["n1"].UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+				podMeta:   resSets("0-1"),
+				otherMeta: resSets("2-3"),
+			}
+			sc.Nodes["n2"].UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+				podMeta: resSets("4-5"),
+			}
+
+			sc.reconcileUnassignedNumaPod(pod)
+
+			_, keptN1 := sc.Nodes["n1"].UnassignedNumaPods[podMeta]
+			_, keptN2 := sc.Nodes["n2"].UnassignedNumaPods[podMeta]
+			_, keptOther := sc.Nodes["n1"].UnassignedNumaPods[otherMeta]
+			assert.Equal(t, tt.wantKeptN1, keptN1, "n1 entry for reconciled pod")
+			assert.Equal(t, tt.wantKeptN2, keptN2, "n2 entry for reconciled pod")
+			assert.Equal(t, tt.wantOtherOn, keptOther, "unrelated entry must be preserved")
+		})
+	}
+}
+
+func TestPruneUnassignedNumaPods(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   schedulingapi.TaskStatus
+		taskNode string
+		inCache  bool
+		wantKept bool
+	}{
+		{
+			name:     "in-flight binding task keeps its entry",
+			status:   schedulingapi.Binding,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: true,
+		},
+		{
+			name:     "releasing task keeps its entry",
+			status:   schedulingapi.Releasing,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: true,
+		},
+		{
+			name:     "unknown task on the entry node keeps its entry",
+			status:   schedulingapi.Unknown,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: true,
+		},
+		{
+			name:     "task bound to another node is pruned",
+			status:   schedulingapi.Binding,
+			taskNode: "n2",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "unbound unknown task is pruned",
+			status:   schedulingapi.Unknown,
+			taskNode: "",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "pending task is pruned",
+			status:   schedulingapi.Pending,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "pipelined task is pruned",
+			status:   schedulingapi.Pipelined,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "succeeded task is pruned",
+			status:   schedulingapi.Succeeded,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "failed task is pruned",
+			status:   schedulingapi.Failed,
+			taskNode: "n1",
+			inCache:  true,
+			wantKept: false,
+		},
+		{
+			name:     "task missing from cache is pruned",
+			inCache:  false,
+			wantKept: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := newCacheWithNodes("n1")
+			pod := buildPod("ns1", "p1", tt.taskNode, v1.PodPending, nil, nil, nil)
+			podMeta := podMetaFrom(pod)
+			sc.Nodes["n1"].UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+				podMeta: resSets("0-1"),
+			}
+
+			if tt.inCache {
+				task := schedulingapi.NewTaskInfo(pod)
+				task.Status = tt.status
+				job := &schedulingapi.JobInfo{
+					UID:   "ns1/job1",
+					Tasks: map[schedulingapi.TaskID]*schedulingapi.TaskInfo{task.UID: task},
+				}
+				sc.Jobs[job.UID] = job
+			}
+
+			sc.pruneUnassignedNumaPods()
+
+			_, kept := sc.Nodes["n1"].UnassignedNumaPods[podMeta]
+			assert.Equal(t, tt.wantKept, kept)
+		})
+	}
+}
+
+// A bind-failure resync releases the entry unless the pod is actually on that node; stale
+// resyncs may observe the pod bound elsewhere.
+func TestSyncTask_ReconcilesUnassignedNumaPods(t *testing.T) {
+	tests := []struct {
+		name      string
+		podExists bool
+		podNode   string
+		wantKept  bool
+	}{
+		{
+			name:      "pod absent from apiserver releases the reservation",
+			podExists: false,
+		},
+		{
+			name:      "unbound pod releases the reservation",
+			podExists: true,
+		},
+		{
+			name:      "pod bound to the reserved node keeps it",
+			podExists: true,
+			podNode:   "n1",
+			wantKept:  true,
+		},
+		{
+			name:      "pod bound to another node releases the reservation",
+			podExists: true,
+			podNode:   "n2",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := newMockSchedulerCache("volcano")
+			t.Cleanup(func() { ShutdownMockSchedulerCache(sc) })
+
+			node := buildNode("n1", api.BuildResourceList("2000m", "10G",
+				[]api.ScalarResource{{Name: "pods", Value: "10"}}...))
+			sc.AddOrUpdateNode(node)
+
+			pod := buildPod("c1", "p1", tt.podNode, v1.PodPending,
+				api.BuildResourceList("1000m", "1G"), nil, map[string]string{})
+			task := api.NewTaskInfo(pod)
+			task.Job = "j1"
+			require.NoError(t, sc.addTask(task))
+
+			podMeta := podMetaFrom(pod)
+			sc.Nodes["n1"].UnassignedNumaPods = map[schedulingapi.PodMeta]schedulingapi.ResNumaSets{
+				podMeta: resSets("0-1"),
+			}
+
+			if tt.podExists {
+				_, err := sc.kubeClient.CoreV1().Pods(pod.Namespace).Create(
+					context.TODO(), pod, metav1.CreateOptions{})
+				require.NoError(t, err)
+			}
+
+			require.NoError(t, sc.syncTask(task))
+
+			_, kept := sc.Nodes["n1"].UnassignedNumaPods[podMeta]
+			assert.Equal(t, tt.wantKept, kept)
+		})
 	}
 }
 

@@ -39,7 +39,10 @@ func newNumatopoInfoForTest(podAllocations []nodeinfov1alpha1.PodAllocation) *Nu
 
 func TestCheckNumaPodAssigned(t *testing.T) {
 	uidPodAlloc := nodeinfov1alpha1.PodAllocation{UID: "uid-1", Name: "p1", Namespace: "ns1"}
-	namePodAlloc := nodeinfov1alpha1.PodAllocation{UID: "uid-2", Name: "p2", Namespace: "ns2"}
+	// Records without a UID come from the PodResources API and are matched by namespace/name.
+	namedOnlyPodAlloc := nodeinfov1alpha1.PodAllocation{Name: "p2", Namespace: "ns2"}
+	// A lingering record of a deleted pod that has the same namespace/name as a recreated pod.
+	stalePodAlloc := nodeinfov1alpha1.PodAllocation{UID: "uid-old", Name: "p3", Namespace: "ns3"}
 
 	tests := []struct {
 		name    string
@@ -49,25 +52,31 @@ func TestCheckNumaPodAssigned(t *testing.T) {
 	}{
 		{
 			name:    "match by UID",
-			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namePodAlloc}),
+			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namedOnlyPodAlloc}),
 			podMeta: PodMeta{UID: "uid-1", Name: "other", Namespace: "other"},
 			want:    true,
 		},
 		{
-			name:    "match by namespace+name only",
-			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namePodAlloc}),
+			name:    "match by namespace+name when the record has no UID",
+			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namedOnlyPodAlloc}),
 			podMeta: PodMeta{UID: "uid-unknown", Name: "p2", Namespace: "ns2"},
 			want:    true,
 		},
 		{
+			name:    "stale record with the same name but a different UID does not match",
+			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{stalePodAlloc}),
+			podMeta: PodMeta{UID: "uid-new", Name: "p3", Namespace: "ns3"},
+			want:    false,
+		},
+		{
 			name:    "no match at all",
-			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namePodAlloc}),
-			podMeta: PodMeta{UID: "uid-x", Name: "p3", Namespace: "ns3"},
+			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namedOnlyPodAlloc}),
+			podMeta: PodMeta{UID: "uid-x", Name: "p4", Namespace: "ns4"},
 			want:    false,
 		},
 		{
 			name:    "namespace+name partial mismatch",
-			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namePodAlloc}),
+			info:    newNumatopoInfoForTest([]nodeinfov1alpha1.PodAllocation{uidPodAlloc, namedOnlyPodAlloc}),
 			podMeta: PodMeta{UID: "uid-x", Name: "p2", Namespace: "ns3"},
 			want:    false,
 		},

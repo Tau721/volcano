@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -203,6 +204,40 @@ func TestSchedulerCache_Bind_NodeWithSufficientResources(t *testing.T) {
 	if err != nil {
 		t.Errorf("failed to bind pod to node: %v", err)
 	}
+}
+
+// A reservation in the bind context is recorded by AddBindTask before the bind is queued.
+func TestAddBindTask_ReservesNumaResources(t *testing.T) {
+	owner := buildOwnerReference("j1")
+
+	sc := &SchedulerCache{
+		Jobs:            make(map[api.JobID]*api.JobInfo),
+		Nodes:           make(map[string]*api.NodeInfo),
+		BindFlowChannel: make(chan *BindContext, 5000),
+	}
+
+	pod := buildPod("c1", "p1", "", v1.PodPending, api.BuildResourceList("1000m", "1G"),
+		[]metav1.OwnerReference{owner}, make(map[string]string))
+	node := buildNode("n1", api.BuildResourceList("2000m", "10G", []api.ScalarResource{{Name: "pods", Value: "10"}}...))
+	sc.AddOrUpdateNode(node)
+
+	task := api.NewTaskInfo(pod)
+	task.Job = "j1"
+	require.NoError(t, sc.addTask(task))
+	task.NodeName = "n1"
+
+	bindContext := &BindContext{
+		TaskInfo: task,
+		Extensions: map[string]BindContextExtension{
+			"numa-aware": fakeNumaReservation{resSets: resSets("0-1")},
+		},
+	}
+	require.NoError(t, sc.AddBindTask(bindContext))
+
+	podMeta := api.PodMeta{UID: pod.UID, Name: pod.Name, Namespace: pod.Namespace}
+	resSets, ok := sc.Nodes["n1"].UnassignedNumaPods[podMeta]
+	require.True(t, ok, "reservation should be written before the bind is queued")
+	assert.True(t, resSets["cpu"].Equals(mustParseCPUSet("0-1")))
 }
 
 func TestDefaultBinderBindUsesTaskPodAnnotations(t *testing.T) {
@@ -839,118 +874,127 @@ func TestWaitForHandlerSync_InitialEventAsyncHandlerTracker_CompletesAfterDone(t
 	assert.GreaterOrEqual(t, elapsed, 100*time.Millisecond, "WaitForHandlerSync should wait until Done is called")
 }
 
-func TestAddUnassignedNumaPods_NodeMissingSkipsWithoutCrash(t *testing.T) {
-	sc := newCacheWithNodes("n1")
+// fakeNumaReservation implements BindNumaReservation.
+type fakeNumaReservation struct {
+	resSets api.ResNumaSets
+}
 
-	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {
-			"ghost-node": resSets("0-1"),
-			"n1":         resSets("0-1"),
+func (f fakeNumaReservation) ReservedNumaSets() api.ResNumaSets { return f.resSets }
+
+func TestReserveBindResources(t *testing.T) {
+	sc := newCacheWithNodes("n1")
+	pod := buildPod("ns1", "p1", "n1", v1.PodPending, nil, nil, nil)
+	task := api.NewTaskInfo(pod)
+	node := sc.Nodes["n1"]
+	podMeta := api.PodMeta{UID: pod.UID, Name: pod.Name, Namespace: pod.Namespace}
+
+	tests := []struct {
+		name       string
+		task       *api.TaskInfo
+		extensions map[string]BindContextExtension
+		wantSets   api.ResNumaSets
+	}{
+		{
+			name: "reservation extension is written",
+			task: task,
+			extensions: map[string]BindContextExtension{
+				"numa-aware": fakeNumaReservation{resSets: resSets("0-1")},
+			},
+			wantSets: resSets("0-1"),
+		},
+		{
+			name:       "no extension writes nothing",
+			task:       task,
+			extensions: map[string]BindContextExtension{},
+		},
+		{
+			name:       "unrelated extension is ignored",
+			task:       task,
+			extensions: map[string]BindContextExtension{"other": struct{}{}},
+		},
+		{
+			name: "empty reservation is ignored",
+			task: task,
+			extensions: map[string]BindContextExtension{
+				"numa-aware": fakeNumaReservation{},
+			},
+		},
+		{
+			name: "task without pod is ignored",
+			task: &api.TaskInfo{},
+			extensions: map[string]BindContextExtension{
+				"numa-aware": fakeNumaReservation{resSets: resSets("0-1")},
+			},
 		},
 	}
 
-	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
-		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node.UnassignedNumaPods = nil
+			sc.reserveBindNumaResources(node, tt.task, &BindContext{
+				TaskInfo:   tt.task,
+				Extensions: tt.extensions,
+			})
 
-	n1 := sc.Nodes["n1"]
-	if len(n1.UnassignedNumaPods) != 1 {
-		t.Fatalf("expected exactly one entry on n1, got %v", n1.UnassignedNumaPods)
-	}
-	got, ok := n1.UnassignedNumaPods[api.PodMeta{UID: "uid-1", Name: "p1", Namespace: "ns1"}]
-	if !ok {
-		t.Fatalf("expected entry for p1 on n1")
-	}
-	if !got["cpu"].Equals(mustParseCPUSet("0-1")) {
-		t.Errorf("CPUSet on n1 mismatch: got %v", got["cpu"])
+			if tt.wantSets == nil {
+				assert.Empty(t, node.UnassignedNumaPods)
+				return
+			}
+			got, ok := node.UnassignedNumaPods[podMeta]
+			require.True(t, ok)
+			assert.True(t, got["cpu"].Equals(tt.wantSets["cpu"]), "got %v, want %v", got["cpu"], tt.wantSets["cpu"])
+		})
 	}
 }
 
-func TestAddUnassignedNumaPods_LazilyInitializesMap(t *testing.T) {
+func TestReserveBindResources_OverwritesExistingEntry(t *testing.T) {
 	sc := newCacheWithNodes("n1")
-	if sc.Nodes["n1"].UnassignedNumaPods != nil {
-		t.Fatalf("precondition: UnassignedNumaPods should start nil")
-	}
+	pod := buildPod("ns1", "p1", "n1", v1.PodPending, nil, nil, nil)
+	task := api.NewTaskInfo(pod)
+	node := sc.Nodes["n1"]
+	podMeta := api.PodMeta{UID: pod.UID, Name: pod.Name, Namespace: pod.Namespace}
 
-	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
+	ctx := &BindContext{
+		TaskInfo: task,
+		Extensions: map[string]BindContextExtension{
+			"numa-aware": fakeNumaReservation{resSets: resSets("0-1")},
+		},
 	}
+	sc.reserveBindNumaResources(node, task, ctx)
 
-	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
-		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
-	}
+	ctx.Extensions["numa-aware"] = fakeNumaReservation{resSets: resSets("4-5")}
+	sc.reserveBindNumaResources(node, task, ctx)
 
-	if sc.Nodes["n1"].UnassignedNumaPods == nil {
-		t.Fatalf("expected UnassignedNumaPods to be initialized")
-	}
+	require.Len(t, node.UnassignedNumaPods, 1)
+	assert.True(t, node.UnassignedNumaPods[podMeta]["cpu"].Equals(mustParseCPUSet("4-5")))
 }
 
-func TestAddUnassignedNumaPods_MultiplePodsAccumulateOnSameNode(t *testing.T) {
+func TestReserveBindResources_AccumulatesPodsOnSameNode(t *testing.T) {
 	sc := newCacheWithNodes("n1")
+	node := sc.Nodes["n1"]
 
-	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
-		{UID: "uid-2", Name: "p2", Namespace: "ns1"}: {"n1": resSets("2-3")},
+	pods := []*v1.Pod{
+		buildPod("ns1", "p1", "n1", v1.PodPending, nil, nil, nil),
+		buildPod("ns1", "p2", "n1", v1.PodPending, nil, nil, nil),
 	}
-
-	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
-		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
-	}
-
-	unassigned := sc.Nodes["n1"].UnassignedNumaPods
-	if len(unassigned) != 2 {
-		t.Fatalf("expected 2 unassigned pods on n1, got %d", len(unassigned))
-	}
-	for _, pm := range []api.PodMeta{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"},
-		{UID: "uid-2", Name: "p2", Namespace: "ns1"},
-	} {
-		if _, ok := unassigned[pm]; !ok {
-			t.Errorf("missing entry for %v on n1", pm)
+	for i, pod := range pods {
+		task := api.NewTaskInfo(pod)
+		ctx := &BindContext{
+			TaskInfo: task,
+			Extensions: map[string]BindContextExtension{
+				"numa-aware": fakeNumaReservation{resSets: resSets(fmt.Sprintf("%d-%d", i*2, i*2+1))},
+			},
 		}
-	}
-}
-
-func TestAddUnassignedNumaPods_RewritesExistingEntryOnResend(t *testing.T) {
-	sc := newCacheWithNodes("n1")
-
-	first := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("0-1")},
-	}
-	if err := sc.AddUnassignedNumaPods(first); err != nil {
-		t.Fatalf("first call: %v", err)
+		sc.reserveBindNumaResources(node, task, ctx)
 	}
 
-	// Same pod resubmitted with a different decision — must overwrite, not merge.
-	second := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"n1": resSets("4-5")},
+	require.Len(t, node.UnassignedNumaPods, len(pods))
+	for i, pod := range pods {
+		podMeta := api.PodMeta{UID: pod.UID, Name: pod.Name, Namespace: pod.Namespace}
+		got, ok := node.UnassignedNumaPods[podMeta]
+		require.True(t, ok, "missing reservation for %s", pod.Name)
+		assert.True(t, got["cpu"].Equals(mustParseCPUSet(fmt.Sprintf("%d-%d", i*2, i*2+1))))
 	}
-	if err := sc.AddUnassignedNumaPods(second); err != nil {
-		t.Fatalf("second call: %v", err)
-	}
-
-	if len(sc.Nodes["n1"].UnassignedNumaPods) != 1 {
-		t.Fatalf("expected 1 entry after resend, got %v", sc.Nodes["n1"].UnassignedNumaPods)
-	}
-	got := sc.Nodes["n1"].UnassignedNumaPods[api.PodMeta{UID: "uid-1", Name: "p1", Namespace: "ns1"}]["cpu"]
-	if !got.Equals(mustParseCPUSet("4-5")) {
-		t.Errorf("expected overwrite to 4-5, got %v", got)
-	}
-}
-
-func TestAddUnassignedNumaPods_NilNodeValueSkips(t *testing.T) {
-	// Edge case: explicitly stored nil node should be skipped, mirroring the guard.
-	sc := newCacheWithNodes()
-	sc.Nodes["nil-node"] = nil
-
-	allocated := map[api.PodMeta]map[string]api.ResNumaSets{
-		{UID: "uid-1", Name: "p1", Namespace: "ns1"}: {"nil-node": resSets("0-1")},
-	}
-
-	if err := sc.AddUnassignedNumaPods(allocated); err != nil {
-		t.Fatalf("AddUnassignedNumaPods returned error: %v", err)
-	}
-	// No panic is the success condition.
 }
 
 // TestUpdateJobInfo_PropagatesNominatedHyperNode locks in the cache writeback

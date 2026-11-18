@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/component-helpers/storage/ephemeral"
@@ -335,6 +336,8 @@ func (sc *SchedulerCache) syncTask(oldTask *schedulingapi.TaskInfo) error {
 
 	sc.Mutex.Lock()
 	defer sc.Mutex.Unlock()
+	// Bind failures land here; keep the entry only if the pod is actually on that node.
+	sc.reconcileUnassignedNumaPod(newPod)
 	return sc.updateTask(oldTask, newTask)
 }
 
@@ -397,15 +400,45 @@ func (sc *SchedulerCache) updatePod(oldPod, newPod *v1.Pod) error {
 	return nil
 }
 
+// clearUnassignedNumaTask releases the pre-occupation recorded for the given task.
+// Assumes that lock is already acquired.
 func (sc *SchedulerCache) clearUnassignedNumaTask(ti *schedulingapi.TaskInfo) {
-	if len(ti.NodeName) != 0 {
-		node := sc.Nodes[ti.NodeName]
-		if node != nil {
-			podMeta := schedulingapi.PodMeta{UID: ti.Pod.UID, Name: ti.Pod.Name, Namespace: ti.Pod.Namespace}
-			if resSets, ok := node.UnassignedNumaPods[podMeta]; ok {
-				delete(node.UnassignedNumaPods, podMeta)
-				klog.V(3).Infof("deleted unassigned pod %v with resourceSet %v on node %s", podMeta, resSets, node.Name)
+	if ti.Pod == nil {
+		return
+	}
+	sc.clearUnassignedNumaPodByUID(ti.Pod.UID)
+}
+
+// clearUnassignedNumaPodByUID removes the pod's entries from every node without relying on
+// the volatile TaskInfo.NodeName.
+// Assumes that lock is already acquired.
+func (sc *SchedulerCache) clearUnassignedNumaPodByUID(uid k8stypes.UID) {
+	for _, node := range sc.Nodes {
+		for podMeta, resSets := range node.UnassignedNumaPods {
+			if podMeta.UID != uid {
+				continue
 			}
+			delete(node.UnassignedNumaPods, podMeta)
+			klog.V(3).Infof("deleted unassigned pod %v with resourceSet %v on node %s", podMeta, resSets, node.Name)
+		}
+	}
+}
+
+// reconcileUnassignedNumaPod keeps only the entry on the node the pod reports, so a failed
+// bind releases a reservation made for the wrong node.
+// Assumes that lock is already acquired.
+func (sc *SchedulerCache) reconcileUnassignedNumaPod(pod *v1.Pod) {
+	if pod == nil {
+		return
+	}
+	for _, node := range sc.Nodes {
+		for podMeta, resSets := range node.UnassignedNumaPods {
+			if podMeta.UID != pod.UID || node.Name == pod.Spec.NodeName {
+				continue
+			}
+			delete(node.UnassignedNumaPods, podMeta)
+			klog.V(3).Infof("released unassigned pod %v with resourceSet %v on node %s, pod is on node %q",
+				podMeta, resSets, node.Name, pod.Spec.NodeName)
 		}
 	}
 }
@@ -441,16 +474,10 @@ func (sc *SchedulerCache) deleteTask(ti *schedulingapi.TaskInfo) error {
 }
 
 func (sc *SchedulerCache) clearUnassignedNumaPod(pod *v1.Pod) {
-	pi := schedulingapi.NewTaskInfo(pod)
-
-	task := pi
-	if job, found := sc.Jobs[pi.Job]; found {
-		if t, found := job.Tasks[pi.UID]; found {
-			task = t
-		}
+	if pod == nil {
+		return
 	}
-
-	sc.clearUnassignedNumaTask(task)
+	sc.clearUnassignedNumaPodByUID(pod.UID)
 }
 
 // Assumes that lock is already acquired.

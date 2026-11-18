@@ -27,11 +27,13 @@ import (
 	v1qos "k8s.io/kubernetes/pkg/apis/core/v1/helper/qos"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
 	"k8s.io/kubernetes/pkg/kubelet/cm/topologymanager/bitmask"
+	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/utils/cpuset"
 
 	nodeinfov1alpha1 "volcano.sh/apis/pkg/apis/nodeinfo/v1alpha1"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
+	"volcano.sh/volcano/pkg/scheduler/cache"
 	"volcano.sh/volcano/pkg/scheduler/framework"
 	"volcano.sh/volcano/pkg/scheduler/plugins/numaaware/policy"
 	"volcano.sh/volcano/pkg/scheduler/plugins/numaaware/provider/cpumanager"
@@ -52,8 +54,6 @@ type numaPlugin struct {
 	hintProviders   []policy.HintProvider
 	assignRes       map[api.TaskID]map[string]api.ResNumaSets // map[taskUID]map[nodename][resourceName]cpuset.CPUSet
 	nodeResSets     map[string]api.ResNumaSets                // map[nodename][resourceName]cpuset.CPUSet
-	taskBindNodeMap map[api.TaskID]string
-	taskPodMetaMap  map[api.TaskID]api.PodMeta
 }
 
 // New function returns prioritize plugin object.
@@ -61,8 +61,6 @@ func New(arguments framework.Arguments) framework.Plugin {
 	plugin := &numaPlugin{
 		pluginArguments: arguments,
 		assignRes:       make(map[api.TaskID]map[string]api.ResNumaSets),
-		taskBindNodeMap: make(map[api.TaskID]string),
-		taskPodMetaMap:  make(map[api.TaskID]api.PodMeta),
 	}
 
 	plugin.hintProviders = append(plugin.hintProviders, cpumanager.NewProvider())
@@ -97,8 +95,6 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 
 			node.Allocate(resNumaSets)
-			pp.taskBindNodeMap[event.Task.UID] = event.Task.NodeName
-			pp.taskPodMetaMap[event.Task.UID] = api.PodMeta{UID: event.Task.Pod.UID, Name: event.Task.Pod.Name, Namespace: event.Task.Pod.Namespace}
 		},
 		DeallocateFunc: func(event *framework.Event) {
 			node := pp.nodeResSets[event.Task.NodeName]
@@ -112,8 +108,6 @@ func (pp *numaPlugin) OnSessionOpen(ssn *framework.Session) {
 			}
 
 			node.Release(resNumaSets)
-			delete(pp.taskBindNodeMap, event.Task.UID)
-			delete(pp.taskPodMetaMap, event.Task.UID)
 		},
 	})
 
@@ -260,33 +254,30 @@ func getNumaNodeCntForCPUID(cpus cpuset.CPUSet, cpuDetails topology.CPUDetails) 
 	return mask.Count()
 }
 
-func (pp *numaPlugin) OnSessionClose(ssn *framework.Session) {
-	if len(pp.taskBindNodeMap) == 0 {
+// OnSessionClose is a no-op: reservations are written from AddBindTask, not at session close.
+func (pp *numaPlugin) OnSessionClose(ssn *framework.Session) {}
+
+// SetupBindContextExtension carries the NUMA decision to the cache, which consumes it in AddBindTask.
+func (pp *numaPlugin) SetupBindContextExtension(_ *k8sframework.CycleState, bindCtx *cache.BindContext) {
+	task := bindCtx.TaskInfo
+	if task == nil || task.NodeName == "" {
 		return
 	}
-
-	allocatedSets := make(map[api.PodMeta]map[string]api.ResNumaSets)
-	for taskID, nodeName := range pp.taskBindNodeMap {
-		var resSets api.ResNumaSets
-		var existed bool
-
-		if _, existed = pp.assignRes[taskID]; !existed {
-			klog.Warningf("plugin %s failed to find assignment decision for task id %s, skip adding it to the unassigned numa pods of node %s", PluginName, taskID, nodeName)
-			continue
-		}
-
-		if resSets, existed = pp.assignRes[taskID][nodeName]; !existed {
-			klog.Warningf("plugin %s failed to find assignment decision for task id %s, skip adding it to the unassigned numa pods of node %s", PluginName, taskID, nodeName)
-			continue
-		}
-
-		if podMeta, ok := pp.taskPodMetaMap[taskID]; ok {
-			allocatedSets[podMeta] = map[string]api.ResNumaSets{nodeName: resSets}
-		} else {
-			klog.Warningf("plugin %s failed to find pod meta for task id %s, skip adding it to the unassigned numa pods of node %s", PluginName, taskID, nodeName)
-		}
+	pp.Lock()
+	defer pp.Unlock()
+	resSets, ok := pp.assignRes[task.UID][task.NodeName]
+	if !ok {
+		return
 	}
+	// Copy: the cache keeps the reservation beyond this session.
+	bindCtx.Extensions[pp.Name()] = &numaReservation{resSets: resSets.Clone()}
+}
 
-	klog.V(3).Infof("plugin %s submits assignment decisions: %v", PluginName, allocatedSets)
-	ssn.AddUnassignedNumaPods(allocatedSets)
+// numaReservation implements cache.BindNumaReservation.
+type numaReservation struct {
+	resSets api.ResNumaSets
+}
+
+func (r *numaReservation) ReservedNumaSets() api.ResNumaSets {
+	return r.resSets
 }

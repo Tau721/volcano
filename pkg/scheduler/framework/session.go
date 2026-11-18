@@ -961,11 +961,6 @@ func (ssn *Session) AddEventHandler(eh *EventHandler) {
 	ssn.eventHandlers = append(ssn.eventHandlers, eh)
 }
 
-// AddUnassignedNumaPods add the pods that are newly-scheduled but has not been allocated resources to nodes' UnassignedNumaPods
-func (ssn *Session) AddUnassignedNumaPods(allocatedSets map[api.PodMeta]map[string]api.ResNumaSets) {
-	ssn.cache.AddUnassignedNumaPods(allocatedSets)
-}
-
 // KubeClient returns the kubernetes client
 func (ssn *Session) KubeClient() kubernetes.Interface {
 	return ssn.kubeClient
