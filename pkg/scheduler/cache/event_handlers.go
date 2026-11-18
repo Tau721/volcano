@@ -336,7 +336,8 @@ func (sc *SchedulerCache) syncTask(oldTask *schedulingapi.TaskInfo) error {
 
 	sc.Mutex.Lock()
 	defer sc.Mutex.Unlock()
-	// Bind failures land here; keep the entry only if the pod is actually on that node.
+	// Bind failures land here. A bound-elsewhere pod releases this node's entry; an unbound
+	// pod is left to the Snapshot prune, which runs after the task becomes Pending.
 	sc.reconcileUnassignedNumaPod(newPod)
 	return sc.updateTask(oldTask, newTask)
 }
@@ -424,11 +425,12 @@ func (sc *SchedulerCache) clearUnassignedNumaPodByUID(uid k8stypes.UID) {
 	}
 }
 
-// reconcileUnassignedNumaPod keeps only the entry on the node the pod reports, so a failed
-// bind releases a reservation made for the wrong node.
+// reconcileUnassignedNumaPod drops entries for this pod from nodes other than the one the pod
+// reports. An unbound pod is left alone: a failed bind can still commit after our read, so its
+// entries are released by the Snapshot prune once the cache task becomes Pending.
 // Assumes that lock is already acquired.
 func (sc *SchedulerCache) reconcileUnassignedNumaPod(pod *v1.Pod) {
-	if pod == nil {
+	if pod == nil || pod.Spec.NodeName == "" {
 		return
 	}
 	for _, node := range sc.Nodes {

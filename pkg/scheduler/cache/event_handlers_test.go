@@ -2241,8 +2241,10 @@ func TestReconcileUnassignedNumaPod(t *testing.T) {
 		wantOtherOn bool
 	}{
 		{
-			name:        "unbound pod releases entries on every node",
+			name:        "unbound pod keeps entries until the snapshot prune",
 			podNode:     "",
+			wantKeptN1:  true,
+			wantKeptN2:  true,
 			wantOtherOn: true,
 		},
 		{
@@ -2395,24 +2397,28 @@ func TestPruneUnassignedNumaPods(t *testing.T) {
 // resyncs may observe the pod bound elsewhere.
 func TestSyncTask_ReconcilesUnassignedNumaPods(t *testing.T) {
 	tests := []struct {
-		name      string
-		podExists bool
-		podNode   string
-		wantKept  bool
+		name                  string
+		podExists             bool
+		podNode               string
+		wantKept              bool
+		wantKeptAfterSnapshot bool
 	}{
 		{
 			name:      "pod absent from apiserver releases the reservation",
 			podExists: false,
 		},
 		{
-			name:      "unbound pod releases the reservation",
-			podExists: true,
+			name:                  "unbound pod keeps the reservation until the snapshot prune",
+			podExists:             true,
+			wantKept:              true,
+			wantKeptAfterSnapshot: false,
 		},
 		{
-			name:      "pod bound to the reserved node keeps it",
-			podExists: true,
-			podNode:   "n1",
-			wantKept:  true,
+			name:                  "pod bound to the reserved node keeps it",
+			podExists:             true,
+			podNode:               "n1",
+			wantKept:              true,
+			wantKeptAfterSnapshot: true,
 		},
 		{
 			name:      "pod bound to another node releases the reservation",
@@ -2432,8 +2438,8 @@ func TestSyncTask_ReconcilesUnassignedNumaPods(t *testing.T) {
 
 			pod := buildPod("c1", "p1", tt.podNode, v1.PodPending,
 				api.BuildResourceList("1000m", "1G"), nil, map[string]string{})
+			pod.Annotations = map[string]string{schedulingv1.KubeGroupNameAnnotationKey: "j1"}
 			task := api.NewTaskInfo(pod)
-			task.Job = "j1"
 			require.NoError(t, sc.addTask(task))
 
 			podMeta := podMetaFrom(pod)
@@ -2451,6 +2457,13 @@ func TestSyncTask_ReconcilesUnassignedNumaPods(t *testing.T) {
 
 			_, kept := sc.Nodes["n1"].UnassignedNumaPods[podMeta]
 			assert.Equal(t, tt.wantKept, kept)
+
+			if tt.wantKept {
+				sc.HyperNodesInfo = api.NewHyperNodesInfo(nil)
+				sc.Snapshot()
+				_, kept = sc.Nodes["n1"].UnassignedNumaPods[podMeta]
+				assert.Equal(t, tt.wantKeptAfterSnapshot, kept)
+			}
 		})
 	}
 }
